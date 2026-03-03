@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassAccuracy
 from tqdm import tqdm
 
-from data import CUBDataset
+from data import CUBDataset, TinyImageNetDataset
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded
 from modeling.pnp import PCA, PNP, PNPCriterion
 from modeling.utils import print_parameters
