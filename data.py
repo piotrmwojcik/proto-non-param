@@ -57,17 +57,36 @@ class TinyImageNetDataset(Dataset):
 
         if split == "train":
             for wnid in wnids:
-                img_dir = os.path.join(train_dir, wnid, "images")
-                if not os.path.isdir(img_dir):
-                    continue
                 label = self.class_to_idx[wnid]
+
+                # Support both:
+                # 1) train/<wnid>/images/*.JPEG  (official)
+                # 2) train/<wnid>/*.JPEG         (some repacks)
+                candidates = [
+                    os.path.join(train_dir, wnid, "images"),
+                    os.path.join(train_dir, wnid),
+                ]
+                img_dir = next((d for d in candidates if os.path.isdir(d)), None)
+                if img_dir is None:
+                    continue
+
                 for fn in os.listdir(img_dir):
-                    if fn.lower().endswith(".jpeg"):
+                    if fn.lower().endswith((".jpeg", ".jpg", ".png")):
                         self.samples.append((os.path.join(img_dir, fn), label))
 
         elif split == "val":
             ann_path = os.path.join(val_dir, "val_annotations.txt")
-            img_dir = os.path.join(val_dir, "images")
+
+            # Support both:
+            # 1) val/images/*.JPEG  (official)
+            # 2) val/*.JPEG         (some repacks)
+            img_dir_candidates = [
+                os.path.join(val_dir, "images"),
+                val_dir,
+            ]
+            img_dir = next((d for d in img_dir_candidates if os.path.isdir(d)), None)
+            if img_dir is None:
+                raise FileNotFoundError(f"Could not find val image directory in: {img_dir_candidates}")
 
             # val_annotations.txt format:
             # <image_filename>\t<wnid>\t<x0>\t<y0>\t<x1>\t<y1>
@@ -76,13 +95,26 @@ class TinyImageNetDataset(Dataset):
                     parts = line.strip().split("\t")
                     if len(parts) < 2:
                         continue
+
                     img_name, wnid = parts[0], parts[1]
                     if wnid not in self.class_to_idx:
                         continue
+
                     label = self.class_to_idx[wnid]
                     img_path = os.path.join(img_dir, img_name)
+
+                    # Some packs may have different extension casing; try fallback search.
+                    if not os.path.isfile(img_path):
+                        base, _ = os.path.splitext(img_name)
+                        for cand in (base + ".JPEG", base + ".jpeg", base + ".jpg", base + ".png"):
+                            cand_path = os.path.join(img_dir, cand)
+                            if os.path.isfile(cand_path):
+                                img_path = cand_path
+                                break
+
                     if os.path.isfile(img_path):
                         self.samples.append((img_path, label))
+
         else:
             raise ValueError(f"Unknown split: {split}. Use 'train' or 'val'.")
 
