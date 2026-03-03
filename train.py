@@ -6,6 +6,9 @@ from logging import Logger
 from pathlib import Path
 import argparse
 import wandb
+import numpy as np
+import torchvision
+import torch.nn.functional as F
 
 import lightning as L
 import torch
@@ -19,6 +22,96 @@ from data import CUBDataset, TinyImageNetDataset
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded
 from modeling.pnp import PCA, PNP, PNPCriterion
 from modeling.utils import print_parameters
+
+
+def denorm_to_uint8(x: torch.Tensor,
+                    mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225)) -> np.ndarray:
+    """
+    x: (3,H,W) normalized tensor
+    returns: HxWx3 uint8
+    """
+    x = x.detach().cpu()
+    mean_t = torch.tensor(mean)[:, None, None]
+    std_t = torch.tensor(std)[:, None, None]
+    x = (x * std_t + mean_t).clamp(0, 1)
+    x = (x * 255).byte().permute(1, 2, 0).numpy()
+    return x
+
+
+def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45) -> np.ndarray:
+    """
+    img_uint8: HxWx3 uint8
+    hm: (H,W) tensor, any range
+    returns: HxWx3 uint8
+    """
+    hm = hm.detach().cpu()
+    hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+    hm = hm.numpy()  # HxW in [0,1]
+
+    # simple colormap (no cv2): red/yellow-ish
+    r = hm
+    g = np.clip(hm * 0.9 + 0.1, 0, 1)
+    b = np.clip(1.0 - hm * 0.8, 0, 1)
+    hm_rgb = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
+
+    out = (alpha * hm_rgb.astype(np.float32) + (1 - alpha) * img_uint8.astype(np.float32))
+    return out.clip(0, 255).astype(np.uint8)
+
+
+@torch.no_grad()
+def wandb_log_all_proto_heatmaps_per_class(
+    model: nn.Module,
+    images: torch.Tensor,
+    *,
+    step: int,
+    mean=(0.485, 0.456, 0.406),
+    std=(0.229, 0.224, 0.225),
+    max_items: int = 4,
+    log_key: str = "eval/proto_heatmaps",
+):
+    """
+    Logs, for each selected image:
+      - raw image
+      - heatmap overlays for ALL K prototypes of the predicted class
+    """
+    model.eval()
+
+    outputs = model(images)  # no labels needed for inference
+    logits = outputs["class_logits"]
+    preds = logits.argmax(dim=1)  # [B]
+
+    ppl = outputs["patch_prototype_logits"]  # [B, N, C, K]
+    B, N, C, K = ppl.shape
+    H = W = int(np.sqrt(N))
+
+    # reshape to [B, C, K, H, W]
+    ppl_maps = ppl.view(B, H, W, C, K).permute(0, 3, 4, 1, 2)  # [B,C,K,H,W]
+
+    # take maps for predicted class: [B, K, H, W]
+    pred_maps = ppl_maps[torch.arange(B, device=images.device), preds]  # [B,K,H,W]
+
+    # upsample maps to image size
+    _, _, Hi, Wi = images.shape
+    pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)  # [B,K,Hi,Wi]
+
+    B_log = min(B, max_items)
+    panels = []
+
+    for b in range(B_log):
+        img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
+        pred_cls = int(preds[b].item())
+
+        # first: raw image
+        panels.append(wandb.Image(img_uint8, caption=f"raw | pred={pred_cls}"))
+
+        # then: all prototypes for that class
+        for k in range(K):
+            hm = pred_maps_up[b, k]  # [Hi,Wi]
+            overlay = overlay_heatmap(img_uint8, hm, alpha=0.45)
+            panels.append(wandb.Image(overlay, caption=f"pred={pred_cls} | proto={k}"))
+
+    wandb.log({log_key: panels}, step=step)
 
 
 def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader, epoch: int,
@@ -67,20 +160,40 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
 
 @torch.inference_mode()
 def test(model: nn.Module, dataloader: DataLoader, epoch: int,
-         logger: Logger, device: torch.device):
+         logger: Logger, device: torch.device, log_every: int = 20):
+
     model.eval()
-    mca_test = MulticlassAccuracy(num_classes=len(dataloader.dataset.classes), average="micro").to(device)
+    mca_test = MulticlassAccuracy(
+        num_classes=len(dataloader.dataset.classes),
+        average="micro"
+    ).to(device)
 
     for i, batch in enumerate(tqdm(dataloader)):
         batch = tuple(item.to(device) for item in batch)
         images, labels = batch[:2]
 
         outputs = model(images)
-
         mca_test(outputs["class_logits"], labels)
+
+        # log more frequently
+        if i % log_every == 0:
+            step = epoch * len(dataloader) + i
+
+            wandb_log_all_proto_heatmaps_per_class(
+                model=model,
+                images=images[:4],
+                step=step,
+                max_items=4,
+                log_key="eval/proto_heatmaps"
+            )
 
     epoch_acc_test = mca_test.compute().item()
     logger.info(f"EPOCH {epoch} test acc: {epoch_acc_test:.4f}")
+
+    wandb.log({
+        "epoch": epoch,
+        "test/accuracy": epoch_acc_test
+    }, step=epoch * len(dataloader))
 
     return epoch_acc_test
 
