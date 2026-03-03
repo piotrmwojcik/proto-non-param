@@ -12,6 +12,92 @@ from torchvision.datasets import ImageFolder
 from torchvision.transforms.functional import to_tensor
 
 
+import os
+from PIL import Image
+from torch.utils.data import Dataset
+from typing import Callable, Optional, Tuple, List, Dict
+
+
+class TinyImageNetDataset(Dataset):
+    """
+    Tiny ImageNet dataset loader.
+
+    Expected structure:
+      root/
+        train/
+          <wnid>/
+            images/*.JPEG
+        val/
+          images/*.JPEG
+          val_annotations.txt
+
+    Returns: image, label_id, index
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str = "train",  # "train" or "val"
+        transforms: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+    ):
+        self.root = root
+        self.split = split
+        self.transform = transforms
+        self.target_transform = target_transform
+
+        train_dir = os.path.join(root, "train")
+        val_dir = os.path.join(root, "val")
+
+        # Build wnid -> class_id mapping from train folder names
+        wnids = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
+        self.class_to_idx: Dict[str, int] = {wnid: i for i, wnid in enumerate(wnids)}
+
+        self.samples: List[Tuple[str, int]] = []
+
+        if split == "train":
+            for wnid in wnids:
+                img_dir = os.path.join(train_dir, wnid, "images")
+                if not os.path.isdir(img_dir):
+                    continue
+                label = self.class_to_idx[wnid]
+                for fn in os.listdir(img_dir):
+                    if fn.lower().endswith(".jpeg"):
+                        self.samples.append((os.path.join(img_dir, fn), label))
+
+        elif split == "val":
+            ann_path = os.path.join(val_dir, "val_annotations.txt")
+            img_dir = os.path.join(val_dir, "images")
+
+            # val_annotations.txt format:
+            # <image_filename>\t<wnid>\t<x0>\t<y0>\t<x1>\t<y1>
+            with open(ann_path, "r") as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) < 2:
+                        continue
+                    img_name, wnid = parts[0], parts[1]
+                    if wnid not in self.class_to_idx:
+                        continue
+                    label = self.class_to_idx[wnid]
+                    img_path = os.path.join(img_dir, img_name)
+                    if os.path.isfile(img_path):
+                        self.samples.append((img_path, label))
+        else:
+            raise ValueError(f"Unknown split: {split}. Use 'train' or 'val'.")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        im_path, label = self.samples[index]
+        img = Image.open(im_path).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            label = self.target_transform(label)
+        return img, label, index
+
 class CUBDataset(ImageFolder):
     def __init__(self,
                  root: str,

@@ -140,6 +140,25 @@ def main():
         dataset_test = CUBDataset((dataset_dir / "test_cropped").as_posix(),
                                    transforms=transforms)
         dataloader_test = DataLoader(dataset=dataset_test, batch_size=128, num_workers=8, shuffle=True)
+    elif args.dataset == "tiny_imagenet":
+        logger.info("Train on Tiny ImageNet")
+        n_classes = 200
+        dataset_dir = Path(args.data_root) / "tiny-imagenet-200"  # adjust if your folder name differs
+
+        dataset_train = TinyImageNetDataset(
+            root=dataset_dir.as_posix(),
+            split="train",
+            transforms=transforms,
+        )
+        dataloader_train = DataLoader(dataset=dataset_train, batch_size=128, num_workers=8, shuffle=True)
+
+        dataset_test = TinyImageNetDataset(
+            root=dataset_dir.as_posix(),
+            split="val",  # TinyImageNet uses val as the "test" split
+            transforms=transforms,
+        )
+        dataloader_test = DataLoader(dataset=dataset_test, batch_size=128, num_workers=8, shuffle=False)
+
     else:
         raise NotImplementedError(f"Dataset {args.dataset} is not implemented")
 
