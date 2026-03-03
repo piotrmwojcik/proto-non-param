@@ -144,9 +144,10 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
 
             log_dict["train/total_loss"] = loss.item()
             log_dict["epoch"] = epoch
-            log_dict["step"] = epoch * len(dataloader) + i
+            #log_dict["step"] = epoch * len(dataloader) + i
 
-            wandb.log(log_dict)
+            global_step = epoch * len(dataloader) + i
+            wandb.log(log_dict, step=global_step)
 
         mca_train(outputs["class_logits"], labels)
 
@@ -177,8 +178,7 @@ def test(model: nn.Module, dataloader: DataLoader, epoch: int,
 
         # log more frequently
         if i % log_every == 0:
-            step = epoch * len(dataloader) + i
-
+            step = epoch * train_steps_per_epoch + i
             wandb_log_all_proto_heatmaps_per_class(
                 model=model,
                 images=images[:4],
@@ -375,8 +375,15 @@ def main():
             device=device
         )
 
-        epoch_acc_test = test(model=net, dataloader=dataloader_test, epoch=epoch, logger=logger, device=device)
-        
+        epoch_acc_test = test(
+            model=net,
+            dataloader=dataloader_test,
+            epoch=epoch,
+            logger=logger,
+            device=device,
+            train_steps_per_epoch=len(dataloader_train),
+        )
+
         torch.save(
             dict(
                 state_dict={k: v.detach().cpu() for k, v in net.state_dict().items()},
