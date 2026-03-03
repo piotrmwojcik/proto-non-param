@@ -84,7 +84,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--data-root", type=str, default="./datasets")
-    parser.add_argument("--dataset", type=str, default="CUB", choices=["CUB"])
+    parser.add_argument("--dataset", type=str, default="CUB", choices=["CUB", "tiny_imagenet"])
 
     parser.add_argument("--backbone", type=str, default="dinov2_vitb14", choices=["dinov2_vitb14", "dinov2_vits14"])
     parser.add_argument("--num-splits", type=int, default=1)
