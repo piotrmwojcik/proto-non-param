@@ -68,6 +68,8 @@ class TinyImageNetDataset(Dataset):
         self.class_to_idx: Dict[str, int] = {wnid: i for i, wnid in enumerate(wnids)}
         self.samples: List[Tuple[str, int]] = []
 
+        self.classes = wnids  # ImageFolder-compatible
+
         exts = (".jpeg", ".jpg", ".png")
 
         if split == "train":
