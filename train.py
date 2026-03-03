@@ -5,6 +5,7 @@ from collections import defaultdict
 from logging import Logger
 from pathlib import Path
 import argparse
+import wandb
 
 import lightning as L
 import torch
@@ -43,8 +44,16 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
             optimizer.step()
             optimizer.zero_grad()
 
+            log_dict = {}
             for k, v in loss_dict.items():
                 running_losses[k] += v.item() * dataloader.batch_size
+                log_dict[f"train/{k}"] = v.item()
+
+            log_dict["train/total_loss"] = loss.item()
+            log_dict["epoch"] = epoch
+            log_dict["step"] = epoch * len(dataloader) + i
+
+            wandb.log(log_dict)
 
         mca_train(outputs["class_logits"], labels)
 
@@ -103,6 +112,12 @@ def main():
     parser.add_argument("--fine-tuning-start-epoch", type=int, default=1)
 
     args = parser.parse_args()
+
+    wandb.init(
+        project="proto-non-param",
+        config=vars(args),
+        dir=args.log_dir
+    )
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
