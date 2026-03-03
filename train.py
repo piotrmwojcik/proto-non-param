@@ -145,7 +145,7 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
             log_dict["train/total_loss"] = loss.item()
             log_dict["epoch"] = epoch
             #log_dict["step"] = epoch * len(dataloader) + i
-
+            print('logging ')
             global_step = epoch * len(dataloader) + i
             wandb.log(log_dict, step=global_step)
 
