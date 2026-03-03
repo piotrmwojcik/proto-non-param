@@ -22,14 +22,20 @@ class TinyImageNetDataset(Dataset):
     """
     Tiny ImageNet dataset loader.
 
-    Expected structure:
+    Supports multiple common layouts:
+
+    Official:
       root/
-        train/
-          <wnid>/
-            images/*.JPEG
-        val/
-          images/*.JPEG
-          val_annotations.txt
+        train/<wnid>/images/*.JPEG
+        val/images/*.JPEG
+        val/val_annotations.txt
+
+    Repacked variants:
+      root/
+        train/<wnid>/*.JPEG
+        val/<wnid>/*.JPEG           (or val/<wnid>/images/*.JPEG)
+      or
+        val/*.JPEG                  (unlabeled; label = -1)
 
     Returns: image, label_id, index
     """
@@ -49,19 +55,27 @@ class TinyImageNetDataset(Dataset):
         train_dir = os.path.join(root, "train")
         val_dir = os.path.join(root, "val")
 
+        if not os.path.isdir(train_dir):
+            raise FileNotFoundError(f"Could not find train dir: {train_dir}")
+        if not os.path.isdir(val_dir):
+            raise FileNotFoundError(f"Could not find val dir: {val_dir}")
+
         # Build wnid -> class_id mapping from train folder names
         wnids = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
-        self.class_to_idx: Dict[str, int] = {wnid: i for i, wnid in enumerate(wnids)}
+        if len(wnids) == 0:
+            raise ValueError(f"No class folders found under: {train_dir}")
 
+        self.class_to_idx: Dict[str, int] = {wnid: i for i, wnid in enumerate(wnids)}
         self.samples: List[Tuple[str, int]] = []
+
+        exts = (".jpeg", ".jpg", ".png")
 
         if split == "train":
             for wnid in wnids:
                 label = self.class_to_idx[wnid]
-
                 # Support both:
-                # 1) train/<wnid>/images/*.JPEG  (official)
-                # 2) train/<wnid>/*.JPEG         (some repacks)
+                # 1) train/<wnid>/images/*.JPEG (official)
+                # 2) train/<wnid>/*.JPEG        (repack)
                 candidates = [
                     os.path.join(train_dir, wnid, "images"),
                     os.path.join(train_dir, wnid),
@@ -71,52 +85,82 @@ class TinyImageNetDataset(Dataset):
                     continue
 
                 for fn in os.listdir(img_dir):
-                    if fn.lower().endswith((".jpeg", ".jpg", ".png")):
+                    if fn.lower().endswith(exts):
                         self.samples.append((os.path.join(img_dir, fn), label))
 
         elif split == "val":
             ann_path = os.path.join(val_dir, "val_annotations.txt")
 
-            # Support both:
-            # 1) val/images/*.JPEG  (official)
-            # 2) val/*.JPEG         (some repacks)
-            img_dir_candidates = [
-                os.path.join(val_dir, "images"),
-                val_dir,
-            ]
-            img_dir = next((d for d in img_dir_candidates if os.path.isdir(d)), None)
-            if img_dir is None:
-                raise FileNotFoundError(f"Could not find val image directory in: {img_dir_candidates}")
+            # Case 1: official annotations exist
+            if os.path.isfile(ann_path):
+                img_dir_candidates = [os.path.join(val_dir, "images"), val_dir]
+                img_dir = next((d for d in img_dir_candidates if os.path.isdir(d)), None)
+                if img_dir is None:
+                    raise FileNotFoundError(f"Could not find val image directory in: {img_dir_candidates}")
 
-            # val_annotations.txt format:
-            # <image_filename>\t<wnid>\t<x0>\t<y0>\t<x1>\t<y1>
-            with open(ann_path, "r") as f:
-                for line in f:
-                    parts = line.strip().split("\t")
-                    if len(parts) < 2:
-                        continue
+                with open(ann_path, "r") as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) < 2:
+                            continue
+                        img_name, wnid = parts[0], parts[1]
+                        if wnid not in self.class_to_idx:
+                            continue
+                        label = self.class_to_idx[wnid]
+                        img_path = os.path.join(img_dir, img_name)
 
-                    img_name, wnid = parts[0], parts[1]
-                    if wnid not in self.class_to_idx:
-                        continue
+                        # extension/case fallback
+                        if not os.path.isfile(img_path):
+                            base, _ = os.path.splitext(img_name)
+                            for cand in (base + ".JPEG", base + ".jpeg", base + ".jpg", base + ".png"):
+                                cand_path = os.path.join(img_dir, cand)
+                                if os.path.isfile(cand_path):
+                                    img_path = cand_path
+                                    break
 
-                    label = self.class_to_idx[wnid]
-                    img_path = os.path.join(img_dir, img_name)
+                        if os.path.isfile(img_path):
+                            self.samples.append((img_path, label))
 
-                    # Some packs may have different extension casing; try fallback search.
-                    if not os.path.isfile(img_path):
-                        base, _ = os.path.splitext(img_name)
-                        for cand in (base + ".JPEG", base + ".jpeg", base + ".jpg", base + ".png"):
-                            cand_path = os.path.join(img_dir, cand)
-                            if os.path.isfile(cand_path):
-                                img_path = cand_path
-                                break
+            else:
+                # Case 2: val is already organized into class folders
+                val_wnids = sorted([
+                    d for d in os.listdir(val_dir)
+                    if os.path.isdir(os.path.join(val_dir, d)) and d in self.class_to_idx
+                ])
 
-                    if os.path.isfile(img_path):
-                        self.samples.append((img_path, label))
+                if len(val_wnids) > 0:
+                    for wnid in val_wnids:
+                        label = self.class_to_idx[wnid]
+                        candidates = [
+                            os.path.join(val_dir, wnid, "images"),
+                            os.path.join(val_dir, wnid),
+                        ]
+                        img_dir = next((d for d in candidates if os.path.isdir(d)), None)
+                        if img_dir is None:
+                            continue
+                        for fn in os.listdir(img_dir):
+                            if fn.lower().endswith(exts):
+                                self.samples.append((os.path.join(img_dir, fn), label))
+
+                else:
+                    # Case 3: val is a flat folder with images only -> unlabeled
+                    img_dir_candidates = [os.path.join(val_dir, "images"), val_dir]
+                    img_dir = next((d for d in img_dir_candidates if os.path.isdir(d)), None)
+                    if img_dir is None:
+                        raise FileNotFoundError(f"Could not find val image directory in: {img_dir_candidates}")
+
+                    for fn in os.listdir(img_dir):
+                        if fn.lower().endswith(exts):
+                            self.samples.append((os.path.join(img_dir, fn), -1))
 
         else:
             raise ValueError(f"Unknown split: {split}. Use 'train' or 'val'.")
+
+        if len(self.samples) == 0:
+            raise ValueError(
+                f"TinyImageNetDataset(split='{split}') found 0 samples. "
+                f"root={root}, train_dir={train_dir}, val_dir={val_dir}"
+            )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -129,6 +173,7 @@ class TinyImageNetDataset(Dataset):
         if self.target_transform is not None:
             label = self.target_transform(label)
         return img, label, index
+
 
 class CUBDataset(ImageFolder):
     def __init__(self,
