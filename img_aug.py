@@ -15,6 +15,16 @@ makedir(target_dir)
 folders = [os.path.join(dir, folder) for folder in next(os.walk(dir))[1]]
 target_folders = [os.path.join(target_dir, folder) for folder in next(os.walk(dir))[1]]
 
+def valid_image(fp, min_side=64):
+    try:
+        w, h = Image.open(fp).size
+        return min(w, h) >= min_side
+    except:
+        return False
+
+files = [os.path.join(fd, f) for f in os.listdir(fd) if f.lower().endswith((".jpg",".jpeg",".png"))]
+files = [f for f in files if valid_image(f, 64)]
+
 for i in range(len(folders)):
     fd = folders[i]
     tfd = target_folders[i]
