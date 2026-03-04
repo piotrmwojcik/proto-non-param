@@ -60,7 +60,7 @@ class PNP(nn.Module):
         self.n_prototypes = n_prototypes
         self.n_classes = n_classes
         self.C = n_classes + 1
-        self.disable_clustering = False
+        self.disable_clustering = True
         self.backbone = backbone
         self.use_sinkhorn = use_sinkhorn
         self.fg_extractor = fg_extractor
