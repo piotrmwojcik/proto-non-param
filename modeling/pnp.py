@@ -23,6 +23,23 @@ class CLIPPatch16Backbone(nn.Module):
         self.dim = self.visual.output_dim
         self.patch_size = patch_size
 
+        # start frozen by default (like DINO stage-1)
+        self._trainable = False
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def set_requires_grad(self, requires_grad: bool = True):
+        """Match DINO backbone API used in train.py."""
+        self._trainable = requires_grad
+        for p in self.parameters():
+            p.requires_grad = requires_grad
+        if not requires_grad:
+            self.eval()
+
+    def learnable_parameters(self):
+        """Match DINO backbone API used in train.py."""
+        return [p for p in self.parameters() if p.requires_grad]
+
     def forward(self, x):
 
         B, C, H, W = x.shape
