@@ -414,10 +414,9 @@ def main():
         #
         # You can parse model variant from args.backbone if you want; here’s a simple default:
         backbone = CLIPPatch16Backbone(
-            model_name=getattr(args, "clip_model_name", "ViT-L-14"),
-            pretrained=getattr(args, "clip_pretrained", "openai"),
-            patch_size=getattr(args, "clip_patch_size", 16),
-            freeze=getattr(args, "freeze_backbone", True),
+            model_name="ViT-L-14",
+            pretrained="openai",
+            patch_size=16,
         )
         dim = backbone.dim
     elif "dino" in args.backbone:
