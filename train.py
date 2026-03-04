@@ -145,8 +145,8 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
             log_dict["train/total_loss"] = loss.item()
             log_dict["epoch"] = epoch
             #log_dict["step"] = epoch * len(dataloader) + i
-            print('logging ')
             global_step = epoch * len(dataloader) + i
+            log_dict["global_step"] = global_step
             wandb.log(log_dict, step=global_step)
 
         mca_train(outputs["class_logits"], labels)
@@ -231,6 +231,11 @@ def main():
         config=vars(args),
         dir=args.log_dir
     )
+
+    wandb.define_metric("global_step")
+    wandb.define_metric("train/*", step_metric="global_step")
+    wandb.define_metric("test/*", step_metric="global_step")
+    wandb.define_metric("eval/*", step_metric="global_step")  # for heatmaps etc.
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
