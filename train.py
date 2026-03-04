@@ -229,10 +229,10 @@ def test(
             global_step = epoch * train_steps_per_epoch + i
 
             with torch.no_grad():
-                outputs = model(images)  # inference pass
+                outputs = model(images)  # inference pass (labels=None)
                 preds = outputs["class_logits"].argmax(dim=1)
 
-            # diverse sample selection (same as yours)
+            # diverse sample selection
             unique_classes = preds.unique()
             selected_indices = []
             for c in unique_classes:
@@ -240,6 +240,7 @@ def test(
                 rand_idx = idxs[torch.randint(len(idxs), (1,))]
                 selected_indices.append(rand_idx.item())
 
+            # if not enough classes, fill with random samples
             if len(selected_indices) < 4:
                 remaining = list(set(range(len(images))) - set(selected_indices))
                 extra = torch.randperm(len(remaining))[: 4 - len(selected_indices)]
@@ -248,9 +249,14 @@ def test(
             selected_indices = selected_indices[:4]
             sel = torch.tensor(selected_indices, device=images.device)
 
+            # ---- NEW: compute outputs WITH pseudo labels for selected images only ----
+            with torch.no_grad():
+                outputs_sel = model(images[sel], labels=preds[sel], use_gumbel=False)
+                # outputs_sel now contains "pseudo_patch_labels" (unless disable_clustering=True)
+
             wandb_log_proto_and_fg_from_outputs(
                 images=images[sel],
-                outputs={k: v[sel] for k, v in outputs.items()},
+                outputs=outputs_sel,
                 step=global_step,
             )
 
