@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassAccuracy
 from tqdm import tqdm
 
-from data import CUBDataset, TinyImageNetDataset
+from data import CUBDataset, TinyImageNetDataset, train_transforms
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded
 from modeling.pnp import PCA, PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -309,20 +309,36 @@ def main():
         n_classes = 200
         dataset_dir = Path(args.data_root) / "tiny-imagenet-200"  # adjust if your folder name differs
 
+        # Validation/Test transforms (no augmentation)
+        test_transforms = T.Compose([
+            T.ToTensor(),
+        ])
+
         dataset_train = TinyImageNetDataset(
             root=dataset_dir.as_posix(),
             split="train",
-            transforms=transforms,
+            transforms=train_transforms,
         )
-        dataloader_train = DataLoader(dataset=dataset_train, batch_size=128, num_workers=8, shuffle=True)
+
+        dataloader_train = DataLoader(
+            dataset=dataset_train,
+            batch_size=128,
+            num_workers=8,
+            shuffle=True
+        )
 
         dataset_test = TinyImageNetDataset(
             root=dataset_dir.as_posix(),
             split="val",  # TinyImageNet uses val as the "test" split
-            transforms=transforms,
+            transforms=test_transforms,
         )
-        dataloader_test = DataLoader(dataset=dataset_test, batch_size=128, num_workers=8, shuffle=False)
 
+        dataloader_test = DataLoader(
+            dataset=dataset_test,
+            batch_size=128,
+            num_workers=8,
+            shuffle=False
+        )
     else:
         raise NotImplementedError(f"Dataset {args.dataset} is not implemented")
 

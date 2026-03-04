@@ -10,13 +10,27 @@ from albumentations.augmentations.crops.functional import crop_keypoint_by_coord
 from PIL import Image
 from torchvision.datasets import ImageFolder
 from torchvision.transforms.functional import to_tensor
-
+import torchvision.transforms as T
 
 import os
 from PIL import Image
 from torch.utils.data import Dataset
 from typing import Callable, Optional, Tuple, List, Dict
 
+
+train_transforms = T.Compose([
+    T.RandomHorizontalFlip(p=0.5),
+    T.RandomRotation(15),
+    T.RandomAffine(
+        degrees=0,
+        shear=(-10, 10)   # approximates skew/shear
+    ),
+    T.RandomPerspective(
+        distortion_scale=0.5,
+        p=0.5             # approximates random_distortion
+    ),
+    T.ToTensor(),
+])
 
 class TinyImageNetDataset(Dataset):
     """
