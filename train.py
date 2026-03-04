@@ -77,37 +77,43 @@ def _to_uint8_img(img_chw: torch.Tensor, mean=None, std=None) -> np.ndarray:
 
 
 @torch.no_grad()
-def wandb_log_proto_and_fg(
+def wandb_log_proto_and_fg_from_preds(
     *,
     model: nn.Module,
-    images: torch.Tensor,
-    labels: torch.Tensor,
+    images: torch.Tensor,   # (B,3,H,W) selected images
+    pred_labels: torch.Tensor,  # (B,) predicted class ids used to compute pseudo_patch_labels
     step: int,
     mean=(0.485, 0.456, 0.406),
     std=(0.229, 0.224, 0.225),
     max_items: int = 4,
     log_key_heatmaps: str = "eval/proto_heatmaps",
     log_key_fg: str = "eval/pseudo_fg_overlay",
+    alpha: float = 0.45,
 ):
     model.eval()
 
-    outputs = model(images, labels=labels, use_gumbel=False)
+    # IMPORTANT: pass labels=pred_labels so forward produces pseudo_patch_labels
+    outputs = model(images, labels=pred_labels, use_gumbel=False)
 
     logits = outputs["class_logits"]
     preds = logits.argmax(dim=1)
 
     ppl = outputs["patch_prototype_logits"]  # [B,N,C,K]
     B, N, C, K = ppl.shape
-    H = W = int(np.sqrt(N))
+    Hm = Wm = int(np.sqrt(N))
 
-    ppl_maps = ppl.view(B, H, W, C, K).permute(0, 3, 4, 1, 2)
+    # [B,C,K,Hm,Wm]
+    ppl_maps = ppl.view(B, Hm, Wm, C, K).permute(0, 3, 4, 1, 2)
+
+    # heatmaps for predicted class: [B,K,Hm,Wm]
     pred_maps = ppl_maps[torch.arange(B, device=images.device), preds]
 
+    # upsample to image resolution
     _, _, Hi, Wi = images.shape
     pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)
 
+    # pseudo patch labels (B,h,w) or (B,H,W)
     pseudo_patch_labels = outputs["pseudo_patch_labels"]
-
     if (pseudo_patch_labels.shape[-2], pseudo_patch_labels.shape[-1]) != (Hi, Wi):
         pseudo_patch_labels = F.interpolate(
             pseudo_patch_labels.unsqueeze(1).float(),
@@ -115,52 +121,41 @@ def wandb_log_proto_and_fg(
             mode="nearest"
         ).squeeze(1)
 
+    # binarize to "foreground" (adjust threshold/condition if your encoding differs)
     pseudo_mask = (pseudo_patch_labels > 0).float()
 
     B_log = min(B, max_items)
-
     heatmap_panels = []
     fg_panels = []
 
     for b in range(B_log):
         img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
-        pred_cls = int(preds[b])
+        pred_cls = int(preds[b].item())
 
-        # raw image
-        heatmap_panels.append(
-            wandb.Image(img_uint8, caption=f"raw | pred={pred_cls}")
-        )
+        # raw
+        heatmap_panels.append(wandb.Image(img_uint8, caption=f"raw | pred={pred_cls}"))
 
-        # prototype heatmaps
+        # all prototypes for predicted class
         for k in range(K):
             hm = pred_maps_up[b, k]
-            overlay = overlay_heatmap(img_uint8, hm, alpha=0.45)
+            overlay = overlay_heatmap(img_uint8, hm, alpha=alpha)
+            heatmap_panels.append(wandb.Image(overlay, caption=f"pred={pred_cls} | proto={k}"))
 
-            heatmap_panels.append(
-                wandb.Image(overlay, caption=f"class={pred_cls} proto={k}")
-            )
-
-        # pseudo foreground overlay
-        mask = pseudo_mask[b].cpu().numpy()
-
-        fig = plt.figure(figsize=(4,4), dpi=150)
+        # pseudo-fg overlay
+        mask = pseudo_mask[b].detach().cpu().numpy()
+        fig = plt.figure(figsize=(4, 4), dpi=150)
         plt.imshow(img_uint8)
-        plt.imshow(mask, alpha=0.45)
+        plt.imshow(mask, alpha=alpha)
         plt.axis("off")
         plt.tight_layout(pad=0)
-
-        fg_panels.append(
-            wandb.Image(fig, caption=f"pseudo_fg | pred={pred_cls}")
-        )
-
+        fg_panels.append(wandb.Image(fig, caption=f"pseudo_fg | pred={pred_cls}"))
         plt.close(fig)
 
-    wandb.log({
-        "global_step": step,
-        log_key_heatmaps: heatmap_panels,
-        log_key_fg: fg_panels,
-    })
-
+    # ONE log call => one step
+    wandb.log(
+        {"global_step": step, log_key_heatmaps: heatmap_panels, log_key_fg: fg_panels},
+        commit=True
+    )
 
 def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader, epoch: int,
           optimizer: optim.Optimizer | None, logger: Logger, device: torch.device):
@@ -235,32 +230,30 @@ def test(
             global_step = epoch * train_steps_per_epoch + i
 
             with torch.no_grad():
-                outputs = model(images)
+                outputs = model(images)  # inference pass
                 preds = outputs["class_logits"].argmax(dim=1)
 
-            # select diverse samples
+            # diverse sample selection (same as yours)
             unique_classes = preds.unique()
             selected_indices = []
-
             for c in unique_classes:
                 idxs = (preds == c).nonzero(as_tuple=True)[0]
                 rand_idx = idxs[torch.randint(len(idxs), (1,))]
                 selected_indices.append(rand_idx.item())
 
-            # if not enough classes, fill with random samples
             if len(selected_indices) < 4:
                 remaining = list(set(range(len(images))) - set(selected_indices))
                 extra = torch.randperm(len(remaining))[: 4 - len(selected_indices)]
                 selected_indices += [remaining[i] for i in extra]
 
             selected_indices = selected_indices[:4]
-
             sel = torch.tensor(selected_indices, device=images.device)
 
-            wandb_log_proto_and_fg(
+            # IMPORTANT: use preds[sel] as labels for pseudo_patch_labels
+            wandb_log_proto_and_fg_from_preds(
                 model=model,
                 images=images[sel],
-                labels=labels[sel],
+                pred_labels=preds[sel],
                 step=global_step,
             )
 
