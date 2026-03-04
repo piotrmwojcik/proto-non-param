@@ -27,7 +27,7 @@ for i in range(len(folders)):
     del p
     # skew
     p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
-    p.skew(probability=1, magnitude=0.2)  # max 45 degrees
+    p.skew(probability=1, magnitude=0.05)  # max 45 degrees
     p.flip_left_right(probability=0.5)
     for i in range(10):
         p.process()
