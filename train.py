@@ -76,98 +76,90 @@ def _to_uint8_img(img_chw: torch.Tensor, mean=None, std=None) -> np.ndarray:
     return x
 
 
-def wandb_log_pseudo_fg_overlays(
-    *,
-    images: torch.Tensor,              # (B,3,H,W) input images you fed the model
-    pseudo_patch_labels: torch.Tensor, # (B,h,w) or (B,H,W)
-    step: int,
-    log_key: str = "eval/pseudo_fg_overlay",
-    mean=None, std=None,
-    alpha: float = 0.45,
-):
-    B, _, H, W = images.shape
-
-    # ensure mask is (B,H,W)
-    m = pseudo_patch_labels
-    if m.dim() != 3:
-        raise ValueError(f"Expected pseudo_patch_labels to be BxHxW, got {m.shape}")
-
-    if (m.shape[-2], m.shape[-1]) != (H, W):
-        m = F.interpolate(m.unsqueeze(1).float(), size=(H, W), mode="nearest").squeeze(1)
-
-    # if it's not binary, make it binary foreground mask (adjust as needed)
-    # common convention: 1=foreground, 0=background
-    m_bin = (m > 0).float()
-
-    wb_images = []
-    for i in range(B):
-        img = _to_uint8_img(images[i], mean=mean, std=std)
-        mask = m_bin[i].detach().cpu().numpy()
-
-        fig = plt.figure(figsize=(4, 4), dpi=150)
-        plt.imshow(img)
-        plt.imshow(mask, alpha=alpha)  # default colormap is fine; you can set cmap="jet"
-        plt.axis("off")
-        plt.tight_layout(pad=0)
-
-        wb_images.append(wandb.Image(fig, caption=f"pseudo_fg (idx={i})"))
-        plt.close(fig)
-
-    wandb.log({log_key: wb_images}, step=step)
-
 @torch.no_grad()
-def wandb_log_all_proto_heatmaps_per_class(
+def wandb_log_proto_and_fg(
+    *,
     model: nn.Module,
     images: torch.Tensor,
-    *,
+    labels: torch.Tensor,
     step: int,
     mean=(0.485, 0.456, 0.406),
     std=(0.229, 0.224, 0.225),
     max_items: int = 4,
-    log_key: str = "eval/proto_heatmaps",
+    log_key_heatmaps: str = "eval/proto_heatmaps",
+    log_key_fg: str = "eval/pseudo_fg_overlay",
 ):
-    """
-    Logs, for each selected image:
-      - raw image
-      - heatmap overlays for ALL K prototypes of the predicted class
-    """
     model.eval()
 
-    outputs = model(images)  # no labels needed for inference
-    logits = outputs["class_logits"]
-    preds = logits.argmax(dim=1)  # [B]
+    outputs = model(images, labels=labels, use_gumbel=False)
 
-    ppl = outputs["patch_prototype_logits"]  # [B, N, C, K]
+    logits = outputs["class_logits"]
+    preds = logits.argmax(dim=1)
+
+    ppl = outputs["patch_prototype_logits"]  # [B,N,C,K]
     B, N, C, K = ppl.shape
     H = W = int(np.sqrt(N))
 
-    # reshape to [B, C, K, H, W]
-    ppl_maps = ppl.view(B, H, W, C, K).permute(0, 3, 4, 1, 2)  # [B,C,K,H,W]
+    ppl_maps = ppl.view(B, H, W, C, K).permute(0, 3, 4, 1, 2)
+    pred_maps = ppl_maps[torch.arange(B, device=images.device), preds]
 
-    # take maps for predicted class: [B, K, H, W]
-    pred_maps = ppl_maps[torch.arange(B, device=images.device), preds]  # [B,K,H,W]
-
-    # upsample maps to image size
     _, _, Hi, Wi = images.shape
-    pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)  # [B,K,Hi,Wi]
+    pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)
+
+    pseudo_patch_labels = outputs["pseudo_patch_labels"]
+
+    if (pseudo_patch_labels.shape[-2], pseudo_patch_labels.shape[-1]) != (Hi, Wi):
+        pseudo_patch_labels = F.interpolate(
+            pseudo_patch_labels.unsqueeze(1).float(),
+            size=(Hi, Wi),
+            mode="nearest"
+        ).squeeze(1)
+
+    pseudo_mask = (pseudo_patch_labels > 0).float()
 
     B_log = min(B, max_items)
-    panels = []
+
+    heatmap_panels = []
+    fg_panels = []
 
     for b in range(B_log):
         img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
-        pred_cls = int(preds[b].item())
+        pred_cls = int(preds[b])
 
-        # first: raw image
-        panels.append(wandb.Image(img_uint8, caption=f"raw | pred={pred_cls}"))
+        # raw image
+        heatmap_panels.append(
+            wandb.Image(img_uint8, caption=f"raw | pred={pred_cls}")
+        )
 
-        # then: all prototypes for that class
+        # prototype heatmaps
         for k in range(K):
-            hm = pred_maps_up[b, k]  # [Hi,Wi]
+            hm = pred_maps_up[b, k]
             overlay = overlay_heatmap(img_uint8, hm, alpha=0.45)
-            panels.append(wandb.Image(overlay, caption=f"pred={pred_cls} | proto={k}"))
 
-    wandb.log({log_key: panels, "global_step": step})
+            heatmap_panels.append(
+                wandb.Image(overlay, caption=f"class={pred_cls} proto={k}")
+            )
+
+        # pseudo foreground overlay
+        mask = pseudo_mask[b].cpu().numpy()
+
+        fig = plt.figure(figsize=(4,4), dpi=150)
+        plt.imshow(img_uint8)
+        plt.imshow(mask, alpha=0.45)
+        plt.axis("off")
+        plt.tight_layout(pad=0)
+
+        fg_panels.append(
+            wandb.Image(fig, caption=f"pseudo_fg | pred={pred_cls}")
+        )
+
+        plt.close(fig)
+
+    wandb.log({
+        "global_step": step,
+        log_key_heatmaps: heatmap_panels,
+        log_key_fg: fg_panels,
+    })
 
 
 def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader, epoch: int,
@@ -263,24 +255,12 @@ def test(
 
             selected_indices = selected_indices[:4]
 
-            wandb_log_all_proto_heatmaps_per_class(
-                model=model,
-                images=images[selected_indices],
-                max_items=4,
-                step=global_step,
-                log_key="eval/proto_heatmaps",
-            )
-
             sel = torch.tensor(selected_indices, device=images.device)
-            with torch.no_grad():
-                out = model(images[sel], labels=labels[sel], use_gumbel=False)
 
-            wandb_log_pseudo_fg_overlays(
+            wandb_log_proto_and_fg(
+                model=model,
                 images=images[sel],
-                pseudo_patch_labels=out["pseudo_patch_labels"],
-                log_key="eval/pseudo_fg_overlay",
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
+                labels=labels[sel],
                 step=global_step,
             )
 
