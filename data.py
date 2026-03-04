@@ -5,6 +5,7 @@ import albumentations as A
 import numpy as np
 import pandas as pd
 import torch
+
 import torch.nn.functional as F
 from albumentations.augmentations.crops.functional import crop_keypoint_by_coords
 from PIL import Image
@@ -18,20 +19,31 @@ from torch.utils.data import Dataset
 from typing import Callable, Optional, Tuple, List, Dict
 
 
+clip_mean = (0.48145466, 0.4578275, 0.40821073)
+clip_std  = (0.26862954, 0.26130258, 0.27577711)
+
 train_transforms = T.Compose([
     T.RandomHorizontalFlip(p=0.5),
     T.RandomRotation(15),
     T.RandomAffine(
         degrees=0,
-        shear=(-10, 10)   # approximates skew/shear
+        shear=(-10, 10)
     ),
     T.RandomPerspective(
         distortion_scale=0.5,
-        p=0.5             # approximates random_distortion
+        p=0.5
     ),
-    T.Resize((224, 224)),   # final resize
+    T.Resize((224, 224)),
     T.ToTensor(),
+    T.Normalize(mean=clip_mean, std=clip_std),
 ])
+
+test_transforms = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=clip_mean, std=clip_std),
+])
+
 
 class TinyImageNetDataset(Dataset):
     """

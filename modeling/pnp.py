@@ -4,8 +4,61 @@ import torch
 import torch.nn.functional as F
 from einops import einsum, rearrange, repeat
 from torch import nn
+import open_clip
 
 from .utils import momentum_update, sinkhorn_knopp
+
+
+class CLIPPatch16Backbone(nn.Module):
+
+    def __init__(self, model_name="ViT-B-14", pretrained="openai", patch_size=16):
+        super().__init__()
+
+        model, _, _ = open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=pretrained
+        )
+
+        self.visual = model.visual
+        self.dim = self.visual.output_dim
+        self.patch_size = patch_size
+
+    def forward(self, x):
+
+        B, C, H, W = x.shape
+        p = self.patch_size
+
+        assert H % p == 0 and W % p == 0
+
+        # split image into 16×16 patches
+        patches = F.unfold(x, kernel_size=p, stride=p)
+        # [B, C*p*p, N]
+
+        patches = patches.transpose(1, 2)
+        # [B, N, C*p*p]
+
+        N = patches.shape[1]
+
+        patches = patches.reshape(B * N, C, p, p)
+
+        # CLIP requires larger resolution
+        patches = F.interpolate(
+            patches,
+            size=(224, 224),
+            mode="bilinear",
+            align_corners=False
+        )
+
+        # CLIP encoding
+        feats = self.visual(patches)
+
+        feats = feats.reshape(B, N, -1)
+
+        patch_tokens = feats
+        raw_patch_tokens = feats
+        cls_tokens = feats.mean(dim=1)
+
+        return patch_tokens, raw_patch_tokens, cls_tokens
 
 
 class PCA(nn.Module):

@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassAccuracy
 from tqdm import tqdm
 
-from data import CUBDataset, TinyImageNetDataset, train_transforms
+from data import CUBDataset, TinyImageNetDataset, train_transforms, test_transforms
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded
 from modeling.pnp import PCA, PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -82,8 +82,8 @@ def wandb_log_proto_and_fg_from_outputs(
     images: torch.Tensor,
     outputs: dict,
     step: int,
-    mean=(0.485, 0.456, 0.406),
-    std=(0.229, 0.224, 0.225),
+    mean=(0.48145466, 0.4578275, 0.40821073),
+    std=(0.26862954, 0.26130258, 0.27577711),
     max_items: int = 4,
     log_key_heatmaps="eval/proto_heatmaps",
     log_key_fg="eval/pseudo_fg_overlay",
@@ -103,7 +103,7 @@ def wandb_log_proto_and_fg_from_outputs(
     _, _, Hi, Wi = images.shape
     pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)
 
-    pseudo_patch_labels = outputs["pseudo_patch_labels"]
+    pseudo_patch_labels = outputs["class_logits"].shape[1]
 
     if (pseudo_patch_labels.shape[-2], pseudo_patch_labels.shape[-1]) != (Hi, Wi):
         pseudo_patch_labels = F.interpolate(
@@ -285,7 +285,17 @@ def main():
     parser.add_argument("--data-root", type=str, default="./datasets")
     parser.add_argument("--dataset", type=str, default="CUB", choices=["CUB", "tiny_imagenet"])
 
-    parser.add_argument("--backbone", type=str, default="dinov2_vitb14", choices=["dinov2_vitb14", "dinov2_vits14"])
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="dinov2_vitb14",
+        choices=["dinov2_vitb14", "dinov2_vits14", "clip_vit_l_14_patch16"]
+    )
+    parser.add_argument("--clip-model-name", type=str, default="ViT-L-14")
+    parser.add_argument("--clip-pretrained", type=str, default="openai")
+    parser.add_argument("--clip-patch-size", type=int, default=16)
+    parser.add_argument("--clip-image-size", type=int, default=224)
+    parser.add_argument("--freeze-backbone", action="store_true", default=True)
     parser.add_argument("--num-splits", type=int, default=1)
 
     # Model related hyperparameters
@@ -356,11 +366,6 @@ def main():
         #dataset_dir = Path(args.data_root) / "tiny-imagenet-200"  # adjust if your folder name differs
         dataset_dir = Path(args.data_root) / "dataset"
 
-        # Validation/Test transforms (no augmentation)
-        test_transforms = T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-        ])
 
         dataset_train = TinyImageNetDataset(
             root=dataset_dir.as_posix(),
@@ -400,6 +405,20 @@ def main():
             )
         else:
             backbone = DINOv2Backbone(name=args.backbone)
+        dim = backbone.dim
+    elif "clip" in args.backbone:
+        # examples:
+        #   --backbone clip_vit_l_14_patch16
+        #   --backbone clip_vit_b_32_patch16
+        #
+        # You can parse model variant from args.backbone if you want; here’s a simple default:
+        backbone = CLIPPatch16Backbone(
+            model_name=getattr(args, "clip_model_name", "ViT-L-14"),
+            pretrained=getattr(args, "clip_pretrained", "openai"),
+            patch_size=getattr(args, "clip_patch_size", 16),
+            clip_image_size=getattr(args, "clip_image_size", 224),
+            freeze=getattr(args, "freeze_backbone", True),
+        )
         dim = backbone.dim
     elif "dino" in args.backbone:
         backbone = DINOBackboneExpanded(
