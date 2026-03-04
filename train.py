@@ -7,7 +7,7 @@ from pathlib import Path
 import argparse
 import wandb
 import numpy as np
-from pnp import CLIPPatch16Backbone
+from modeling.pnp import CLIPPatch16Backbone
 import torchvision
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
