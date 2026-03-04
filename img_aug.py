@@ -28,6 +28,7 @@ for i in range(len(folders)):
     tfd = target_folders[i]
 
     bad_dir = os.path.join(fd, "_bad")
+    os.makedirs(tfd, exist_ok=True)
     os.makedirs(bad_dir, exist_ok=True)
 
     for f in os.listdir(fd):
