@@ -186,10 +186,31 @@ def test(
         if i % log_every == 0:
             global_step = epoch * train_steps_per_epoch + i
 
+            with torch.no_grad():
+                outputs = model(images)
+                preds = outputs["class_logits"].argmax(dim=1)
+
+            # select diverse samples
+            unique_classes = preds.unique()
+            selected_indices = []
+
+            for c in unique_classes:
+                idxs = (preds == c).nonzero(as_tuple=True)[0]
+                rand_idx = idxs[torch.randint(len(idxs), (1,))]
+                selected_indices.append(rand_idx.item())
+
+            # if not enough classes, fill with random samples
+            if len(selected_indices) < 4:
+                remaining = list(set(range(len(images))) - set(selected_indices))
+                extra = torch.randperm(len(remaining))[: 4 - len(selected_indices)]
+                selected_indices += [remaining[i] for i in extra]
+
+            selected_indices = selected_indices[:4]
+
             wandb_log_all_proto_heatmaps_per_class(
                 model=model,
-                images=images[:4],
-                step=global_step,                 # this function currently uses step=
+                images=images[selected_indices],
+                step=global_step,
                 max_items=4,
                 log_key="eval/proto_heatmaps",
             )
