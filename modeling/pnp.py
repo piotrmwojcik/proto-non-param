@@ -19,6 +19,7 @@ class CLIPPatch16Backbone(nn.Module):
             pretrained=pretrained
         )
 
+        self.model = model
         self.visual = model.visual
         self.dim = self.visual.output_dim
         self.patch_size = patch_size
