@@ -28,7 +28,11 @@ files = [f for f in files if valid_image(f, 64)]
 for i in range(len(folders)):
     fd = folders[i]
     tfd = target_folders[i]
-    # rotation
+
+    files = [os.path.join(fd, f) for f in os.listdir(fd)
+             if f.lower().endswith((".jpg",".jpeg",".png"))]
+
+    files = [f for f in files if valid_image(f, 64)]
     p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
     p.rotate(probability=1, max_left_rotation=15, max_right_rotation=15)
     p.flip_left_right(probability=0.5)
