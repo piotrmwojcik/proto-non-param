@@ -271,6 +271,9 @@ def test(
                 log_key="eval/proto_heatmaps",
             )
             sel = torch.tensor(selected_indices, device=images.device)
+            with torch.no_grad():
+                out = model(images[sel], labels=labels[sel],
+                            use_gumbel=False)  # labels REQUIRED to produce pseudo labels
 
             wandb_log_pseudo_fg_overlays(
                 images=images[sel],
