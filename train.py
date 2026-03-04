@@ -416,7 +416,7 @@ def main():
         backbone = CLIPPatch16Backbone(
             model_name="ViT-L-14",
             pretrained="openai",
-            patch_size=64,
+            patch_size=32,
         )
         dim = backbone.dim
     elif "dino" in args.backbone:
