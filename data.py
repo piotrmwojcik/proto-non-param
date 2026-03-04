@@ -29,6 +29,7 @@ train_transforms = T.Compose([
         distortion_scale=0.5,
         p=0.5             # approximates random_distortion
     ),
+    T.Resize((224, 224)),   # final resize
     T.ToTensor(),
 ])
 

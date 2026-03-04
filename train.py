@@ -311,6 +311,7 @@ def main():
 
         # Validation/Test transforms (no augmentation)
         test_transforms = T.Compose([
+            T.Resize((224, 224)),
             T.ToTensor(),
         ])
 
