@@ -103,7 +103,7 @@ def wandb_log_proto_and_fg_from_outputs(
     _, _, Hi, Wi = images.shape
     pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)
 
-    pseudo_patch_labels = outputs["class_logits"].shape[1]
+    pseudo_patch_labels = outputs["pseudo_patch_labels"]
 
     if (pseudo_patch_labels.shape[-2], pseudo_patch_labels.shape[-1]) != (Hi, Wi):
         pseudo_patch_labels = F.interpolate(
