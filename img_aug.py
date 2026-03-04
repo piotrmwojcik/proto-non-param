@@ -22,17 +22,24 @@ def valid_image(fp, min_side=64):
     except:
         return False
 
+import shutil
 for i in range(len(folders)):
     fd = folders[i]
     tfd = target_folders[i]
 
-    files = [
-        os.path.join(fd, f)
-        for f in os.listdir(fd)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
+    bad_dir = os.path.join(fd, "_bad")
+    os.makedirs(bad_dir, exist_ok=True)
 
-    files = [f for f in files if valid_image(f, 64)]
+    for f in os.listdir(fd):
+        if not f.lower().endswith((".jpg", ".jpeg", ".png")):
+            continue
+
+        fp = os.path.join(fd, f)
+
+        if not valid_image(fp, 64):
+            print("Skipping bad image:", fp)
+            shutil.move(fp, os.path.join(bad_dir, f))
+
     p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
     p.rotate(probability=1, max_left_rotation=15, max_right_rotation=15)
     p.flip_left_right(probability=0.5)
