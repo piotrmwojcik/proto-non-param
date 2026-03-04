@@ -40,43 +40,38 @@ class CLIPPatch16Backbone(nn.Module):
         """Match DINO backbone API used in train.py."""
         return [p for p in self.parameters() if p.requires_grad]
 
-    def forward(self, x):
-
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor):
+        """
+        x: [B,3,H,W] must already be CLIP-normalized
+        returns:
+          patch_tokens: [B,N,embed_dim]  (CLIP joint space)
+          raw_patch_tokens: same
+          cls_tokens: [B,embed_dim] pooled (mean over patches)
+        """
         B, C, H, W = x.shape
         p = self.patch_size
+        assert H % p == 0 and W % p == 0, f"H,W must be divisible by {p}."
 
-        assert H % p == 0 and W % p == 0
-
-        # split image into 16×16 patches
-        patches = F.unfold(x, kernel_size=p, stride=p)
         # [B, C*p*p, N]
-
-        patches = patches.transpose(1, 2)
-        # [B, N, C*p*p]
-
+        patches = F.unfold(x, kernel_size=p, stride=p).transpose(1, 2)  # [B,N,C*p*p]
         N = patches.shape[1]
+        patches = patches.reshape(B * N, C, p, p)  # [B*N,3,p,p]
 
-        patches = patches.reshape(B * N, C, p, p)
+        # CLIP expects its nominal image size (224 for most openai checkpoints)
+        patches = F.interpolate(patches, size=(224, 224), mode="bilinear", align_corners=False)
 
-        # CLIP requires larger resolution
-        patches = F.interpolate(
-            patches,
-            size=(224, 224),
-            mode="bilinear",
-            align_corners=False
-        )
+        # IMPORTANT: use CLIP's projected embedding for text comparison
+        feats = self.model.encode_image(patches)  # [B*N, embed_dim]
+        feats = F.normalize(feats, dim=-1)        # cosine-ready
 
-        # CLIP encoding
-        feats = self.visual(patches)
-
-        feats = feats.reshape(B, N, -1)
+        feats = feats.reshape(B, N, -1)           # [B,N,embed_dim]
 
         patch_tokens = feats
         raw_patch_tokens = feats
-        cls_tokens = feats.mean(dim=1)
+        cls_tokens = feats.mean(dim=1)            # [B,embed_dim] (your choice of pooling)
 
         return patch_tokens, raw_patch_tokens, cls_tokens
-
 
 class PCA(nn.Module):
     def __init__(self, compare_fn: str = "le", threshold: float = 0.5, n_components: int = 1,
