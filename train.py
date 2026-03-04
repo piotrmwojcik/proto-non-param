@@ -270,6 +270,7 @@ def test(
                 max_items=4,
                 log_key="eval/proto_heatmaps",
             )
+            sel = torch.tensor(selected_indices, device=images.device)
 
             wandb_log_pseudo_fg_overlays(
                 images=images[sel],
