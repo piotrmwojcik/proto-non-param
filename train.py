@@ -307,7 +307,8 @@ def main():
     elif args.dataset == "tiny_imagenet":
         logger.info("Train on Tiny ImageNet")
         n_classes = 200
-        dataset_dir = Path(args.data_root) / "tiny-imagenet-200"  # adjust if your folder name differs
+        #dataset_dir = Path(args.data_root) / "tiny-imagenet-200"  # adjust if your folder name differs
+        dataset_dir = Path(args.data_root)
 
         # Validation/Test transforms (no augmentation)
         test_transforms = T.Compose([
