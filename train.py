@@ -168,7 +168,7 @@ def test(
     device: torch.device,
     *,
     train_steps_per_epoch: int,
-    log_every: int = 1,
+    log_every: int = 20,
 ):
     model.eval()
     mca_test = MulticlassAccuracy(

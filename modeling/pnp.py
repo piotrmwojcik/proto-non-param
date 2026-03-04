@@ -60,6 +60,7 @@ class PNP(nn.Module):
         self.n_prototypes = n_prototypes
         self.n_classes = n_classes
         self.C = n_classes + 1
+        self.disable_clustering = False
         self.backbone = backbone
         self.use_sinkhorn = use_sinkhorn
         self.fg_extractor = fg_extractor
@@ -152,7 +153,7 @@ class PNP(nn.Module):
             class_logits=class_logits  # shape: [B, n_classes,]
         )
 
-        if labels is not None:
+        if labels is not None and (not self.disable_clustering):
             raw_patch_tokens = F.normalize(raw_patch_tokens, p=2, dim=-1)
             pseudo_patch_labels = self.fg_extractor(raw_patch_tokens.detach(), labels, cls_tokens=cls_tokens)
             pseudo_patch_labels = pseudo_patch_labels.detach()
