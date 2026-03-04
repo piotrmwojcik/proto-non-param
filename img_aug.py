@@ -15,6 +15,22 @@ def is_ok_image(fp: str, min_side: int = 64) -> bool:
 
 IMG_EXTS = (".jpg", ".jpeg", ".png")
 
+def makedir(path):
+    '''
+    if path does not exist in the file system, create it
+    '''
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+datasets_root_dir = '/home/pwojcik/CUB_200_2011/'
+dir = datasets_root_dir + 'train_cropped/'
+target_dir = datasets_root_dir + 'train_cropped_augmented_2/'
+
+makedir(target_dir)
+folders = [os.path.join(dir, folder) for folder in next(os.walk(dir))[1]]
+target_folders = [os.path.join(target_dir, folder) for folder in next(os.walk(dir))[1]]
+
+
 for i in range(len(folders)):
     fd = folders[i]
     tfd = target_folders[i]
