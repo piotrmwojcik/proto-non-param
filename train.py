@@ -111,7 +111,7 @@ def wandb_log_all_proto_heatmaps_per_class(
             overlay = overlay_heatmap(img_uint8, hm, alpha=0.45)
             panels.append(wandb.Image(overlay, caption=f"pred={pred_cls} | proto={k}"))
 
-    wandb.log({log_key: panels}, step=step)
+    wandb.log({log_key: panels, "global_step": step})
 
 
 def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader, epoch: int,
@@ -147,7 +147,7 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
             #log_dict["step"] = epoch * len(dataloader) + i
             global_step = epoch * len(dataloader) + i
             log_dict["global_step"] = global_step
-            wandb.log(log_dict, step=global_step)
+            wandb.log(log_dict)
 
         mca_train(outputs["class_logits"], labels)
 
@@ -160,9 +160,16 @@ def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader,
 
 
 @torch.inference_mode()
-def test(model: nn.Module, dataloader: DataLoader, epoch: int,
-         logger: Logger, device: torch.device, log_every: int = 20):
-
+def test(
+    model: nn.Module,
+    dataloader: DataLoader,
+    epoch: int,
+    logger: Logger,
+    device: torch.device,
+    *,
+    train_steps_per_epoch: int,
+    log_every: int = 20,
+):
     model.eval()
     mca_test = MulticlassAccuracy(
         num_classes=len(dataloader.dataset.classes),
@@ -176,27 +183,30 @@ def test(model: nn.Module, dataloader: DataLoader, epoch: int,
         outputs = model(images)
         mca_test(outputs["class_logits"], labels)
 
-        # log more frequently
         if i % log_every == 0:
-            step = epoch * train_steps_per_epoch + i
+            global_step = epoch * train_steps_per_epoch + i
+
             wandb_log_all_proto_heatmaps_per_class(
                 model=model,
                 images=images[:4],
-                step=step,
+                step=global_step,                 # this function currently uses step=
                 max_items=4,
-                log_key="eval/proto_heatmaps"
+                log_key="eval/proto_heatmaps",
             )
+
+            # also log a scalar so you can see activity immediately
+            wandb.log({"eval/global_step": global_step, "eval/batch_idx": i, "epoch": epoch, "global_step": global_step})
 
     epoch_acc_test = mca_test.compute().item()
     logger.info(f"EPOCH {epoch} test acc: {epoch_acc_test:.4f}")
 
     wandb.log({
+        "test/accuracy": epoch_acc_test,
         "epoch": epoch,
-        "test/accuracy": epoch_acc_test
-    }, step=epoch * len(dataloader))
+        "global_step": epoch * train_steps_per_epoch + (len(dataloader) - 1),
+    })
 
     return epoch_acc_test
-
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
