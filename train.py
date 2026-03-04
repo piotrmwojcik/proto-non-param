@@ -8,6 +8,7 @@ import argparse
 import wandb
 import numpy as np
 import torchvision
+import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
 import lightning as L
@@ -58,6 +59,61 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     out = (alpha * hm_rgb.astype(np.float32) + (1 - alpha) * img_uint8.astype(np.float32))
     return out.clip(0, 255).astype(np.uint8)
 
+
+
+def _to_uint8_img(img_chw: torch.Tensor, mean=None, std=None) -> np.ndarray:
+    """
+    img_chw: (3,H,W) torch tensor
+    mean/std optional: if normalized, pass lists/tuples of length 3
+    """
+    x = img_chw.detach().float().cpu()
+    if mean is not None and std is not None:
+        mean = torch.tensor(mean)[:, None, None]
+        std = torch.tensor(std)[:, None, None]
+        x = x * std + mean
+    x = x.clamp(0, 1)
+    x = (x.permute(1, 2, 0).numpy() * 255).astype(np.uint8)  # HWC
+    return x
+
+
+def wandb_log_pseudo_fg_overlays(
+    *,
+    images: torch.Tensor,              # (B,3,H,W) input images you fed the model
+    pseudo_patch_labels: torch.Tensor, # (B,h,w) or (B,H,W)
+    step: int,
+    log_key: str = "eval/pseudo_fg_overlay",
+    mean=None, std=None,
+    alpha: float = 0.45,
+):
+    B, _, H, W = images.shape
+
+    # ensure mask is (B,H,W)
+    m = pseudo_patch_labels
+    if m.dim() != 3:
+        raise ValueError(f"Expected pseudo_patch_labels to be BxHxW, got {m.shape}")
+
+    if (m.shape[-2], m.shape[-1]) != (H, W):
+        m = F.interpolate(m.unsqueeze(1).float(), size=(H, W), mode="nearest").squeeze(1)
+
+    # if it's not binary, make it binary foreground mask (adjust as needed)
+    # common convention: 1=foreground, 0=background
+    m_bin = (m > 0).float()
+
+    wb_images = []
+    for i in range(B):
+        img = _to_uint8_img(images[i], mean=mean, std=std)
+        mask = m_bin[i].detach().cpu().numpy()
+
+        fig = plt.figure(figsize=(4, 4), dpi=150)
+        plt.imshow(img)
+        plt.imshow(mask, alpha=alpha)  # default colormap is fine; you can set cmap="jet"
+        plt.axis("off")
+        plt.tight_layout(pad=0)
+
+        wb_images.append(wandb.Image(fig, caption=f"pseudo_fg (idx={i})"))
+        plt.close(fig)
+
+    wandb.log({log_key: wb_images}, step=step)
 
 @torch.no_grad()
 def wandb_log_all_proto_heatmaps_per_class(
@@ -213,6 +269,15 @@ def test(
                 step=global_step,
                 max_items=4,
                 log_key="eval/proto_heatmaps",
+            )
+
+            wandb_log_pseudo_fg_overlays(
+                images=images[sel],
+                pseudo_patch_labels=out["pseudo_patch_labels"],  # BxHxW
+                step=global_step,
+                log_key="eval/pseudo_fg_overlay",
+                mean=[0.485, 0.456, 0.406],  # remove if you don't normalize
+                std=[0.229, 0.224, 0.225],  # remove if you don't normalize
             )
 
             # also log a scalar so you can see activity immediately
