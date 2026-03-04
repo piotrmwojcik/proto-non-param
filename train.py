@@ -376,7 +376,7 @@ def main():
 
         dataloader_train = DataLoader(
             dataset=dataset_train,
-            batch_size=128,
+            batch_size=32,
             num_workers=8,
             shuffle=True
         )
@@ -389,7 +389,7 @@ def main():
 
         dataloader_test = DataLoader(
             dataset=dataset_test,
-            batch_size=128,
+            batch_size=32,
             num_workers=8,
             shuffle=False
         )
