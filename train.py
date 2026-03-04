@@ -112,7 +112,8 @@ def wandb_log_proto_and_fg_from_outputs(
             mode="nearest"
         ).squeeze(1)
 
-    pseudo_mask = (pseudo_patch_labels >= 0).float()
+    bg_id = 196
+    pseudo_mask = (pseudo_patch_labels != bg_id).float()
 
     B_log = min(B, max_items)
 
