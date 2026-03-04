@@ -306,9 +306,9 @@ def main():
         dataloader_test = DataLoader(dataset=dataset_test, batch_size=128, num_workers=8, shuffle=True)
     elif args.dataset == "tiny_imagenet":
         logger.info("Train on Tiny ImageNet")
-        n_classes = 200
+        n_classes = 196
         #dataset_dir = Path(args.data_root) / "tiny-imagenet-200"  # adjust if your folder name differs
-        dataset_dir = Path(args.data_root)
+        dataset_dir = Path(args.data_root) / "dataset"
 
         # Validation/Test transforms (no augmentation)
         test_transforms = T.Compose([
