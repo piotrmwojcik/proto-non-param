@@ -267,6 +267,7 @@ def test(
                 model=model,
                 images=images[selected_indices],
                 max_items=4,
+                step=global_step,
                 log_key="eval/proto_heatmaps",
             )
 
@@ -280,6 +281,7 @@ def test(
                 log_key="eval/pseudo_fg_overlay",
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225],
+                step=global_step,
             )
 
             # also log a scalar so you can see activity immediately
