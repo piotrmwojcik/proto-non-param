@@ -29,8 +29,11 @@ for i in range(len(folders)):
     fd = folders[i]
     tfd = target_folders[i]
 
-    files = [os.path.join(fd, f) for f in os.listdir(fd)
-             if f.lower().endswith((".jpg",".jpeg",".png"))]
+    files = [
+        os.path.join(fd, f)
+        for f in os.listdir(fd)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    ]
 
     files = [f for f in files if valid_image(f, 64)]
     p = Augmentor.Pipeline(source_directory=fd, output_directory=tfd)
