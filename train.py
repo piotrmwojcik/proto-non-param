@@ -266,22 +266,20 @@ def test(
             wandb_log_all_proto_heatmaps_per_class(
                 model=model,
                 images=images[selected_indices],
-                step=global_step,
                 max_items=4,
                 log_key="eval/proto_heatmaps",
             )
+
             sel = torch.tensor(selected_indices, device=images.device)
             with torch.no_grad():
-                out = model(images[sel], labels=labels[sel],
-                            use_gumbel=False)  # labels REQUIRED to produce pseudo labels
+                out = model(images[sel], labels=labels[sel], use_gumbel=False)
 
             wandb_log_pseudo_fg_overlays(
                 images=images[sel],
-                pseudo_patch_labels=out["pseudo_patch_labels"],  # BxHxW
-                step=global_step,
+                pseudo_patch_labels=out["pseudo_patch_labels"],
                 log_key="eval/pseudo_fg_overlay",
-                mean=[0.485, 0.456, 0.406],  # remove if you don't normalize
-                std=[0.229, 0.224, 0.225],  # remove if you don't normalize
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
             )
 
             # also log a scalar so you can see activity immediately
