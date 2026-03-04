@@ -417,7 +417,6 @@ def main():
             model_name=getattr(args, "clip_model_name", "ViT-L-14"),
             pretrained=getattr(args, "clip_pretrained", "openai"),
             patch_size=getattr(args, "clip_patch_size", 16),
-            clip_image_size=getattr(args, "clip_image_size", 224),
             freeze=getattr(args, "freeze_backbone", True),
         )
         dim = backbone.dim
