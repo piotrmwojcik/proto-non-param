@@ -96,7 +96,7 @@ class CocoCLIPDataset(Dataset):
         return img_feat.squeeze(0), txt_feat.squeeze(0), index
 
 train_dataset = CocoCLIPDataset(
-    csv_path="coco.csv",
+    csv_path="assets/coco_30k.csv",
     coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
     split="train",
     val_ratio=0.1,
@@ -104,7 +104,7 @@ train_dataset = CocoCLIPDataset(
 )
 
 val_dataset = CocoCLIPDataset(
-    csv_path="coco.csv",
+    csv_path="assets/coco_30k.csv",
     coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
     split="val",
     val_ratio=0.1,
