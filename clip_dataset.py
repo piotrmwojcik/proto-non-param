@@ -95,23 +95,23 @@ class CocoCLIPDataset(Dataset):
 
         return img_feat.squeeze(0), txt_feat.squeeze(0), index
 
-    train_dataset = CocoCLIPDataset(
-        csv_path="coco.csv",
-        coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
-        split="train",
-        val_ratio=0.1,
-        device="cuda",
-    )
+train_dataset = CocoCLIPDataset(
+    csv_path="coco.csv",
+    coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
+    split="train",
+    val_ratio=0.1,
+    device="cuda",
+)
 
-    val_dataset = CocoCLIPDataset(
-        csv_path="coco.csv",
-        coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
-        split="val",
-        val_ratio=0.1,
-        device="cuda",
-    )
+val_dataset = CocoCLIPDataset(
+    csv_path="coco.csv",
+    coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
+    split="val",
+    val_ratio=0.1,
+    device="cuda",
+)
 
-    img_emb, txt_emb, idx = train_dataset[0]
-    print(img_emb.shape)  # usually [512]
-    print(txt_emb.shape)  # usually [512]
-    print(idx)
+img_emb, txt_emb, idx = train_dataset[0]
+print(img_emb.shape)  # usually [512]
+print(txt_emb.shape)  # usually [512]
+print(idx)
