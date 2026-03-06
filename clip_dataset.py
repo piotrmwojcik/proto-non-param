@@ -97,7 +97,7 @@ class CocoCLIPDataset(Dataset):
 
 train_dataset = CocoCLIPDataset(
     csv_path="assets/coco_30k.csv",
-    coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
+    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
     split="train",
     val_ratio=0.1,
     device="cuda",
@@ -105,7 +105,7 @@ train_dataset = CocoCLIPDataset(
 
 val_dataset = CocoCLIPDataset(
     csv_path="assets/coco_30k.csv",
-    coco_root="/data/pwojcik/UnGuide/coco30_bck/val2014",
+    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
     split="val",
     val_ratio=0.1,
     device="cuda",
