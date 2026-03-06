@@ -59,14 +59,14 @@ class CocoCLIPDataset(Dataset):
         filename = f"{coco_id:012d}.jpg"
 
         candidates = [
-            #os.path.join(self.coco_root, "train2014", filename),
-            os.path.join(self.coco_root, "val2014", filename),
-            os.path.join(self.coco_root, filename),
+            os.path.join(self.coco_root, "val2014"),
+            self.coco_root,
         ]
 
         for path in candidates:
-            if os.path.isfile(path):
-                return path
+            candidate_file = os.path.join(path, filename)
+            if os.path.isfile(candidate_file):
+                return candidate_file
 
         return None
 
