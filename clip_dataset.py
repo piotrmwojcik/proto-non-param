@@ -64,6 +64,9 @@ class CocoCLIPDataset(Dataset):
         ]
 
         for path in candidates:
+            if os.path.basename(path) == filename and os.path.isfile(path):
+                return path
+
             candidate_file = os.path.join(path, filename)
             if os.path.isfile(candidate_file):
                 return candidate_file
