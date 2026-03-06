@@ -63,7 +63,7 @@ class CocoCLIPDataset(Dataset):
         self.target_transform = None
 
     def _find_image_path(self, coco_id: int):
-        filename = f"{coco_id:012d}.jpg"
+        filename = f"COCO_val2014_{coco_id:012d}.jpg"
         return self.file_index.get(filename)
 
     def __len__(self) -> int:
