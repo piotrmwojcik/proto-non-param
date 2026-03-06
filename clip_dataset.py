@@ -21,9 +21,16 @@ class CocoCLIPDataset(Dataset):
         self.coco_root = coco_root
         self.device = device
 
+        # Build filename -> full path once
+        val2014_dir = os.path.join(self.coco_root, "val2014")
+        self.file_index = {
+            fname: os.path.join(val2014_dir, fname)
+            for fname in os.listdir(val2014_dir)
+            if fname.endswith(".jpg")
+        }
+
         df = pd.read_csv(csv_path)
 
-        # Build (image_path, caption) pairs
         samples = []
         for _, row in df.iterrows():
             coco_id = int(row["coco_id"])
@@ -57,21 +64,7 @@ class CocoCLIPDataset(Dataset):
 
     def _find_image_path(self, coco_id: int):
         filename = f"{coco_id:012d}.jpg"
-
-        candidates = [
-            os.path.join(self.coco_root, "val2014", f)
-            for f in os.listdir(os.path.join(self.coco_root, "val2014"))
-        ]
-
-        for path in candidates:
-            if os.path.basename(path) == filename and os.path.isfile(path):
-                return path
-
-            candidate_file = os.path.join(path, filename)
-            if os.path.isfile(candidate_file):
-                return candidate_file
-
-        return None
+        return self.file_index.get(filename)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -98,6 +91,7 @@ class CocoCLIPDataset(Dataset):
 
         return img_feat.squeeze(0), txt_feat.squeeze(0), index
 
+
 train_dataset = CocoCLIPDataset(
     csv_path="assets/coco_30k.csv",
     coco_root="/data/pwojcik/UnGuide/coco30_bck/",
@@ -115,6 +109,6 @@ val_dataset = CocoCLIPDataset(
 )
 
 img_emb, txt_emb, idx = train_dataset[0]
-print(img_emb.shape)  # usually [512]
-print(txt_emb.shape)  # usually [512]
+print(img_emb.shape)
+print(txt_emb.shape)
 print(idx)
