@@ -59,8 +59,8 @@ class CocoCLIPDataset(Dataset):
         filename = f"{coco_id:012d}.jpg"
 
         candidates = [
-            os.path.join(self.coco_root, "val2014"),
-            self.coco_root,
+            os.path.join(self.coco_root, "val2014", f)
+            for f in os.listdir(os.path.join(self.coco_root, "val2014"))
         ]
 
         for path in candidates:
