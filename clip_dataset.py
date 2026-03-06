@@ -4,6 +4,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+import torch
+import torch.nn.functional as F
 import open_clip
 
 
@@ -108,7 +110,15 @@ val_dataset = CocoCLIPDataset(
     device="cuda",
 )
 
-img_emb, txt_emb, idx = train_dataset[0]
-print(img_emb.shape)
-print(txt_emb.shape)
-print(idx)
+num_samples = 5
+
+for i in range(num_samples):
+    img_emb, txt_emb, idx = train_dataset[i]
+
+    sim = F.cosine_similarity(img_emb.unsqueeze(0), txt_emb.unsqueeze(0)).item()
+
+    print(f"sample {i} (idx={idx})")
+    print("image emb shape:", img_emb.shape)
+    print("text emb shape:", txt_emb.shape)
+    print("cosine similarity:", sim)
+    print()
