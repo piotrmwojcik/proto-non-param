@@ -1,27 +1,30 @@
-import spacy
-
-# load POS tagger
-nlp = spacy.load("en_core_web_sm")
+import nltk
 
 input_file = "vocab/mscoco.txt"
 output_file = "vocab/mscoco_nouns.txt"
 
 nouns = []
 
-with open(input_file, "r") as f:
-    words = [w.strip() for w in f if w.strip()]
+with open(input_file, "r", encoding="utf-8") as f:
+    lines = f.readlines()
 
-# process words as a single doc for efficiency
-doc = nlp(" ".join(words))
+for line in lines:
+    # tokenize sentence
+    tokens = nltk.word_tokenize(line.strip())
 
-for token in doc:
-    if token.pos_ in {"NOUN", "PROPN"}:
-        nouns.append(token.text)
+    # POS tagging
+    tagged = nltk.pos_tag(tokens)
 
-with open(output_file, "w") as f:
-    for w in nouns:
-        f.write(w + "\n")
+    # extract nouns
+    for word, tag in tagged:
+        if tag in ["NN", "NNS", "NNP", "NNPS"]:
+            nouns.append(word.lower())
 
-print(f"Total words: {len(words)}")
-print(f"Nouns found: {len(nouns)}")
-print(f"Saved to: {output_file}")
+# remove duplicates (optional)
+nouns = sorted(set(nouns))
+
+with open(output_file, "w", encoding="utf-8") as f:
+    for noun in nouns:
+        f.write(noun + "\n")
+
+print(f"Saved {len(nouns)} nouns to {output_file}")
