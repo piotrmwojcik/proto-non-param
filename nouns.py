@@ -1,5 +1,12 @@
 import nltk
 
+nltk.download('punkt', download_dir='./nltk_data')
+nltk.download('punkt_tab', download_dir='./nltk_data')
+nltk.download('averaged_perceptron_tagger', download_dir='./nltk_data')
+
+import os
+os.environ['NLTK_DATA'] = './nltk_data'
+
 input_file = "vocab/mscoco.txt"
 output_file = "vocab/mscoco_nouns.txt"
 
