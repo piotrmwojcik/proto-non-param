@@ -115,6 +115,52 @@ class ScoreAggregation(nn.Module):
         return x
 
 
+class ProjectionHead(nn.Module):
+    """
+    SimCLR-style projection head.
+
+    Maps input_dim -> hidden_dim -> output_dim
+    with BN + ReLU in between.
+
+    For CLIP text embeddings:
+        512 -> 768 -> 768
+    """
+    def __init__(
+        self,
+        input_dim: int = 512,
+        hidden_dim: int = 768,
+        output_dim: int = 768,
+        use_bn: bool = True,
+        normalize_output: bool = True,
+    ):
+        super().__init__()
+        self.normalize_output = normalize_output
+
+        layers = [nn.Linear(input_dim, hidden_dim, bias=not use_bn)]
+        if use_bn:
+            layers.append(nn.BatchNorm1d(hidden_dim))
+        layers.append(nn.ReLU(inplace=True))
+
+        layers.append(nn.Linear(hidden_dim, output_dim, bias=True))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [..., input_dim]
+        returns: [..., output_dim]
+        """
+        orig_shape = x.shape
+        x = x.reshape(-1, orig_shape[-1])
+        x = self.net(x)
+
+        if self.normalize_output:
+            x = F.normalize(x, dim=-1)
+
+        x = x.reshape(*orig_shape[:-1], -1)
+        return x
+
+
 class PNP(nn.Module):
     def __init__(self, backbone: nn.Module, fg_extractor: nn.Module,
                  *,

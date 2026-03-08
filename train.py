@@ -61,7 +61,6 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     return out.clip(0, 255).astype(np.uint8)
 
 
-
 def _to_uint8_img(img_chw: torch.Tensor, mean=None, std=None) -> np.ndarray:
     """
     img_chw: (3,H,W) torch tensor
@@ -78,7 +77,7 @@ def _to_uint8_img(img_chw: torch.Tensor, mean=None, std=None) -> np.ndarray:
 
 
 @torch.no_grad()
-def wandb_log_proto_and_fg_from_outputs(
+def wandb_log_proto_heatmaps_from_outputs(
     *,
     images: torch.Tensor,
     outputs: dict,
@@ -87,7 +86,6 @@ def wandb_log_proto_and_fg_from_outputs(
     std=(0.26862954, 0.26130258, 0.27577711),
     max_items: int = 4,
     log_key_heatmaps="eval/proto_heatmaps",
-    log_key_fg="eval/pseudo_fg_overlay",
 ):
 
     logits = outputs["class_logits"]
@@ -104,22 +102,9 @@ def wandb_log_proto_and_fg_from_outputs(
     _, _, Hi, Wi = images.shape
     pred_maps_up = F.interpolate(pred_maps, size=(Hi, Wi), mode="bilinear", align_corners=False)
 
-    pseudo_patch_labels = outputs["pseudo_patch_labels"]
-
-    if (pseudo_patch_labels.shape[-2], pseudo_patch_labels.shape[-1]) != (Hi, Wi):
-        pseudo_patch_labels = F.interpolate(
-            pseudo_patch_labels.unsqueeze(1).float(),
-            size=(Hi, Wi),
-            mode="nearest"
-        ).squeeze(1)
-
-    bg_id = 196
-    pseudo_mask = (pseudo_patch_labels != bg_id).float()
-
     B_log = min(B, max_items)
 
     heatmap_panels = []
-    fg_panels = []
 
     for b in range(B_log):
 
@@ -138,24 +123,9 @@ def wandb_log_proto_and_fg_from_outputs(
                 wandb.Image(overlay, caption=f"class={pred_cls} proto={k}")
             )
 
-        mask = pseudo_mask[b].cpu().numpy()
-
-        fig = plt.figure(figsize=(4,4), dpi=150)
-        plt.imshow(img_uint8)
-        plt.imshow(mask, alpha=0.45)
-        plt.axis("off")
-        plt.tight_layout(pad=0)
-
-        fg_panels.append(
-            wandb.Image(fig, caption=f"pseudo_fg | pred={pred_cls}")
-        )
-
-        plt.close(fig)
-
     wandb.log({
         "global_step": step,
         log_key_heatmaps: heatmap_panels,
-        log_key_fg: fg_panels
     })
 
 def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader, epoch: int,
