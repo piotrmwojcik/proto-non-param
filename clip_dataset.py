@@ -4,7 +4,6 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
-import torch
 import torch.nn.functional as F
 import open_clip
 
@@ -17,11 +16,11 @@ class CocoCLIPDataset(Dataset):
         split: str = "train",
         val_ratio: float = 0.1,
         seed: int = 42,
-        device: str = "cpu",
+        model_name: str = "ViT-B-32",
+        pretrained: str = "openai",
     ):
         self.csv_path = csv_path
         self.coco_root = coco_root
-        self.device = device
 
         # Build filename -> full path once
         val2014_dir = os.path.join(self.coco_root, "val2014")
@@ -54,12 +53,15 @@ class CocoCLIPDataset(Dataset):
             raise ValueError("split must be 'train' or 'val'")
 
         model, preprocess, _ = open_clip.create_model_and_transforms(
-            "ViT-B-32",
-            pretrained="openai",
+            model_name,
+            pretrained=pretrained,
         )
-        self.model = model.eval().to(device)
+        self.model = model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+
         self.preprocess = preprocess
-        self.tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        self.tokenizer = open_clip.get_tokenizer(model_name)
 
         self.transform = None
         self.target_transform = None
@@ -72,53 +74,48 @@ class CocoCLIPDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int):
-        im_path, label = self.samples[index]
+        im_path, caption = self.samples[index]
 
         img = Image.open(im_path).convert("RGB")
+
+        # Return image tensor in the format expected by the proto network / CLIP backbone
         if self.transform is not None:
-            img = self.transform(img)
+            img_tensor = self.transform(img)
+        else:
+            img_tensor = self.preprocess(img)   # [3, H, W], CLIP-normalized
 
         if self.target_transform is not None:
-            label = self.target_transform(label)
+            caption = self.target_transform(caption)
 
-        img_tensor = self.preprocess(img).unsqueeze(0).to(self.device)
-        text_tokens = self.tokenizer([label]).to(self.device)
+        text_tokens = self.tokenizer([caption])   # [1, context_len]
 
         with torch.no_grad():
-            img_feat = self.model.encode_image(img_tensor)
-            txt_feat = self.model.encode_text(text_tokens)
-
-            img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+            txt_feat = self.model.encode_text(text_tokens)   # [1, D]
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
-        return img_feat.squeeze(0), txt_feat.squeeze(0), index
+        return img_tensor, txt_feat.squeeze(0), index
 
+    train_dataset = CocoCLIPDataset(
+        csv_path="assets/coco_30k.csv",
+        coco_root="/data/pwojcik/UnGuide/coco30_bck/",
+        split="train",
+        val_ratio=0.1,
+    )
 
-train_dataset = CocoCLIPDataset(
-    csv_path="assets/coco_30k.csv",
-    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
-    split="train",
-    val_ratio=0.1,
-    device="cuda",
-)
+    val_dataset = CocoCLIPDataset(
+        csv_path="assets/coco_30k.csv",
+        coco_root="/data/pwojcik/UnGuide/coco30_bck/",
+        split="val",
+        val_ratio=0.1,
+    )
 
-val_dataset = CocoCLIPDataset(
-    csv_path="assets/coco_30k.csv",
-    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
-    split="val",
-    val_ratio=0.1,
-    device="cuda",
-)
+    num_samples = 5
 
-num_samples = 5
+    for i in range(num_samples):
+        img_tensor, txt_emb, idx = train_dataset[i]
 
-for i in range(num_samples):
-    img_emb, txt_emb, idx = train_dataset[i]
-
-    sim = F.cosine_similarity(img_emb.unsqueeze(0), txt_emb.unsqueeze(0)).item()
-
-    print(f"sample {i} (idx={idx})")
-    print("image emb shape:", img_emb.shape)
-    print("text emb shape:", txt_emb.shape)
-    print("cosine similarity:", sim)
-    print()
+        print(f"sample {i} (idx={idx})")
+        print("image tensor shape:", img_tensor.shape)  # expected [3, 224, 224]
+        print("text emb shape:", txt_emb.shape)  # expected [512] for ViT-B-32
+        print("image min/max:", img_tensor.min().item(), img_tensor.max().item())
+        print()

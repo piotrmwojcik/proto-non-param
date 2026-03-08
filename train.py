@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassAccuracy
 from tqdm import tqdm
 
-from data import CUBDataset, TinyImageNetDataset, train_transforms, test_transforms
+from data import CUBDataset, TinyImageNetDataset, CocoCLIPDataset, train_transforms, test_transforms
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded
 from modeling.pnp import PCA, PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -128,54 +128,65 @@ def wandb_log_proto_heatmaps_from_outputs(
         log_key_heatmaps: heatmap_panels,
     })
 
-def train(model: nn.Module, criterion: nn.Module | None, dataloader: DataLoader, epoch: int,
-          optimizer: optim.Optimizer | None, logger: Logger, device: torch.device):
+def train(
+    model: nn.Module,
+    criterion: nn.Module,
+    dataloader: DataLoader,
+    epoch: int,
+    optimizer: optim.Optimizer,
+    logger: Logger,
+    device: torch.device,
+):
     model.train()
     running_losses = defaultdict(float)
-    mca_train = MulticlassAccuracy(num_classes=len(dataloader.dataset.classes), average="micro").to(device)
+    running_cosine = 0.0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        batch = tuple(item.to(device) for item in batch)
-        images, labels = batch[:2]
+        images, target_txt, indices = batch
+        images = images.to(device, non_blocking=True)
+        target_txt = target_txt.to(device, non_blocking=True)
 
-        outputs = model(images, labels=labels)
+        outputs = model(images)
+        loss_dict = criterion(outputs, (images, target_txt, indices))
 
-        if criterion is not None and optimizer is not None:
-            loss_dict = criterion(outputs, batch)  # type: dict[str, torch.Tensor]
-            loss = sum(val for key, val in loss_dict.items() if not key.startswith("_"))
+        loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
+        if not isinstance(loss, torch.Tensor):
+            raise ValueError("Loss is not a tensor")
 
-            if not isinstance(loss, torch.Tensor):
-                raise ValueError
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
 
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+        with torch.no_grad():
+            pred_txt = F.normalize(outputs["pred_text_embedding"], dim=-1)
+            tgt_txt = F.normalize(target_txt, dim=-1)
+            batch_cosine = F.cosine_similarity(pred_txt, tgt_txt, dim=-1).mean().item()
+            running_cosine += batch_cosine * images.size(0)
 
-            log_dict = {}
-            for k, v in loss_dict.items():
-                running_losses[k] += v.item() * dataloader.batch_size
-                log_dict[f"train/{k}"] = v.item()
+        log_dict = {}
+        for k, v in loss_dict.items():
+            running_losses[k] += v.item() * images.size(0)
+            log_dict[f"train/{k}"] = v.item()
 
-            log_dict["train/total_loss"] = loss.item()
-            log_dict["epoch"] = epoch
-            #log_dict["step"] = epoch * len(dataloader) + i
-            global_step = epoch * len(dataloader) + i
-            log_dict["global_step"] = global_step
-            wandb.log(log_dict)
-
-        mca_train(outputs["class_logits"], labels)
+        global_step = epoch * len(dataloader) + i
+        log_dict["train/total_loss"] = loss.item()
+        log_dict["train/cosine_similarity"] = batch_cosine
+        log_dict["epoch"] = epoch
+        log_dict["global_step"] = global_step
+        wandb.log(log_dict)
 
     for k, v in running_losses.items():
         loss_avg = v / len(dataloader.dataset)
         logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
 
-    epoch_acc_train = mca_train.compute().item()
-    logger.info(f"EPOCH {epoch} train acc: {epoch_acc_train:.4f}")
+    epoch_cosine = running_cosine / len(dataloader.dataset)
+    logger.info(f"EPOCH {epoch} train cosine similarity: {epoch_cosine:.4f}")
 
 
 @torch.inference_mode()
 def test(
     model: nn.Module,
+    criterion: nn.Module,
     dataloader: DataLoader,
     epoch: int,
     logger: Logger,
@@ -185,66 +196,60 @@ def test(
     log_every: int = 20,
 ):
     model.eval()
-    mca_test = MulticlassAccuracy(
-        num_classes=len(dataloader.dataset.classes),
-        average="micro"
-    ).to(device)
+
+    running_losses = defaultdict(float)
+    running_cosine = 0.0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        batch = tuple(item.to(device) for item in batch)
-        images, labels = batch[:2]
+        images, target_txt, indices = batch
+        images = images.to(device, non_blocking=True)
+        target_txt = target_txt.to(device, non_blocking=True)
 
         outputs = model(images)
-        mca_test(outputs["class_logits"], labels)
+        loss_dict = criterion(outputs, (images, target_txt, indices))
+
+        with torch.no_grad():
+            pred_txt = F.normalize(outputs["pred_text_embedding"], dim=-1)
+            tgt_txt = F.normalize(target_txt, dim=-1)
+            batch_cosine = F.cosine_similarity(pred_txt, tgt_txt, dim=-1).mean().item()
+            running_cosine += batch_cosine * images.size(0)
+
+        for k, v in loss_dict.items():
+            running_losses[k] += v.item() * images.size(0)
 
         if i % log_every == 0:
             global_step = epoch * train_steps_per_epoch + i
 
-            with torch.no_grad():
-                outputs = model(images)  # inference pass (labels=None)
-                preds = outputs["class_logits"].argmax(dim=1)
+            topk_vals, topk_idx = outputs["mixture_weights"].topk(k=5, dim=-1)
+            preview_words = []
+            for b in range(min(4, images.size(0))):
+                words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
+                preview_words.append(", ".join(words))
 
-            # diverse sample selection
-            unique_classes = preds.unique()
-            selected_indices = []
-            for c in unique_classes:
-                idxs = (preds == c).nonzero(as_tuple=True)[0]
-                rand_idx = idxs[torch.randint(len(idxs), (1,))]
-                selected_indices.append(rand_idx.item())
+            wandb.log({
+                "eval/cosine_similarity": batch_cosine,
+                "eval/batch_idx": i,
+                "eval/top_words_sample0": preview_words[0] if len(preview_words) > 0 else "",
+                "epoch": epoch,
+                "global_step": global_step,
+            })
 
-            # if not enough classes, fill with random samples
-            if len(selected_indices) < 4:
-                remaining = list(set(range(len(images))) - set(selected_indices))
-                extra = torch.randperm(len(remaining))[: 4 - len(selected_indices)]
-                selected_indices += [remaining[i] for i in extra]
+    avg_losses = {}
+    for k, v in running_losses.items():
+        avg_losses[k] = v / len(dataloader.dataset)
+        logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
 
-            selected_indices = selected_indices[:4]
-            sel = torch.tensor(selected_indices, device=images.device)
-
-            # ---- NEW: compute outputs WITH pseudo labels for selected images only ----
-            with torch.no_grad():
-                outputs_sel = model(images[sel], labels=preds[sel], use_gumbel=False)
-                # outputs_sel now contains "pseudo_patch_labels" (unless disable_clustering=True)
-
-            wandb_log_proto_heatmaps_from_outputs(
-                images=images[sel],
-                outputs=outputs_sel,
-                step=global_step,
-            )
-
-            # also log a scalar so you can see activity immediately
-            wandb.log({"eval/global_step": global_step, "eval/batch_idx": i, "epoch": epoch, "global_step": global_step})
-
-    epoch_acc_test = mca_test.compute().item()
-    logger.info(f"EPOCH {epoch} test acc: {epoch_acc_test:.4f}")
+    epoch_cosine = running_cosine / len(dataloader.dataset)
+    logger.info(f"EPOCH {epoch} test cosine similarity: {epoch_cosine:.4f}")
 
     wandb.log({
-        "test/accuracy": epoch_acc_test,
+        "test/cosine_similarity": epoch_cosine,
         "epoch": epoch,
         "global_step": epoch * train_steps_per_epoch + (len(dataloader) - 1),
+        **{f"test/{k}": v for k, v in avg_losses.items()},
     })
 
-    return epoch_acc_test
+    return epoch_cosine
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -254,8 +259,18 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--data-root", type=str, default="./datasets")
-    parser.add_argument("--dataset", type=str, default="CUB", choices=["CUB", "tiny_imagenet"])
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="CUB",
+        choices=["CUB", "tiny_imagenet", "coco_clip"]
+    )
 
+    parser.add_argument("--coco-csv-path", type=str, default="assets/coco_30k.csv")
+    parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
+    parser.add_argument("--coco-val-ratio", type=float, default=0.1)
+    parser.add_argument("--coco-clip-model-name", type=str, default="ViT-B-32")
+    parser.add_argument("--coco-clip-pretrained", type=str, default="openai")
     parser.add_argument(
         "--backbone",
         type=str,
@@ -363,6 +378,50 @@ def main():
             num_workers=8,
             shuffle=False
         )
+    elif args.dataset == "coco_clip":
+        logger.info("Train on COCO CLIP embedding dataset")
+
+        # Dummy class count so existing code can still instantiate modules.
+        # Replace this with your real value if you use class-based prototypes.
+        n_classes = 1
+
+        dataset_train = CocoCLIPDataset(
+            csv_path=args.coco_csv_path,
+            coco_root=args.coco_root,
+            split="train",
+            val_ratio=args.coco_val_ratio,
+            seed=args.seed,
+            device="cpu",
+            model_name=args.coco_clip_model_name,
+            pretrained=args.coco_clip_pretrained,
+        )
+
+        dataloader_train = DataLoader(
+            dataset=dataset_train,
+            batch_size=128,
+            num_workers=4,
+            shuffle=True,
+            pin_memory=True,
+        )
+
+        dataset_test = CocoCLIPDataset(
+            csv_path=args.coco_csv_path,
+            coco_root=args.coco_root,
+            split="val",
+            val_ratio=args.coco_val_ratio,
+            seed=args.seed,
+            device="cpu",
+            model_name=args.coco_clip_model_name,
+            pretrained=args.coco_clip_pretrained,
+        )
+
+        dataloader_test = DataLoader(
+            dataset=dataset_test,
+            batch_size=128,
+            num_workers=4,
+            shuffle=False,
+            pin_memory=True,
+        )
     else:
         raise NotImplementedError(f"Dataset {args.dataset} is not implemented")
 
@@ -418,6 +477,11 @@ def main():
     criterion = PNPCriterion(l_ppd_coef=0.8, n_prototypes=args.num_prototypes, num_classes=n_classes)
 
     net.to(device)
+
+    net.init_prototypes_from_clip_cache(
+        "vocab/mscoco_nouns_clip_cache.pt",
+        device=device,
+    )
 
     best_epoch, best_test_epoch = 0, 0.0
 

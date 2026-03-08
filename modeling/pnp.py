@@ -2,21 +2,18 @@ from math import sqrt
 
 import torch
 import torch.nn.functional as F
-from einops import einsum, rearrange, repeat
+from einops import einsum
 from torch import nn
 import open_clip
 
-from .utils import momentum_update, sinkhorn_knopp
-
 
 class CLIPPatch16Backbone(nn.Module):
-
-    def __init__(self, model_name="ViT-B-14", pretrained="openai", patch_size=16):
+    def __init__(self, model_name: str = "ViT-B-14", pretrained: str = "openai", patch_size: int = 16):
         super().__init__()
 
         model, _, _ = open_clip.create_model_and_transforms(
             model_name,
-            pretrained=pretrained
+            pretrained=pretrained,
         )
 
         self.model = model
@@ -24,95 +21,49 @@ class CLIPPatch16Backbone(nn.Module):
         self.dim = self.visual.output_dim
         self.patch_size = patch_size
 
-        # start frozen by default (like DINO stage-1)
-        self._trainable = False
         for p in self.parameters():
             p.requires_grad = False
 
     def set_requires_grad(self, requires_grad: bool = True):
-        """Match DINO backbone API used in train.py."""
-        self._trainable = requires_grad
         for p in self.parameters():
             p.requires_grad = requires_grad
         if not requires_grad:
             self.eval()
 
     def learnable_parameters(self):
-        """Match DINO backbone API used in train.py."""
         return [p for p in self.parameters() if p.requires_grad]
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor):
         """
-        x: [B,3,H,W] must already be CLIP-normalized
-        returns:
-          patch_tokens: [B,N,embed_dim]  (CLIP joint space)
-          raw_patch_tokens: same
-          cls_tokens: [B,embed_dim] pooled (mean over patches)
+        Args:
+            x: [B, 3, H, W], already CLIP-normalized
+
+        Returns:
+            patch_tokens: [B, N, D]
+            raw_patch_tokens: [B, N, D]
+            cls_tokens: [B, D]
         """
         B, C, H, W = x.shape
         p = self.patch_size
         assert H % p == 0 and W % p == 0, f"H,W must be divisible by {p}."
 
-        # [B, C*p*p, N]
-        patches = F.unfold(x, kernel_size=p, stride=p).transpose(1, 2)  # [B,N,C*p*p]
+        patches = F.unfold(x, kernel_size=p, stride=p).transpose(1, 2)  # [B, N, C*p*p]
         N = patches.shape[1]
-        patches = patches.reshape(B * N, C, p, p)  # [B*N,3,p,p]
+        patches = patches.reshape(B * N, C, p, p)  # [B*N, 3, p, p]
 
-        # CLIP expects its nominal image size (224 for most openai checkpoints)
+        # OpenAI CLIP checkpoints typically expect 224x224
         patches = F.interpolate(patches, size=(224, 224), mode="bilinear", align_corners=False)
 
-        # IMPORTANT: use CLIP's projected embedding for text comparison
-        feats = self.model.encode_image(patches)  # [B*N, embed_dim]
-        feats = F.normalize(feats, dim=-1)        # cosine-ready
-
-        feats = feats.reshape(B, N, -1)           # [B,N,embed_dim]
+        feats = self.model.encode_image(patches)  # [B*N, D]
+        feats = F.normalize(feats, dim=-1)
+        feats = feats.reshape(B, N, -1)  # [B, N, D]
 
         patch_tokens = feats
         raw_patch_tokens = feats
-        cls_tokens = feats.mean(dim=1)            # [B,embed_dim] (your choice of pooling)
+        cls_tokens = feats.mean(dim=1)
 
         return patch_tokens, raw_patch_tokens, cls_tokens
-
-class PCA(nn.Module):
-    def __init__(self, compare_fn: str = "le", threshold: float = 0.5, n_components: int = 1,
-                 bg_class: int = 200) -> None:
-        super().__init__()
-        self.compare_fn = torch.ge if compare_fn == "ge" else torch.le
-        self.threshold = threshold
-        self.n_components = n_components
-        self.bg_class = bg_class
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor, cls_tokens: torch.Tensor | None = None, attn_maps=None):
-        B, n_patches, dim = x.shape
-        H = W = int(sqrt(n_patches))
-        U, _, _ = torch.pca_lowrank(
-            x.reshape(-1, dim),
-            q=self.n_components, center=True, niter=10
-        )
-        U_scaled = (U - U.min()) / (U.max() - U.min()).squeeze()  # shape: [B*H*W, 1]
-        U_scaled = U_scaled.reshape(B, H, W)
-
-        pseudo_patch_labels = torch.where(
-            self.compare_fn(U_scaled, other=self.threshold),
-            repeat(y, "B -> B H W", H=H, W=W),
-            self.bg_class
-        )
-
-        return pseudo_patch_labels.to(dtype=torch.long)  # B H W
-
-
-class ScoreAggregation(nn.Module):
-    def __init__(self, init_val: float = 0.2, n_classes: int = 200, n_prototypes: int = 5) -> None:
-        super().__init__()
-        self.weights = nn.Parameter(torch.full((n_classes, n_prototypes,), init_val, dtype=torch.float32))
-
-    def forward(self, x: torch.Tensor):
-        n_classes, n_prototypes = self.weights.shape
-        sa_weights = F.softmax(self.weights, dim=-1) * n_prototypes
-        x = x * sa_weights  # B C K
-        x = x.sum(-1)  # B C
-        return x
 
 
 class ProjectionHead(nn.Module):
@@ -121,9 +72,6 @@ class ProjectionHead(nn.Module):
 
     Maps input_dim -> hidden_dim -> output_dim
     with BN + ReLU in between.
-
-    For CLIP text embeddings:
-        512 -> 768 -> 768
     """
     def __init__(
         self,
@@ -140,16 +88,11 @@ class ProjectionHead(nn.Module):
         if use_bn:
             layers.append(nn.BatchNorm1d(hidden_dim))
         layers.append(nn.ReLU(inplace=True))
-
         layers.append(nn.Linear(hidden_dim, output_dim, bias=True))
 
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [..., input_dim]
-        returns: [..., output_dim]
-        """
         orig_shape = x.shape
         x = x.reshape(-1, orig_shape[-1])
         x = self.net(x)
@@ -161,212 +104,205 @@ class ProjectionHead(nn.Module):
         return x
 
 
-class PNP(nn.Module):
-    def __init__(self, backbone: nn.Module, fg_extractor: nn.Module,
-                 *,
-                 always_norm_patches: bool = True, gamma: float = 0.999, n_prototypes: int = 5,
-                 n_classes: int = 200, norm_prototypes=False, temperature: float = 0.2,
-                 sa_init: float = 0.5, dim: int = 768, use_sinkhorn: bool = True):
+class PrototypeEmbedding(nn.Module):
+    """
+    Wraps the raw prototype bank before matching with image features.
+
+    Input:
+        [V, D]
+    Output:
+        [V, D]
+    """
+    def __init__(self, dim: int):
         super().__init__()
-        self.gamma = gamma
-        self.n_prototypes = n_prototypes
-        self.n_classes = n_classes
-        self.C = n_classes + 1
-        self.disable_clustering = False
-        self.backbone = backbone
-        self.use_sinkhorn = use_sinkhorn
-        self.fg_extractor = fg_extractor
-
-        self.dim = dim
-        self.register_buffer("prototypes", torch.randn(self.C, self.n_prototypes, self.dim))
-        self.temperature = temperature
-
-        nn.init.trunc_normal_(self.prototypes, std=0.02)
-
-        self.classifier = ScoreAggregation(init_val=sa_init, n_classes=n_classes, n_prototypes=n_prototypes)
-
-        self.optimizing_prototypes = True
-        self.initializing = True
-        self.always_norm_patches = always_norm_patches
-        self.norm_prototypes = norm_prototypes
-
-    @staticmethod
-    def online_clustering(prototypes: torch.Tensor,
-                          patch_tokens: torch.Tensor,
-                          patch_prototype_logits: torch.Tensor,
-                          patch_labels: torch.Tensor,
-                          *,
-                          gamma: float = 0.999,
-                          use_sinkhorn: bool = True,
-                          use_gumbel: bool = False):
-        """Updates the prototypes based on the given inputs.
-        This function updates the prototypes based on the patch tokens,
-        patch-prototype logits, labels, and patch labels.
-
-        Args:
-            prototypes (torch.Tensor): A tensor of shape [C, K, dim,], representing K prototypes for each of C classes.
-            patch_tokens: A tensor of shape [B, n_patches, dim,], which is the feature from backbone.
-            patch_prototype_logits: The logits between patches and prototypes of shape [B, n_patches, C, K].
-            patch_labels: A tensor of shape [B, H, W,] of type torch.long representing the (generated) patch-level class labels.
-            labels: A tensor of shape [B,] of type torch.long representing the image-level class labels.
-            gamma: A float indicating the coefficient for momentum update.
-            use_gumbel: A boolean indicating whether to use gumbel softmax for patch assignments.
-        """
-        B, H, W = patch_labels.shape
-        C, K, dim = prototypes.shape
-
-        patch_labels_flat = patch_labels.flatten()  # shape: [B*H*W,]
-        patches_flat = rearrange(patch_tokens, "B n_patches dim -> (B n_patches) dim")
-        L = rearrange(patch_prototype_logits, "B n_patches C K -> (B n_patches) C K")
-
-        P_old = prototypes.clone()
-        P_new = prototypes.clone()
-
-        part_assignment_maps = torch.empty_like(patch_labels_flat)
-
-        for c in patch_labels.unique().tolist():
-            class_fg_mask = patch_labels_flat == c  # shape: [B*H*W,]
-            I_c = patches_flat[class_fg_mask]  # shape: [N, dim]
-            L_c = L[class_fg_mask, c, :]  # shape: [N, K,]
-            if use_sinkhorn:
-                L_c_assignment, L_c_assignment_indices = sinkhorn_knopp(L_c, use_gumbel=use_gumbel)  # shape: [N, K,], [N,]
-            else:
-                L_c_assignment, L_c_assignment_indices = L_c, L_c.argmax(dim=-1)
-            P_c_new = torch.mm(L_c_assignment.t(), I_c)  # shape: [K, dim]
-
-            P_c_old = P_old[c, :, :]
-
-            P_new[c, ...] = momentum_update(P_c_old, P_c_new, momentum=gamma)
-
-            part_assignment_maps[class_fg_mask] = L_c_assignment_indices + c * K
-
-        part_assignment_maps = rearrange(part_assignment_maps, "(B H W) -> B (H W)", B=B, H=H, W=W)
-
-        return part_assignment_maps, P_new
-
-    def forward(self, x: torch.Tensor, labels: torch.Tensor | None = None, *, use_gumbel: bool = False):
-        assert (not self.training) or (labels is not None)
-
-        patch_tokens, raw_patch_tokens, cls_tokens = self.backbone(x)  # shape: [B, n_patches, dim,]
-
-        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
-        prototype_norm = F.normalize(self.prototypes, p=2, dim=-1)
-
-        patch_prototype_logits = einsum(patch_tokens, prototype_norm, "B n_patches dim, C K dim -> B n_patches C K")
-
-        image_prototype_logits = patch_prototype_logits.max(1).values  # shape: [B, C, K,], C=n_classes+1
-
-        class_logits = self.classifier(image_prototype_logits[:, :-1, :])
-        class_logits = class_logits / self.temperature
-
-        outputs = dict(
-            patch_prototype_logits=patch_prototype_logits,  # shape: [B, n_patches, C, K,]
-            image_prototype_logits=image_prototype_logits,  # shape: [B, C, K,]
-            class_logits=class_logits  # shape: [B, n_classes,]
+        self.proj = nn.Sequential(
+            nn.Linear(dim, dim, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim, dim, bias=True),
         )
 
-        if labels is not None and (not self.disable_clustering):
-            raw_patch_tokens = F.normalize(raw_patch_tokens, p=2, dim=-1)
-            pseudo_patch_labels = self.fg_extractor(raw_patch_tokens.detach(), labels, cls_tokens=cls_tokens)
-            pseudo_patch_labels = pseudo_patch_labels.detach()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x)
 
-            part_assignment_maps, new_prototypes = self.online_clustering(
-                prototypes=self.prototypes,
-                patch_tokens=raw_patch_tokens.detach(),
-                patch_prototype_logits=patch_prototype_logits.detach(),
-                patch_labels=pseudo_patch_labels,
-                gamma=self.gamma,
-                use_gumbel=use_gumbel,
-                use_sinkhorn=self.use_sinkhorn
-            )
 
-            if self.training and self.optimizing_prototypes:
-                self.prototypes = F.normalize(new_prototypes, p=2, dim=-1) if self.norm_prototypes else new_prototypes
+class PNP(nn.Module):
+    """
+    Global prototype pool model.
 
-            outputs.update({
-                "patches": raw_patch_tokens,
-                "part_assignment_maps": part_assignment_maps,  # B n_patches
-                "pseudo_patch_labels": pseudo_patch_labels  # B H W
-            })
+    - One prototype per vocabulary item
+    - Prototype pool size == vocab cache size
+    - Reconstructs a CLIP text embedding as a soft mixture over vocab embeddings
+    """
+    def __init__(
+        self,
+        backbone: nn.Module,
+        *,
+        dim: int = 768,
+        temperature: float = 0.2,
+        clip_text_dim: int = 512,
+        text_proj_hidden_dim: int = 768,
+        vocab_cache_path: str = "vocab/mscoco_nouns_clip_cache.pt",
+        prototype_init_noise: float = 0.01,
+    ):
+        super().__init__()
+        self.backbone = backbone
+        self.dim = dim
+        self.temperature = temperature
+        self.clip_text_dim = clip_text_dim
+        self.prototype_init_noise = prototype_init_noise
 
+        # CLIP text space -> image / ViT feature space
+        self.text_projection_head = ProjectionHead(
+            input_dim=clip_text_dim,
+            hidden_dim=text_proj_hidden_dim,
+            output_dim=dim,
+            use_bn=True,
+            normalize_output=True,
+        )
+
+        # Load frozen vocab CLIP embeddings: dict[str, tensor(512)]
+        cache = torch.load(vocab_cache_path, map_location="cpu")
+        self.vocab_words = list(cache.keys())
+
+        vocab_clip_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)  # [V, 512]
+        vocab_clip_embs = F.normalize(vocab_clip_embs, dim=-1)
+
+        self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
+        self.vocab_size = vocab_clip_embs.shape[0]
+
+        # Initialize one prototype per vocab item in image feature space
+        with torch.no_grad():
+            proto_init = self.text_projection_head(vocab_clip_embs)  # [V, D]
+            proto_init = proto_init + prototype_init_noise * torch.randn_like(proto_init)
+            proto_init = F.normalize(proto_init, dim=-1)
+
+        self.prototypes = nn.Parameter(proto_init)  # [V, D]
+        self.prototype_embed = PrototypeEmbedding(dim=self.dim)
+
+    def get_prototypes(self) -> torch.Tensor:
+        """
+        Always use wrapped prototypes.
+        """
+        proto = self.prototype_embed(self.prototypes)  # [V, D]
+        proto = F.normalize(proto, p=2, dim=-1)
+        return proto
+
+    def reconstruct_text_embedding(self, vocab_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            vocab_logits: [B, V]
+
+        Returns:
+            weights: [B, V]
+            pred_txt: [B, 512]
+        """
+        weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
+        pred_txt = weights @ self.vocab_clip_embeddings               # [B, 512]
+        pred_txt = F.normalize(pred_txt, dim=-1)
+        return weights, pred_txt
+
+    def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: [B, 3, H, W]
+
+        Returns:
+            dict with:
+                patch_prototype_logits: [B, N, V]
+                vocab_logits: [B, V]
+                mixture_weights: [B, V]
+                pred_text_embedding: [B, 512]
+        """
+        patch_tokens, _, _ = self.backbone(x)  # [B, N, D]
+        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
+
+        prototypes = self.get_prototypes()  # [V, D]
+
+        # Patch-to-vocab prototype logits
+        patch_prototype_logits = einsum(
+            patch_tokens,
+            prototypes,
+            "B n_patches dim, V dim -> B n_patches V",
+        )  # [B, N, V]
+
+        # Image-level logits over vocab pool
+        vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
+
+        # Reconstruct target text embedding as a mixture over vocab CLIP embeddings
+        weights, pred_text_embedding = self.reconstruct_text_embedding(vocab_logits)
+
+        outputs = {
+            "patch_prototype_logits": patch_prototype_logits,
+            "vocab_logits": vocab_logits,
+            "mixture_weights": weights,
+            "pred_text_embedding": pred_text_embedding,
+        }
         return outputs
 
-    def get_attn_maps(self, images: torch.Tensor, labels: torch.Tensor):
-        outputs = self(images, labels)
-        patch_prototype_logits = outputs["patch_prototype_logits"]
-
-        batch_size, n_patches, C, K = patch_prototype_logits.shape
-        H = W = int(sqrt(n_patches))
-
-        patch_prototype_logits = rearrange(patch_prototype_logits, "B (H W) C K -> B C K H W", H=H, W=W)
-        patch_prototype_logits = patch_prototype_logits[torch.arange(labels.numel()), labels, ...]  # B K H W
-
-        pooled_logits = F.avg_pool2d(patch_prototype_logits, kernel_size=(2, 2,), stride=2)
-        return patch_prototype_logits, pooled_logits
-
     def push_forward(self, x: torch.Tensor):
-        patch_tokens, _, cls_tokens = self.backbone(x)  # shape: [B, n_patches, dim,]
-        patch_tokens_norm = F.normalize(patch_tokens, p=2, dim=-1)
-        prototype_norm = F.normalize(self.prototypes, p=2, dim=-1)
-        if not self.initializing:
-            patch_prototype_logits = einsum(patch_tokens_norm, prototype_norm,
-                                            "B n_patches dim, C K dim -> B n_patches C K")
-        else:
-            patch_prototype_logits = einsum(patch_tokens_norm, prototype_norm,
-                                            "B n_patches dim, C K dim -> B n_patches C K")
-        batch_size, n_patches, C, K = patch_prototype_logits.shape
+        """
+        Returns a spatial map over the vocab prototype pool.
+        """
+        patch_tokens, _, _ = self.backbone(x)
+        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
+        prototypes = self.get_prototypes()  # [V, D]
+
+        patch_prototype_logits = einsum(
+            patch_tokens,
+            prototypes,
+            "B n_patches dim, V dim -> B n_patches V",
+        )  # [B, N, V]
+
+        _, n_patches, V = patch_prototype_logits.shape
         H = W = int(sqrt(n_patches))
-        prototype_logits = rearrange(patch_prototype_logits[:, :, :-1, :], "B (H W) C K -> B (C K) H W", H=H, W=W)
-        return None, F.avg_pool2d(prototype_logits, kernel_size=(2, 2,), stride=2)
+
+        prototype_logits = patch_prototype_logits.permute(0, 2, 1).reshape(-1, V, H, W)
+        pooled = F.avg_pool2d(prototype_logits, kernel_size=(2, 2), stride=2)
+        return None, pooled
 
 
 class PNPCriterion(nn.Module):
-    def __init__(
-            self,
-            l_ppd_coef: float = 0,
-            l_ppd_temp: float = 0.1,
+    """
+    Matches the predicted mixture embedding to the target CLIP text embedding.
 
-            num_classes: int = 200,
-            n_prototypes: int = 5,
-            bg_class_weight: float = 0.1
+    Expects batch format:
+        batch[0] = images
+        batch[1] = target CLIP text embedding, shape [B, 512]
+        batch[2] = index
+    """
+    def __init__(
+        self,
+        cosine_coef: float = 1.0,
+        mse_coef: float = 0.0,
+        entropy_coef: float = 0.0,
     ) -> None:
         super().__init__()
-        self.l_ppd_coef = l_ppd_coef
-        self.l_ppd_temp = l_ppd_temp
-
-        self.xe = nn.CrossEntropyLoss()
-
-        self.C = num_classes
-        self.K = n_prototypes
-        self.class_weights = torch.tensor([1] * self.C * self.K + [bg_class_weight] * self.K)
+        self.cosine_coef = cosine_coef
+        self.mse_coef = mse_coef
+        self.entropy_coef = entropy_coef
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...]):
-        logits = outputs["class_logits"]
-        patch_prototype_logits = outputs["patch_prototype_logits"]
-        part_assignment_maps = outputs["part_assignment_maps"]
+        pred_txt = outputs["pred_text_embedding"]   # [B, 512]
+        mixture_weights = outputs["mixture_weights"]  # [B, V]
+        target_txt = batch[1]                       # [B, 512]
 
-        labels = batch[1]
+        pred_txt = F.normalize(pred_txt, dim=-1)
+        target_txt = F.normalize(target_txt, dim=-1)
 
-        loss_dict = dict()
-        loss_dict["l_y"] = self.xe(logits, labels)
+        loss_dict = {}
 
-        if self.l_ppd_coef != 0:
-            l_ppd = self.ppd_criterion(
-                patch_prototype_logits,
-                part_assignment_maps,
-                class_weight=self.class_weights.to(dtype=torch.float32, device=logits.device),
-                temperature=self.l_ppd_temp
-            )
-            loss_dict["l_ppd"] = self.l_ppd_coef * l_ppd
-            loss_dict["_l_ppd_unadjusted"] = l_ppd
+        l_cosine = 1.0 - F.cosine_similarity(pred_txt, target_txt, dim=-1).mean()
+        loss_dict["l_txt"] = self.cosine_coef * l_cosine
+        loss_dict["_l_txt_unadjusted"] = l_cosine
+
+        if self.mse_coef != 0:
+            l_mse = F.mse_loss(pred_txt, target_txt)
+            loss_dict["l_mse"] = self.mse_coef * l_mse
+            loss_dict["_l_mse_unadjusted"] = l_mse
+
+        if self.entropy_coef != 0:
+            entropy = -(mixture_weights * torch.log(mixture_weights + 1e-8)).sum(dim=-1).mean()
+            loss_dict["l_entropy"] = self.entropy_coef * entropy
+            loss_dict["_l_entropy_unadjusted"] = entropy
 
         return loss_dict
-    
-    @staticmethod
-    def ppd_criterion(patch_prototype_logits: torch.Tensor,
-                      patch_prototype_assignments: torch.Tensor,
-                      class_weight: torch.Tensor,
-                      temperature: float = 0.1):
-        patch_prototype_logits = rearrange(patch_prototype_logits, "B N C K -> B (C K) N") / temperature
-        loss = F.cross_entropy(patch_prototype_logits, target=patch_prototype_assignments, weight=class_weight)
-        return loss
