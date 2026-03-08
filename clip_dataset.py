@@ -95,27 +95,27 @@ class CocoCLIPDataset(Dataset):
 
         return img_tensor, txt_feat.squeeze(0), index
 
-    train_dataset = CocoCLIPDataset(
-        csv_path="assets/coco_30k.csv",
-        coco_root="/data/pwojcik/UnGuide/coco30_bck/",
-        split="train",
-        val_ratio=0.1,
-    )
+train_dataset = CocoCLIPDataset(
+    csv_path="assets/coco_30k.csv",
+    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
+    split="train",
+    val_ratio=0.1,
+)
 
-    val_dataset = CocoCLIPDataset(
-        csv_path="assets/coco_30k.csv",
-        coco_root="/data/pwojcik/UnGuide/coco30_bck/",
-        split="val",
-        val_ratio=0.1,
-    )
+val_dataset = CocoCLIPDataset(
+    csv_path="assets/coco_30k.csv",
+    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
+    split="val",
+    val_ratio=0.1,
+)
 
-    num_samples = 5
+num_samples = 5
 
-    for i in range(num_samples):
-        img_tensor, txt_emb, idx = train_dataset[i]
+for i in range(num_samples):
+    img_tensor, txt_emb, idx = train_dataset[i]
 
-        print(f"sample {i} (idx={idx})")
-        print("image tensor shape:", img_tensor.shape)  # expected [3, 224, 224]
-        print("text emb shape:", txt_emb.shape)  # expected [512] for ViT-B-32
-        print("image min/max:", img_tensor.min().item(), img_tensor.max().item())
-        print()
+    print(f"sample {i} (idx={idx})")
+    print("image tensor shape:", img_tensor.shape)  # expected [3, 224, 224]
+    print("text emb shape:", txt_emb.shape)  # expected [512] for ViT-B-32
+    print("image min/max:", img_tensor.min().item(), img_tensor.max().item())
+    print()
