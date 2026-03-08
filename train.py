@@ -226,7 +226,7 @@ def test(
                 outputs_sel = model(images[sel], labels=preds[sel], use_gumbel=False)
                 # outputs_sel now contains "pseudo_patch_labels" (unless disable_clustering=True)
 
-            wandb_log_proto_and_fg_from_outputs(
+            wandb_log_proto_heatmaps_from_outputs(
                 images=images[sel],
                 outputs=outputs_sel,
                 step=global_step,
