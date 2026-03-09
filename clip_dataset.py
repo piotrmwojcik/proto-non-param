@@ -16,11 +16,13 @@ class CocoCLIPDataset(Dataset):
         split: str = "train",
         val_ratio: float = 0.1,
         seed: int = 42,
+        device: str = "cuda",
         model_name: str = "ViT-B-32",
         pretrained: str = "openai",
     ):
         self.csv_path = csv_path
         self.coco_root = coco_root
+        self.device = torch.device(device)
 
         # -------------------------------------------------
         # Build filename → full path
@@ -63,6 +65,9 @@ class CocoCLIPDataset(Dataset):
         )
 
         self.model = model.eval()
+
+        self.model = self.model.to(self.device)
+        self.noun_embeddings = self.noun_embeddings.to(self.device)
 
         for p in self.model.parameters():
             p.requires_grad = False
@@ -110,14 +115,19 @@ class CocoCLIPDataset(Dataset):
         if self.target_transform is not None:
             caption = self.target_transform(caption)
 
-        text_tokens = self.tokenizer([caption])
+        text_tokens = self.tokenizer([caption]).to(self.device)
 
         with torch.no_grad():
             txt_feat = self.model.encode_text(text_tokens)  # [1,512]
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
-            txt_feat = txt_feat.squeeze(0).cpu()
+            txt_feat = txt_feat.squeeze(0)
 
-            # caption → noun similarities
             noun_sim_distribution = txt_feat @ self.noun_embeddings.T  # [V]
 
-        return img_tensor, noun_sim_distribution, txt_feat, index
+        # move back to CPU so dataloader can collate safely
+        return (
+            img_tensor,
+            noun_sim_distribution.cpu(),
+            txt_feat.cpu(),
+            index,
+        )
