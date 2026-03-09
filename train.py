@@ -653,6 +653,7 @@ def main():
             train_steps_per_epoch=len(dataloader_train),
         )
 
+        print('!!! ', epoch_metrics.keys())
         epoch_metric = -epoch_metrics["test/loss"]
         torch.save(
             {
