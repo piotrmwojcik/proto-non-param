@@ -30,6 +30,12 @@ CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
+import nltk
+from nltk.stem import WordNetLemmatizer
+
+lemmatizer = WordNetLemmatizer()
+
+
 def denorm_to_uint8(
     x: torch.Tensor,
     mean=CLIP_MEAN,
@@ -232,6 +238,7 @@ def train(
     log_every: int = 100,
     heatmap_items: int = 2,
     heatmap_top_k: int = 5,
+    vocab_to_idx = None,
 ):
     model.train()
 
@@ -683,6 +690,7 @@ def main():
 
     cache = torch.load(args.vocab_cache_path, map_location="cpu")
     vocab_words = list(cache.keys())
+    vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
     noun_embeddings = torch.stack([cache[w] for w in vocab_words], dim=0)
     noun_embeddings = F.normalize(noun_embeddings, dim=-1).to(device)
 
@@ -699,6 +707,7 @@ def main():
             tokenizer=tokenizer,
             noun_embeddings=noun_embeddings,
             target_temperature=0.03,
+            vocab_to_idx=vocab_to_idx
         )
 
         epoch_metrics = test(
