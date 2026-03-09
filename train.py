@@ -639,16 +639,21 @@ def main():
             target_temperature=0.07,
         )
 
-        epoch_metric = test(
+        epoch_metrics = test(
             model=net,
             criterion=criterion,
             dataloader=dataloader_test,
             epoch=epoch,
             logger=logger,
             device=device,
+            clip_model=clip_model,
+            tokenizer=tokenizer,
+            noun_embeddings=noun_embeddings,
+            target_temperature=0.07,
             train_steps_per_epoch=len(dataloader_train),
         )
 
+        epoch_metric = -epoch_metrics["loss"]
         torch.save(
             {
                 "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
