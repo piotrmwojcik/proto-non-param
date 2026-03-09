@@ -317,7 +317,7 @@ def main():
 
     if not args.freeze_backbone:
         if hasattr(net.backbone, "set_requires_grad"):
-            net.backbone.set_requires_grad(True)
+            net.backbone.set_requires_grad()
         if hasattr(net.backbone, "learnable_parameters"):
             backbone_params = list(net.backbone.learnable_parameters())
         else:
