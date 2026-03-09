@@ -20,6 +20,98 @@ from modeling.pnp import CLIPPatch16Backbone, PNP, PNPCriterion
 from modeling.utils import print_parameters
 
 
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
+
+def denorm_to_uint8(
+    x: torch.Tensor,
+    mean=CLIP_MEAN,
+    std=CLIP_STD,
+) -> np.ndarray:
+    x = x.detach().cpu()
+    mean_t = torch.tensor(mean)[:, None, None]
+    std_t = torch.tensor(std)[:, None, None]
+    x = (x * std_t + mean_t).clamp(0, 1)
+    x = (x * 255).byte().permute(1, 2, 0).numpy()
+    return x
+
+
+def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45) -> np.ndarray:
+    hm = hm.detach().cpu()
+    hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+    hm = hm.numpy()
+
+    r = hm
+    g = np.clip(hm * 0.9 + 0.1, 0, 1)
+    b = np.clip(1.0 - hm * 0.8, 0, 1)
+    hm_rgb = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
+
+    out = alpha * hm_rgb.astype(np.float32) + (1 - alpha) * img_uint8.astype(np.float32)
+    return out.clip(0, 255).astype(np.uint8)
+
+
+@torch.no_grad()
+def wandb_log_top_proto_heatmaps(
+    *,
+    model: nn.Module,
+    images: torch.Tensor,
+    outputs: dict,
+    step: int,
+    max_items: int = 2,
+    top_k: int = 5,
+    mean=CLIP_MEAN,
+    std=CLIP_STD,
+    log_key: str = "train/top_proto_heatmaps",
+):
+    """
+    Logs, for a few images:
+      - raw image
+      - top-k prototype heatmaps with prototype words
+    """
+    patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
+    mix_weights = outputs["mixture_weights"]           # [B, V]
+
+    B, N, V = patch_logits.shape
+    H = W = int(math.sqrt(N))
+    _, _, Hi, Wi = images.shape
+
+    top_vals, top_idx = mix_weights.topk(k=top_k, dim=-1)   # [B, K]
+
+    panels = []
+    B_log = min(B, max_items)
+
+    for b in range(B_log):
+        img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
+        top_words = [model.vocab_words[j] for j in top_idx[b].tolist()]
+
+        panels.append(
+            wandb.Image(
+                img_uint8,
+                caption="raw | " + ", ".join(top_words)
+            )
+        )
+
+        for rank, proto_idx in enumerate(top_idx[b].tolist()):
+            hm = patch_logits[b, :, proto_idx].view(1, 1, H, W)
+            hm_up = F.interpolate(hm, size=(Hi, Wi), mode="bilinear", align_corners=False)[0, 0]
+            overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
+
+            word = model.vocab_words[proto_idx]
+            score = float(top_vals[b, rank].item())
+            panels.append(
+                wandb.Image(
+                    overlay,
+                    caption=f"top{rank+1} | {word} | weight={score:.3f}"
+                )
+            )
+
+    wandb.log({
+        "global_step": step,
+        log_key: panels,
+    })
+
+
 def train(
     model: nn.Module,
     criterion: nn.Module,
@@ -28,6 +120,10 @@ def train(
     optimizer: optim.Optimizer,
     logger: Logger,
     device: torch.device,
+    *,
+    log_every: int = 100,
+    heatmap_items: int = 2,
+    heatmap_top_k: int = 5,
 ):
     model.train()
     running_losses = defaultdict(float)
@@ -67,13 +163,25 @@ def train(
         log_dict["global_step"] = global_step
         wandb.log(log_dict)
 
+        if i % log_every == 0:
+            with torch.no_grad():
+                wandb_log_top_proto_heatmaps(
+                    model=model,
+                    images=images[:heatmap_items],
+                    outputs={k: v[:heatmap_items] if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0] else v
+                             for k, v in outputs.items()},
+                    step=global_step,
+                    max_items=heatmap_items,
+                    top_k=heatmap_top_k,
+                    log_key="train/top_proto_heatmaps",
+                )
+
     for k, v in running_losses.items():
         loss_avg = v / len(dataloader.dataset)
         logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
 
     epoch_cosine = running_cosine / len(dataloader.dataset)
     logger.info(f"EPOCH {epoch} train cosine similarity: {epoch_cosine:.4f}")
-
 
 @torch.inference_mode()
 def test(
