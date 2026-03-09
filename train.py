@@ -65,11 +65,14 @@ def wandb_log_top_proto_heatmaps(
     mean=CLIP_MEAN,
     std=CLIP_STD,
     log_key: str = "train/top_proto_heatmaps",
+    tsne_key: str = "train/proto_tsne",
+    tsne_max_points: int = 300,
 ):
     """
     Logs, for a few images:
       - raw image
       - top-k prototype heatmaps with prototype words
+      - t-SNE of frozen vocab embeddings vs learned prototypes
     """
     patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
     mix_weights = outputs["mixture_weights"]           # [B, V]
@@ -108,11 +111,86 @@ def wandb_log_top_proto_heatmaps(
                 )
             )
 
-    wandb.log({
+    log_dict = {
         "global_step": step,
         log_key: panels,
-    })
+    }
 
+    # ------------------------------
+    # t-SNE diagnostics
+    # ------------------------------
+    try:
+        frozen = F.normalize(model.vocab_clip_embeddings, dim=-1).detach().cpu()   # [V, 512]
+        learned = F.normalize(model.get_prototypes(), dim=-1).detach().cpu()       # [V, D]
+
+        # To compare in one t-SNE, bring learned prototypes to CLIP space if possible.
+        # If dimensions differ, project both to a common PCA-free truncated space by padding/truncating.
+        d_frozen = frozen.shape[1]
+        d_learned = learned.shape[1]
+
+        if d_frozen != d_learned:
+            common_dim = min(d_frozen, d_learned)
+            frozen_for_tsne = frozen[:, :common_dim]
+            learned_for_tsne = learned[:, :common_dim]
+        else:
+            frozen_for_tsne = frozen
+            learned_for_tsne = learned
+
+        n_total = frozen_for_tsne.shape[0]
+        n_keep = min(tsne_max_points, n_total)
+
+        # sample same indices for both clouds so labels align by word
+        perm = torch.randperm(n_total)[:n_keep]
+        frozen_sel = frozen_for_tsne[perm].numpy()
+        learned_sel = learned_for_tsne[perm].numpy()
+        words_sel = [model.vocab_words[i] for i in perm.tolist()]
+
+        X = np.concatenate([frozen_sel, learned_sel], axis=0)
+
+        tsne = TSNE(
+            n_components=2,
+            perplexity=min(30, max(5, n_keep // 10)),
+            init="pca",
+            learning_rate="auto",
+            random_state=42,
+        )
+        Z = tsne.fit_transform(X)
+
+        Z_frozen = Z[:n_keep]
+        Z_learned = Z[n_keep:]
+
+        fig = plt.figure(figsize=(8, 8), dpi=150)
+        plt.scatter(Z_frozen[:, 0], Z_frozen[:, 1], s=18, alpha=0.7, label="frozen_vocab")
+        plt.scatter(Z_learned[:, 0], Z_learned[:, 1], s=18, alpha=0.7, label="learned_proto")
+
+        # annotate a few top active words from the first logged image
+        if B_log > 0:
+            active_idx = top_idx[0].tolist()
+            active_words = [model.vocab_words[j] for j in active_idx]
+            active_set = set(active_words)
+
+            for i, w in enumerate(words_sel):
+                if w in active_set:
+                    plt.text(
+                        Z_frozen[i, 0], Z_frozen[i, 1], f"F:{w}",
+                        fontsize=7, alpha=0.8
+                    )
+                    plt.text(
+                        Z_learned[i, 0], Z_learned[i, 1], f"L:{w}",
+                        fontsize=7, alpha=0.8
+                    )
+
+        plt.legend()
+        plt.title("t-SNE: frozen vocab embeddings vs learned prototypes")
+        plt.tight_layout()
+
+        log_dict[tsne_key] = wandb.Image(fig, caption="frozen vs learned prototype space")
+        plt.close(fig)
+
+    except Exception as e:
+        log_dict[f"{tsne_key}_error"] = str(e)
+
+    wandb.log(log_dict)
 
 def train(
     model: nn.Module,
@@ -170,8 +248,9 @@ def train(
                 wandb_log_top_proto_heatmaps(
                     model=model,
                     images=images[:heatmap_items],
-                    outputs={k: v[:heatmap_items] if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0] else v
-                             for k, v in outputs.items()},
+                    outputs={
+                        k: v[:heatmap_items] if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0] else v
+                        for k, v in outputs.items()},
                     step=global_step,
                     max_items=heatmap_items,
                     top_k=heatmap_top_k,
