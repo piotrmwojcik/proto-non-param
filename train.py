@@ -228,6 +228,19 @@ def train(
             noun_sim_distribution = F.softmax(noun_sim_distribution / target_temperature, dim=-1)
             noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
 
+        # ---- DEBUG PRINT ----
+        if i % 200 == 0:  # print occasionally
+            b = 0  # first example in batch
+            topk_vals, topk_idx = noun_sim_distribution[b].topk(10)
+
+            words = [vocab_words[j] for j in topk_idx.tolist()]
+            weights = topk_vals.tolist()
+
+            print("\nCaption:", captions[b])
+            print("Top-10 nouns:")
+            for w, s in zip(words, weights):
+                print(f"  {w:15s} {s:.4f}")
+
         outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
