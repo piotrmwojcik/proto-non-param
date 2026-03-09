@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import math
 import argparse
+from sklearn.manifold import TSNE
 
 import wandb
 import lightning as L
