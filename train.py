@@ -458,7 +458,6 @@ def main():
     net.to(device)
 
     param_groups = [
-        {"params": [net.prototypes], "lr": args.prototype_lr},
         {"params": net.prototype_embed.parameters(), "lr": args.prototype_lr},
         {"params": net.text_projection_head.parameters(), "lr": args.text_proj_lr},
     ]
