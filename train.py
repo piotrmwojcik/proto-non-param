@@ -199,32 +199,19 @@ def train(
     optimizer: optim.Optimizer,
     logger: Logger,
     device: torch.device,
+    clip_model: nn.Module,
+    tokenizer,
+    noun_embeddings: torch.Tensor,
+    target_temperature: float = 0.07,
     *,
     log_every: int = 100,
     heatmap_items: int = 2,
     heatmap_top_k: int = 5,
 ):
-    model.train()
-    running_losses = defaultdict(float)
-    running_cosine = 0.0
-
-    clip_model, _, _ = open_clip.create_model_and_transforms(
-        "ViT-B-32",
-        pretrained="openai",
-    )
-
-    clip_model = clip_model.to(device)
-    clip_model.eval()
-
-    for p in clip_model.parameters():
-        p.requires_grad = False
-
-    tokenizer = open_clip.get_tokenizer("ViT-B-32")
-
     for i, batch in enumerate(tqdm(dataloader)):
 
         images, captions, indices = batch
-        images = images.to(device)
+        images = images.to(device, non_blocking=True)
 
         text_tokens = tokenizer(list(captions)).to(device)
 
@@ -232,13 +219,11 @@ def train(
             txt_feat = clip_model.encode_text(text_tokens)
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
-            # caption → noun distribution
             noun_sim_distribution = txt_feat @ noun_embeddings.T
-            noun_sim_distribution = F.softmax(noun_sim_distribution / temperature, dim=-1)
+            noun_sim_distribution = F.softmax(noun_sim_distribution / target_temperature, dim=-1)
+            noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
 
         outputs = model(images)
-
-        # pass noun distribution as target
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
@@ -250,7 +235,6 @@ def train(
         optimizer.step()
 
         log_dict = {}
-
         for k, v in loss_dict.items():
             running_losses[k] += v.item() * images.size(0)
             log_dict[f"train/{k}"] = v.item()
@@ -259,7 +243,6 @@ def train(
         log_dict["train/total_loss"] = loss.item()
         log_dict["epoch"] = epoch
         log_dict["global_step"] = global_step
-
         wandb.log(log_dict)
 
         if i % log_every == 0:
@@ -278,7 +261,6 @@ def train(
                     top_k=heatmap_top_k,
                     log_key="train/top_proto_heatmaps",
                 )
-
     for k, v in running_losses.items():
         loss_avg = v / len(dataloader.dataset)
         logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
@@ -613,6 +595,22 @@ def main():
     best_epoch = 0
     best_val_cosine = float("-inf")
 
+    clip_model, _, _ = open_clip.create_model_and_transforms(
+        args.coco_clip_model_name,
+        pretrained=args.coco_clip_pretrained,
+    )
+    clip_model = clip_model.eval().to(device)
+
+    for p in clip_model.parameters():
+        p.requires_grad = False
+
+    tokenizer = open_clip.get_tokenizer(args.coco_clip_model_name)
+
+    cache = torch.load(args.vocab_cache_path, map_location="cpu")
+    vocab_words = list(cache.keys())
+    noun_embeddings = torch.stack([cache[w] for w in vocab_words], dim=0)
+    noun_embeddings = F.normalize(noun_embeddings, dim=-1).to(device)
+
     for epoch in range(args.epochs):
         train(
             model=net,
@@ -622,6 +620,10 @@ def main():
             optimizer=optimizer,
             logger=logger,
             device=device,
+            clip_model=clip_model,
+            tokenizer=tokenizer,
+            noun_embeddings=noun_embeddings,
+            target_temperature=0.07,
         )
 
         epoch_metric = test(
