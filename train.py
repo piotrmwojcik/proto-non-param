@@ -57,6 +57,30 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     return out.clip(0, 255).astype(np.uint8)
 
 
+def extract_caption_nouns(caption: str, vocab_to_idx: dict[str, int]):
+    """
+    Extract nouns from caption using NLTK and map them to vocab indices.
+    """
+
+    tokens = nltk.word_tokenize(caption.lower())
+    pos_tags = nltk.pos_tag(tokens)
+
+    noun_idxs = []
+    seen = set()
+
+    for word, pos in pos_tags:
+
+        # keep only nouns
+        if pos.startswith("NN"):
+
+            lemma = lemmatizer.lemmatize(word, pos="n")
+
+            if lemma in vocab_to_idx and lemma not in seen:
+                noun_idxs.append(vocab_to_idx[lemma])
+                seen.add(lemma)
+
+    return noun_idxs
+
 @torch.no_grad()
 def wandb_log_top_proto_heatmaps(
     *,
@@ -224,8 +248,31 @@ def train(
             txt_feat = clip_model.encode_text(text_tokens)
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
-            noun_sim_distribution = txt_feat @ noun_embeddings.T
-            noun_sim_distribution = F.softmax(noun_sim_distribution / target_temperature, dim=-1)
+            B, D = txt_feat.shape
+            V = noun_embeddings.shape[0]
+
+            noun_sim_distribution = torch.zeros(B, V, device=device)
+
+            for b, caption in enumerate(captions):
+
+                noun_idxs = extract_caption_nouns(caption, vocab_to_idx)
+
+                if len(noun_idxs) == 0:
+                    # fallback to global similarity
+                    sims = txt_feat[b] @ noun_embeddings.T
+                    probs = F.softmax(sims / target_temperature, dim=-1)
+                    noun_sim_distribution[b] = probs
+                    continue
+
+                noun_idxs = torch.tensor(noun_idxs, device=device)
+
+                noun_embs = noun_embeddings[noun_idxs]
+
+                sims = txt_feat[b] @ noun_embs.T
+                probs = F.softmax(sims / target_temperature, dim=-1)
+
+                noun_sim_distribution[b, noun_idxs] = probs
+
             noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
 
         # ---- DEBUG PRINT ----
