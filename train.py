@@ -233,7 +233,7 @@ def train(
             b = 0  # first example in batch
             topk_vals, topk_idx = noun_sim_distribution[b].topk(10)
 
-            words = [vocab_words[j] for j in topk_idx.tolist()]
+            words = [model.vocab_words[j] for j in topk_idx.tolist()]
             weights = topk_vals.tolist()
 
             print("\nCaption:", captions[b])
