@@ -170,13 +170,6 @@ class PNP(nn.Module):
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
 
-        # Initialize one prototype per vocab item in image feature space
-        with torch.no_grad():
-            proto_init = self.text_projection_head(vocab_clip_embs)  # [V, D]
-            proto_init = proto_init + prototype_init_noise * torch.randn_like(proto_init)
-            proto_init = F.normalize(proto_init, dim=-1)
-
-        self.prototypes = nn.Parameter(proto_init)  # [V, D]
         self.prototype_embed = PrototypeEmbedding(dim=self.dim)
 
     def get_prototypes(self) -> torch.Tensor:
