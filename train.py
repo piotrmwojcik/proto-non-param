@@ -298,19 +298,6 @@ def build_backbone(args):
     # ---------------------------------------------------
     # Unfreeze last N transformer blocks
     # ---------------------------------------------------
-    if args.unfreeze_last_blocks > 0:
-
-        # DINOv2 models store blocks here
-        blocks = backbone.model.blocks if hasattr(backbone, "model") else backbone.blocks
-
-        n_blocks = len(blocks)
-        start = max(0, n_blocks - args.unfreeze_last_blocks)
-
-        for block in blocks[start:]:
-            for p in block.parameters():
-                p.requires_grad = True
-
-        print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
 
     return backbone, dim
 
@@ -447,6 +434,31 @@ def main():
         vocab_cache_path=args.vocab_cache_path,
         prototype_init_noise=args.prototype_init_noise,
     )
+
+    if args.unfreeze_last_blocks > 0:
+        bb = net.backbone
+
+        # freeze everything first
+        for p in bb.parameters():
+            p.requires_grad = False
+
+        # get transformer blocks from the actual backbone inside the model
+        if hasattr(bb, "model") and hasattr(bb.model, "blocks"):
+            blocks = bb.model.blocks
+        elif hasattr(bb, "blocks"):
+            blocks = bb.blocks
+        else:
+            raise AttributeError("Could not find transformer blocks in net.backbone")
+
+        n_blocks = len(blocks)
+        start = max(0, n_blocks - args.unfreeze_last_blocks)
+
+        for block in blocks[start:]:
+            for p in block.parameters():
+                p.requires_grad = True
+
+        print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks in net.backbone")
+
     criterion = PNPCriterion(
         cosine_coef=args.cosine_coef,
         mse_coef=args.mse_coef,
@@ -467,13 +479,7 @@ def main():
             "params": backbone_params,
             "lr": args.backbone_lr,
         })
-    # add backbone as separate group
-    backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
-    if backbone_params:
-        param_groups.append({
-            "params": backbone_params,
-            "lr": args.backbone_lr,
-        })
+
 
     optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
