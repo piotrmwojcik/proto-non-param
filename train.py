@@ -8,6 +8,7 @@ import numpy as np
 import math
 import argparse
 from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 
 import wandb
 import lightning as L
