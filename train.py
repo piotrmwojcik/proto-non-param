@@ -287,9 +287,24 @@ def test(
 
     running_losses = defaultdict(float)
     running_cosine = 0.0
+    num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, target_txt, indices = batch
+
+        # support newer dataset formats
+        if isinstance(batch, dict):
+            images = batch["image"]
+            target_txt = batch["target_txt"]
+            indices = batch.get("index", None)
+        else:
+            if len(batch) == 3:
+                images, target_txt, indices = batch
+            elif len(batch) == 2:
+                images, target_txt = batch
+                indices = None
+            else:
+                raise ValueError(f"Unexpected batch format with len={len(batch)}")
+
         images = images.to(device, non_blocking=True)
         target_txt = target_txt.to(device, non_blocking=True)
 
@@ -299,19 +314,19 @@ def test(
         pred_txt = F.normalize(outputs["pred_text_embedding"], dim=-1)
         tgt_txt = F.normalize(target_txt, dim=-1)
         batch_cosine = F.cosine_similarity(pred_txt, tgt_txt, dim=-1).mean().item()
-        running_cosine += batch_cosine * images.size(0)
+
+        bs = images.size(0)
+        num_samples += bs
+        running_cosine += batch_cosine * bs
 
         for k, v in loss_dict.items():
-            running_losses[k] += v.item() * images.size(0)
+            if isinstance(v, torch.Tensor):
+                running_losses[k] += v.item() * bs
+            else:
+                running_losses[k] += float(v) * bs
 
         if i % log_every == 0:
             global_step = epoch * train_steps_per_epoch + i
-
-            topk_vals, topk_idx = outputs["mixture_weights"].topk(k=5, dim=-1)
-            preview_words = []
-            for b in range(min(4, images.size(0))):
-                words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
-                preview_words.append(", ".join(words))
 
             log_dict = {
                 "eval/cosine_similarity": batch_cosine,
@@ -319,16 +334,25 @@ def test(
                 "epoch": epoch,
                 "global_step": global_step,
             }
-            if preview_words:
-                log_dict["eval/top_words_sample0"] = preview_words[0]
+
+            if "mixture_weights" in outputs:
+                topk_vals, topk_idx = outputs["mixture_weights"].topk(k=5, dim=-1)
+                preview_words = []
+                for b in range(min(4, images.size(0))):
+                    words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
+                    preview_words.append(", ".join(words))
+
+                if preview_words:
+                    log_dict["eval/top_words_sample0"] = preview_words[0]
+
             wandb.log(log_dict)
 
     avg_losses = {}
     for k, v in running_losses.items():
-        avg_losses[k] = v / len(dataloader.dataset)
+        avg_losses[k] = v / max(1, num_samples)
         logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
 
-    epoch_cosine = running_cosine / len(dataloader.dataset)
+    epoch_cosine = running_cosine / max(1, num_samples)
     logger.info(f"EPOCH {epoch} test cosine similarity: {epoch_cosine:.4f}")
 
     wandb.log({
@@ -339,7 +363,6 @@ def test(
     })
 
     return epoch_cosine
-
 
 def build_backbone(args):
     if "dinov2" in args.backbone:
