@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import math
 import open_clip
+from collections import defaultdict
 import argparse
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
@@ -208,6 +209,10 @@ def train(
     heatmap_items: int = 2,
     heatmap_top_k: int = 5,
 ):
+    model.train()
+
+    running_losses = defaultdict(float)
+
     for i, batch in enumerate(tqdm(dataloader)):
 
         images, captions, indices = batch
