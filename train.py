@@ -653,7 +653,7 @@ def main():
             train_steps_per_epoch=len(dataloader_train),
         )
 
-        epoch_metric = -epoch_metrics["loss"]
+        epoch_metric = -epoch_metrics["test/loss"]
         torch.save(
             {
                 "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
