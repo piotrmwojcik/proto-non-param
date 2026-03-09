@@ -115,10 +115,10 @@ class CocoCLIPDataset(Dataset):
         if self.target_transform is not None:
             caption = self.target_transform(caption)
 
-        text_tokens = self.tokenizer([caption]).to(self.device)
+        text_tokens = self.tokenizer([caption])
 
         with torch.no_grad():
-            txt_feat = self.model.encode_text(text_tokens)  # [1,512]
+            txt_feat = self.model.encode_text(text_tokens)
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
             txt_feat = txt_feat.squeeze(0)
 
