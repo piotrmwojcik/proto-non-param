@@ -104,27 +104,6 @@ class ProjectionHead(nn.Module):
         return x
 
 
-class PrototypeEmbedding(nn.Module):
-    """
-    Wraps the raw prototype bank before matching with image features.
-
-    Input:
-        [V, D]
-    Output:
-        [V, D]
-    """
-    def __init__(self, dim: int):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(dim, dim, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(dim, dim, bias=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x)
-
-
 class PNP(nn.Module):
     """
     Global prototype pool model.
@@ -170,14 +149,11 @@ class PNP(nn.Module):
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
 
-        self.prototype_embed = PrototypeEmbedding(dim=self.dim)
-
     def get_prototypes(self) -> torch.Tensor:
         """
-        Always use wrapped prototypes.
+        Compute visual prototypes on the fly from cached CLIP text embeddings.
         """
-        proto = self.prototype_embed(self.prototypes)  # [V, D]
-        proto = F.normalize(proto, p=2, dim=-1)
+        proto = self.text_projection_head(self.vocab_clip_embeddings)  # [V, D]
         return proto
 
     def reconstruct_text_embedding(self, vocab_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
