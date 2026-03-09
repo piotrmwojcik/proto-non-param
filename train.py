@@ -192,12 +192,13 @@ def wandb_log_top_proto_heatmaps(
 
     wandb.log(log_dict)
 
-def train(
+
+@torch.inference_mode()
+def test(
     model: nn.Module,
     criterion: nn.Module,
     dataloader: DataLoader,
     epoch: int,
-    optimizer: optim.Optimizer,
     logger: Logger,
     device: torch.device,
     clip_model: nn.Module,
@@ -205,71 +206,72 @@ def train(
     noun_embeddings: torch.Tensor,
     target_temperature: float = 0.07,
     *,
-    log_every: int = 100,
-    heatmap_items: int = 2,
-    heatmap_top_k: int = 5,
+    train_steps_per_epoch: int,
+    log_every: int = 20,
 ):
-    model.train()
+    model.eval()
 
     running_losses = defaultdict(float)
+    num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
-
         images, captions, indices = batch
         images = images.to(device, non_blocking=True)
 
         text_tokens = tokenizer(list(captions)).to(device)
 
-        with torch.no_grad():
-            txt_feat = clip_model.encode_text(text_tokens)
-            txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
+        txt_feat = clip_model.encode_text(text_tokens)
+        txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
-            noun_sim_distribution = txt_feat @ noun_embeddings.T
-            noun_sim_distribution = F.softmax(noun_sim_distribution / target_temperature, dim=-1)
-            noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
+        noun_sim_distribution = txt_feat @ noun_embeddings.T
+        noun_sim_distribution = F.softmax(noun_sim_distribution / target_temperature, dim=-1)
+        noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
 
         outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
-        loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
-        if not isinstance(loss, torch.Tensor):
-            raise ValueError("Loss is not a tensor")
+        bs = images.size(0)
+        num_samples += bs
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-
-        log_dict = {}
         for k, v in loss_dict.items():
-            running_losses[k] += v.item() * images.size(0)
-            log_dict[f"train/{k}"] = v.item()
-
-        global_step = epoch * len(dataloader) + i
-        log_dict["train/total_loss"] = loss.item()
-        log_dict["epoch"] = epoch
-        log_dict["global_step"] = global_step
-        wandb.log(log_dict)
+            running_losses[k] += v.item() * bs
 
         if i % log_every == 0:
-            with torch.no_grad():
-                wandb_log_top_proto_heatmaps(
-                    model=model,
-                    images=images[:heatmap_items],
-                    outputs={
-                        k: v[:heatmap_items]
-                        if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0]
-                        else v
-                        for k, v in outputs.items()
-                    },
-                    step=global_step,
-                    max_items=heatmap_items,
-                    top_k=heatmap_top_k,
-                    log_key="train/top_proto_heatmaps",
-                )
-    for k, v in running_losses.items():
-        loss_avg = v / len(dataloader.dataset)
-        logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
+            global_step = epoch * train_steps_per_epoch + i
 
+            log_dict = {
+                "eval/batch_idx": i,
+                "epoch": epoch,
+                "global_step": global_step,
+            }
+
+            if "mixture_weights" in outputs:
+                topk_vals, topk_idx = outputs["mixture_weights"].topk(k=5, dim=-1)
+                preview_words = []
+                for b in range(min(4, images.size(0))):
+                    words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
+                    preview_words.append(", ".join(words))
+
+                if preview_words:
+                    log_dict["eval/top_words_sample0"] = preview_words[0]
+
+            for k, v in loss_dict.items():
+                log_dict[f"eval/{k}"] = v.item()
+
+            wandb.log(log_dict)
+
+    avg_losses = {}
+    for k, v in running_losses.items():
+        avg_losses[k] = v / len(dataloader.dataset)
+        logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
+
+    wandb.log({
+        "epoch": epoch,
+        "global_step": epoch * train_steps_per_epoch + (len(dataloader) - 1),
+        **{f"test/{k}": v for k, v in avg_losses.items()},
+    })
+
+    return avg_losses
 
 @torch.inference_mode()
 def test(
@@ -306,7 +308,6 @@ def test(
                 raise ValueError(f"Unexpected batch format with len={len(batch)}")
 
         images = images.to(device, non_blocking=True)
-        target_txt = target_txt.to(device, non_blocking=True)
 
         outputs = model(images)
         loss_dict = criterion(outputs, (images, target_txt, indices))
