@@ -342,6 +342,8 @@ def test(
         avg_losses[k] = v / len(dataloader.dataset)
         logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
 
+    avg_losses["total_loss"] = sum(v for k, v in avg_losses.items() if not k.startswith("_"))
+
     wandb.log({
         "epoch": epoch,
         "global_step": epoch * train_steps_per_epoch + (len(dataloader) - 1),
@@ -653,8 +655,18 @@ def main():
             train_steps_per_epoch=len(dataloader_train),
         )
 
-        print('!!! ', epoch_metrics.keys())
-        epoch_metric = -epoch_metrics["test/loss"]
+        epoch_metric = -sum(
+            v for k, v in epoch_metrics.items()
+            if k.startswith("test/") and not k.startswith("test/_")
+        )
+        torch.save(
+            {
+                "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+                "hparams": vars(args),
+            },
+            log_dir / "ckpt.pth",
+        )
+        logger.info("Model saved as ckpt.pth")
         torch.save(
             {
                 "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
