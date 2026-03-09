@@ -4,6 +4,7 @@ import logging
 from collections import defaultdict
 from logging import Logger
 from pathlib import Path
+import numpy as np
 import argparse
 
 import wandb
