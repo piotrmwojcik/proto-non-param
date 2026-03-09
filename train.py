@@ -223,12 +223,6 @@ def train(
         loss.backward()
         optimizer.step()
 
-        with torch.no_grad():
-            pred_txt = F.normalize(outputs["pred_text_embedding"], dim=-1)
-            tgt_txt = F.normalize(target_txt, dim=-1)
-            batch_cosine = F.cosine_similarity(pred_txt, tgt_txt, dim=-1).mean().item()
-            running_cosine += batch_cosine * images.size(0)
-
         log_dict = {}
         for k, v in loss_dict.items():
             running_losses[k] += v.item() * images.size(0)
@@ -236,7 +230,6 @@ def train(
 
         global_step = epoch * len(dataloader) + i
         log_dict["train/total_loss"] = loss.item()
-        log_dict["train/cosine_similarity"] = batch_cosine
         log_dict["epoch"] = epoch
         log_dict["global_step"] = global_step
         wandb.log(log_dict)
@@ -416,6 +409,7 @@ def main():
 
     parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_nouns_clip_cache.pt")
     parser.add_argument("--clip-text-dim", type=int, default=512)
+    parser.add_argument("--kl-coef", type=float, default=1.0)
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
     parser.add_argument("--prototype-init-noise", type=float, default=0.01)
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -560,11 +554,11 @@ def main():
                 print("TRAINABLE BACKBONE:", name)
 
     criterion = PNPCriterion(
-        cosine_coef=args.cosine_coef,
-        mse_coef=args.mse_coef,
+        kl_coef=args.kl_coef,
         entropy_coef=args.entropy_coef,
         visual_coef=args.visual_coef,
         cover_coef=args.cover_coef,
+        temperature=args.temperature,
     )
 
     net.to(device)

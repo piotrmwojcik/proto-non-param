@@ -4,7 +4,6 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
-import torch.nn.functional as F
 import open_clip
 
 
@@ -13,6 +12,7 @@ class CocoCLIPDataset(Dataset):
         self,
         csv_path: str,
         coco_root: str,
+        vocab_cache_path: str = "vocab/mscoco_nouns_clip_cache.pt",
         split: str = "train",
         val_ratio: float = 0.1,
         seed: int = 42,
@@ -22,7 +22,9 @@ class CocoCLIPDataset(Dataset):
         self.csv_path = csv_path
         self.coco_root = coco_root
 
-        # Build filename -> full path once
+        # -------------------------------------------------
+        # Build filename → full path
+        # -------------------------------------------------
         val2014_dir = os.path.join(self.coco_root, "val2014")
         self.file_index = {
             fname: os.path.join(val2014_dir, fname)
@@ -52,11 +54,16 @@ class CocoCLIPDataset(Dataset):
         else:
             raise ValueError("split must be 'train' or 'val'")
 
+        # -------------------------------------------------
+        # CLIP model
+        # -------------------------------------------------
         model, preprocess, _ = open_clip.create_model_and_transforms(
             model_name,
             pretrained=pretrained,
         )
+
         self.model = model.eval()
+
         for p in self.model.parameters():
             p.requires_grad = False
 
@@ -66,11 +73,28 @@ class CocoCLIPDataset(Dataset):
         self.transform = None
         self.target_transform = None
 
+        # -------------------------------------------------
+        # Load cached noun CLIP embeddings
+        # -------------------------------------------------
+        cache = torch.load(vocab_cache_path, map_location="cpu")
+
+        self.vocab_words = list(cache.keys())
+
+        noun_embs = torch.stack(
+            [cache[w] for w in self.vocab_words],
+            dim=0
+        )  # [V, 512]
+
+        noun_embs = noun_embs / noun_embs.norm(dim=-1, keepdim=True)
+
+        # frozen buffer
+        self.noun_embeddings = noun_embs  # [V, 512]
+
     def _find_image_path(self, coco_id: int):
         filename = f"COCO_val2014_{coco_id:012d}.jpg"
         return self.file_index.get(filename)
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index: int):
@@ -78,44 +102,22 @@ class CocoCLIPDataset(Dataset):
 
         img = Image.open(im_path).convert("RGB")
 
-        # Return image tensor in the format expected by the proto network / CLIP backbone
         if self.transform is not None:
             img_tensor = self.transform(img)
         else:
-            img_tensor = self.preprocess(img)   # [3, H, W], CLIP-normalized
+            img_tensor = self.preprocess(img)
 
         if self.target_transform is not None:
             caption = self.target_transform(caption)
 
-        text_tokens = self.tokenizer([caption])   # [1, context_len]
+        text_tokens = self.tokenizer([caption])
 
         with torch.no_grad():
-            txt_feat = self.model.encode_text(text_tokens)   # [1, D]
+            txt_feat = self.model.encode_text(text_tokens)  # [1,512]
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
+            txt_feat = txt_feat.squeeze(0).cpu()
 
-        return img_tensor, txt_feat.squeeze(0), index
+            # caption → noun similarities
+            noun_sim_distribution = txt_feat @ self.noun_embeddings.T  # [V]
 
-train_dataset = CocoCLIPDataset(
-    csv_path="assets/coco_30k.csv",
-    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
-    split="train",
-    val_ratio=0.1,
-)
-
-val_dataset = CocoCLIPDataset(
-    csv_path="assets/coco_30k.csv",
-    coco_root="/data/pwojcik/UnGuide/coco30_bck/",
-    split="val",
-    val_ratio=0.1,
-)
-
-num_samples = 5
-
-for i in range(num_samples):
-    img_tensor, txt_emb, idx = train_dataset[i]
-
-    print(f"sample {i} (idx={idx})")
-    print("image tensor shape:", img_tensor.shape)  # expected [3, 224, 224]
-    print("text emb shape:", txt_emb.shape)  # expected [512] for ViT-B-32
-    print("image min/max:", img_tensor.min().item(), img_tensor.max().item())
-    print()
+        return img_tensor, noun_sim_distribution, txt_feat, index

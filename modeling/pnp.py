@@ -156,20 +156,6 @@ class PNP(nn.Module):
         proto = self.text_projection_head(self.vocab_clip_embeddings)  # [V, D]
         return proto
 
-    def reconstruct_text_embedding(self, vocab_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            vocab_logits: [B, V]
-
-        Returns:
-            weights: [B, V]
-            pred_txt: [B, 512]
-        """
-        weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
-        pred_txt = weights @ self.vocab_clip_embeddings               # [B, 512]
-        pred_txt = F.normalize(pred_txt, dim=-1)
-        return weights, pred_txt
-
     def forward(self, x: torch.Tensor):
         """
         Args:
@@ -197,16 +183,14 @@ class PNP(nn.Module):
         # Image-level logits over vocab pool
         vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
 
-        # Reconstruct target text embedding as a mixture over vocab CLIP embeddings
-        weights, pred_text_embedding = self.reconstruct_text_embedding(vocab_logits)
+        weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
 
         outputs = {
             "patch_prototype_logits": patch_prototype_logits,  # [B, N, V]
-            "vocab_logits": vocab_logits,  # [B, V]
-            "mixture_weights": weights,  # [B, V]
-            "pred_text_embedding": pred_text_embedding,  # [B, 512]
-            "patch_tokens": patch_tokens,  # [B, N, D]
-            "prototypes": prototypes,  # [V, D]
+            "vocab_logits": vocab_logits,                      # [B, V]
+            "mixture_weights": weights,                        # [B, V]
+            "patch_tokens": patch_tokens,                      # [B, N, D]
+            "prototypes": prototypes,                          # [V, D]
         }
         return outputs
 
@@ -234,60 +218,56 @@ class PNP(nn.Module):
 
 class PNPCriterion(nn.Module):
     """
-    Matches the predicted mixture embedding to the target CLIP text embedding
-    and can also regularize translated prototypes to stay visually aligned
-    with the image patch grid.
+    Matches predicted noun distribution to the target noun distribution from the dataset.
+    Also optionally regularizes prototypes to stay visually aligned with image patches.
     """
     def __init__(
         self,
-        cosine_coef: float = 1.0,
-        mse_coef: float = 0.0,
+        kl_coef: float = 1.0,
         entropy_coef: float = 0.0,
         visual_coef: float = 0.0,
         cover_coef: float = 0.0,
+        temperature: float = 0.07,
     ) -> None:
         super().__init__()
-        self.cosine_coef = cosine_coef
-        self.mse_coef = mse_coef
+        self.kl_coef = kl_coef
         self.entropy_coef = entropy_coef
         self.visual_coef = visual_coef
         self.cover_coef = cover_coef
+        self.temperature = temperature
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...]):
-        pred_txt = outputs["pred_text_embedding"]          # [B, 512]
-        mixture_weights = outputs["mixture_weights"]       # [B, V]
-        patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
-        target_txt = batch[1]                              # [B, 512]
-
-        pred_txt = F.normalize(pred_txt, dim=-1)
-        target_txt = F.normalize(target_txt, dim=-1)
+        vocab_logits = outputs["vocab_logits"]              # [B, V]
+        mixture_weights = outputs["mixture_weights"]        # [B, V]
+        patch_logits = outputs["patch_prototype_logits"]    # [B, N, V]
+        target_dist = batch[1]                              # [B, V]
 
         loss_dict = {}
 
-        # 1) text alignment
-        l_cosine = 1.0 - F.cosine_similarity(pred_txt, target_txt, dim=-1).mean()
-        loss_dict["l_txt"] = self.cosine_coef * l_cosine
-        loss_dict["_l_txt_unadjusted"] = l_cosine
+        # 1) distribution matching: target noun distribution vs predicted noun distribution
+        target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
+        pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
 
-        # 2) optional MSE
-        if self.mse_coef != 0:
-            l_mse = F.mse_loss(pred_txt, target_txt)
-            loss_dict["l_mse"] = self.mse_coef * l_mse
-            loss_dict["_l_mse_unadjusted"] = l_mse
+        l_kl = F.kl_div(
+            pred_log_probs,
+            target_dist,
+            reduction="batchmean",
+        )
+        loss_dict["l_dist"] = self.kl_coef * l_kl
+        loss_dict["_l_dist_unadjusted"] = l_kl
 
-        # 3) optional entropy reg on mixture weights
+        # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:
             entropy = -(mixture_weights * torch.log(mixture_weights + 1e-8)).sum(dim=-1).mean()
             loss_dict["l_entropy"] = self.entropy_coef * entropy
             loss_dict["_l_entropy_unadjusted"] = entropy
 
-        # 4) visual similarity between translated prototype mixture and patch grid
+        # 3) optional visual similarity: learned prototype mixture should match some patches
         if self.visual_coef != 0:
-            patch_tokens = outputs["patch_tokens"]  # [B, N, D]
-            prototypes = outputs["prototypes"]  # [V, D]
-            mixture_weights = outputs["mixture_weights"]  # [B, V]
+            patch_tokens = outputs["patch_tokens"]          # [B, N, D]
+            prototypes = outputs["prototypes"]              # [V, D]
 
-            proto_mix = F.normalize(mixture_weights @ prototypes, dim=-1)  # [B, D]
+            proto_mix = F.normalize(mixture_weights @ prototypes, dim=-1)   # [B, D]
             patch_sims = torch.einsum("bd,bnd->bn", proto_mix, patch_tokens)  # [B, N]
 
             k = min(5, patch_sims.shape[1])
@@ -296,7 +276,8 @@ class PNPCriterion(nn.Module):
 
             loss_dict["l_visual"] = self.visual_coef * l_visual
             loss_dict["_l_visual_unadjusted"] = l_visual
-        # 5) optional patch coverage: selected prototype mixture should explain some patches
+
+        # 4) optional coverage: selected prototype mixture should explain at least one patch well
         if self.cover_coef != 0:
             patch_scores = torch.einsum("bnv,bv->bn", patch_logits, mixture_weights)  # [B, N]
             l_cover = -patch_scores.max(dim=1).values.mean()
