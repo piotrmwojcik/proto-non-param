@@ -270,8 +270,6 @@ def train(
         loss_avg = v / len(dataloader.dataset)
         logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
 
-    epoch_cosine = running_cosine / len(dataloader.dataset)
-    logger.info(f"EPOCH {epoch} train cosine similarity: {epoch_cosine:.4f}")
 
 @torch.inference_mode()
 def test(
