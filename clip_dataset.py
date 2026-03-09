@@ -94,7 +94,6 @@ class CocoCLIPDataset(Dataset):
         self.noun_embeddings = noun_embs  # [V, 512]
         self.noun_embeddings = self.noun_embeddings.to(self.device)
 
-
     def _find_image_path(self, coco_id: int):
         filename = f"COCO_val2014_{coco_id:012d}.jpg"
         return self.file_index.get(filename)
@@ -112,22 +111,4 @@ class CocoCLIPDataset(Dataset):
         else:
             img_tensor = self.preprocess(img)
 
-        if self.target_transform is not None:
-            caption = self.target_transform(caption)
-
-        text_tokens = self.tokenizer([caption])
-
-        with torch.no_grad():
-            txt_feat = self.model.encode_text(text_tokens)
-            txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
-            txt_feat = txt_feat.squeeze(0)
-
-            noun_sim_distribution = txt_feat @ self.noun_embeddings.T  # [V]
-
-        # move back to CPU so dataloader can collate safely
-        return (
-            img_tensor,
-            noun_sim_distribution.cpu(),
-            txt_feat.cpu(),
-            index,
-        )
+        return img_tensor, caption, index

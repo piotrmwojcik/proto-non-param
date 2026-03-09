@@ -208,12 +208,24 @@ def train(
     running_cosine = 0.0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, target_txt, indices = batch
-        images = images.to(device, non_blocking=True)
-        target_txt = target_txt.to(device, non_blocking=True)
+
+        images, captions, indices = batch
+        images = images.to(device)
+
+        text_tokens = tokenizer(list(captions)).to(device)
+
+        with torch.no_grad():
+            txt_feat = clip_model.encode_text(text_tokens)
+            txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
+
+            # caption → noun distribution
+            noun_sim_distribution = txt_feat @ noun_embeddings.T
+            noun_sim_distribution = F.softmax(noun_sim_distribution / temperature, dim=-1)
 
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, target_txt, indices))
+
+        # pass noun distribution as target
+        loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
         if not isinstance(loss, torch.Tensor):
@@ -224,6 +236,7 @@ def train(
         optimizer.step()
 
         log_dict = {}
+
         for k, v in loss_dict.items():
             running_losses[k] += v.item() * images.size(0)
             log_dict[f"train/{k}"] = v.item()
@@ -232,6 +245,7 @@ def train(
         log_dict["train/total_loss"] = loss.item()
         log_dict["epoch"] = epoch
         log_dict["global_step"] = global_step
+
         wandb.log(log_dict)
 
         if i % log_every == 0:
@@ -240,8 +254,11 @@ def train(
                     model=model,
                     images=images[:heatmap_items],
                     outputs={
-                        k: v[:heatmap_items] if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0] else v
-                        for k, v in outputs.items()},
+                        k: v[:heatmap_items]
+                        if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0]
+                        else v
+                        for k, v in outputs.items()
+                    },
                     step=global_step,
                     max_items=heatmap_items,
                     top_k=heatmap_top_k,
