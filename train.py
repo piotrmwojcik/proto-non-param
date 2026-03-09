@@ -301,6 +301,8 @@ def main():
     parser.add_argument("--coco-val-ratio", type=float, default=0.1)
     parser.add_argument("--coco-clip-model-name", type=str, default="ViT-B-32")
     parser.add_argument("--coco-clip-pretrained", type=str, default="openai")
+    parser.add_argument("--visual-coef", type=float, default=0.0)
+    parser.add_argument("--cover-coef", type=float, default=0.0)
 
     parser.add_argument(
         "--backbone",
@@ -415,6 +417,8 @@ def main():
         cosine_coef=args.cosine_coef,
         mse_coef=args.mse_coef,
         entropy_coef=args.entropy_coef,
+        visual_coef=args.visual_coef,
+        cover_coef=args.cover_coef,
     )
 
     net.to(device)

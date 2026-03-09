@@ -232,10 +232,12 @@ class PNP(nn.Module):
         weights, pred_text_embedding = self.reconstruct_text_embedding(vocab_logits)
 
         outputs = {
-            "patch_prototype_logits": patch_prototype_logits,
-            "vocab_logits": vocab_logits,
-            "mixture_weights": weights,
-            "pred_text_embedding": pred_text_embedding,
+            "patch_prototype_logits": patch_prototype_logits,  # [B, N, V]
+            "vocab_logits": vocab_logits,  # [B, V]
+            "mixture_weights": weights,  # [B, V]
+            "pred_text_embedding": pred_text_embedding,  # [B, 512]
+            "patch_tokens": patch_tokens,  # [B, N, D]
+            "prototypes": prototypes,  # [V, D]
         }
         return outputs
 
@@ -263,46 +265,70 @@ class PNP(nn.Module):
 
 class PNPCriterion(nn.Module):
     """
-    Matches the predicted mixture embedding to the target CLIP text embedding.
-
-    Expects batch format:
-        batch[0] = images
-        batch[1] = target CLIP text embedding, shape [B, 512]
-        batch[2] = index
+    Matches the predicted mixture embedding to the target CLIP text embedding
+    and can also regularize translated prototypes to stay visually aligned
+    with the image patch grid.
     """
     def __init__(
         self,
         cosine_coef: float = 1.0,
         mse_coef: float = 0.0,
         entropy_coef: float = 0.0,
+        visual_coef: float = 0.0,
+        cover_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.cosine_coef = cosine_coef
         self.mse_coef = mse_coef
         self.entropy_coef = entropy_coef
+        self.visual_coef = visual_coef
+        self.cover_coef = cover_coef
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...]):
-        pred_txt = outputs["pred_text_embedding"]   # [B, 512]
-        mixture_weights = outputs["mixture_weights"]  # [B, V]
-        target_txt = batch[1]                       # [B, 512]
+        pred_txt = outputs["pred_text_embedding"]          # [B, 512]
+        mixture_weights = outputs["mixture_weights"]       # [B, V]
+        patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
+        target_txt = batch[1]                              # [B, 512]
 
         pred_txt = F.normalize(pred_txt, dim=-1)
         target_txt = F.normalize(target_txt, dim=-1)
 
         loss_dict = {}
 
+        # 1) text alignment
         l_cosine = 1.0 - F.cosine_similarity(pred_txt, target_txt, dim=-1).mean()
         loss_dict["l_txt"] = self.cosine_coef * l_cosine
         loss_dict["_l_txt_unadjusted"] = l_cosine
 
+        # 2) optional MSE
         if self.mse_coef != 0:
             l_mse = F.mse_loss(pred_txt, target_txt)
             loss_dict["l_mse"] = self.mse_coef * l_mse
             loss_dict["_l_mse_unadjusted"] = l_mse
 
+        # 3) optional entropy reg on mixture weights
         if self.entropy_coef != 0:
             entropy = -(mixture_weights * torch.log(mixture_weights + 1e-8)).sum(dim=-1).mean()
             loss_dict["l_entropy"] = self.entropy_coef * entropy
             loss_dict["_l_entropy_unadjusted"] = entropy
+
+        # 4) visual similarity between translated prototype mixture and patch grid
+        if self.visual_coef != 0:
+            patch_tokens = outputs["patch_tokens"]         # [B, N, D]
+            prototypes = outputs["prototypes"]             # [V, D]
+
+            grid_feat = F.normalize(patch_tokens.mean(dim=1), dim=-1)   # [B, D]
+            proto_mix = F.normalize(mixture_weights @ prototypes, dim=-1)  # [B, D]
+
+            l_visual = 1.0 - F.cosine_similarity(proto_mix, grid_feat, dim=-1).mean()
+            loss_dict["l_visual"] = self.visual_coef * l_visual
+            loss_dict["_l_visual_unadjusted"] = l_visual
+
+        # 5) optional patch coverage: selected prototype mixture should explain some patches
+        if self.cover_coef != 0:
+            patch_scores = torch.einsum("bnv,bv->bn", patch_logits, mixture_weights)  # [B, N]
+            l_cover = -patch_scores.max(dim=1).values.mean()
+            loss_dict["l_cover"] = self.cover_coef * l_cover
+            loss_dict["_l_cover_unadjusted"] = l_cover
 
         return loss_dict
