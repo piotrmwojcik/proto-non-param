@@ -283,16 +283,19 @@ class PNPCriterion(nn.Module):
 
         # 4) visual similarity between translated prototype mixture and patch grid
         if self.visual_coef != 0:
-            patch_tokens = outputs["patch_tokens"]         # [B, N, D]
-            prototypes = outputs["prototypes"]             # [V, D]
+            patch_tokens = outputs["patch_tokens"]  # [B, N, D]
+            prototypes = outputs["prototypes"]  # [V, D]
+            mixture_weights = outputs["mixture_weights"]  # [B, V]
 
-            grid_feat = F.normalize(patch_tokens.mean(dim=1), dim=-1)   # [B, D]
             proto_mix = F.normalize(mixture_weights @ prototypes, dim=-1)  # [B, D]
+            patch_sims = torch.einsum("bd,bnd->bn", proto_mix, patch_tokens)  # [B, N]
 
-            l_visual = 1.0 - F.cosine_similarity(proto_mix, grid_feat, dim=-1).mean()
+            k = min(5, patch_sims.shape[1])
+            topk_vals = patch_sims.topk(k=k, dim=1).values
+            l_visual = 1.0 - topk_vals.mean()
+
             loss_dict["l_visual"] = self.visual_coef * l_visual
             loss_dict["_l_visual_unadjusted"] = l_visual
-
         # 5) optional patch coverage: selected prototype mixture should explain some patches
         if self.cover_coef != 0:
             patch_scores = torch.einsum("bnv,bv->bn", patch_logits, mixture_weights)  # [B, N]
