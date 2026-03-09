@@ -67,8 +67,6 @@ class CocoCLIPDataset(Dataset):
         self.model = model.eval()
 
         self.model = self.model.to(self.device)
-        self.noun_embeddings = self.noun_embeddings.to(self.device)
-
         for p in self.model.parameters():
             p.requires_grad = False
 
@@ -94,6 +92,8 @@ class CocoCLIPDataset(Dataset):
 
         # frozen buffer
         self.noun_embeddings = noun_embs  # [V, 512]
+        self.noun_embeddings = self.noun_embeddings.to(self.device)
+
 
     def _find_image_path(self, coco_id: int):
         filename = f"COCO_val2014_{coco_id:012d}.jpg"
