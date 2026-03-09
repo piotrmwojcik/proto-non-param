@@ -6,6 +6,7 @@ from logging import Logger
 from pathlib import Path
 import numpy as np
 import math
+import open_clip
 import argparse
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
@@ -206,6 +207,19 @@ def train(
     model.train()
     running_losses = defaultdict(float)
     running_cosine = 0.0
+
+    clip_model, _, _ = open_clip.create_model_and_transforms(
+        "ViT-B-32",
+        pretrained="openai",
+    )
+
+    clip_model = clip_model.to(device)
+    clip_model.eval()
+
+    for p in clip_model.parameters():
+        p.requires_grad = False
+
+    tokenizer = open_clip.get_tokenizer("ViT-B-32")
 
     for i, batch in enumerate(tqdm(dataloader)):
 
