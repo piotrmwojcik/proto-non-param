@@ -266,7 +266,9 @@ def build_backbone(args):
             )
         else:
             backbone = DINOv2Backbone(name=args.backbone)
+
         dim = backbone.dim
+
     elif "clip" in args.backbone:
         backbone = CLIPPatch16Backbone(
             model_name=args.clip_model_name,
@@ -274,6 +276,7 @@ def build_backbone(args):
             patch_size=args.clip_patch_size,
         )
         dim = backbone.dim
+
     elif "dino" in args.backbone:
         backbone = DINOBackboneExpanded(
             name=args.backbone,
@@ -282,8 +285,32 @@ def build_backbone(args):
             freeze_norm_layer=True,
         )
         dim = backbone.dim
+
     else:
         raise NotImplementedError(f"Backbone {args.backbone} not implemented.")
+
+    # ---------------------------------------------------
+    # Freeze everything first
+    # ---------------------------------------------------
+    for p in backbone.parameters():
+        p.requires_grad = False
+
+    # ---------------------------------------------------
+    # Unfreeze last N transformer blocks
+    # ---------------------------------------------------
+    if args.unfreeze_last_blocks > 0:
+
+        # DINOv2 models store blocks here
+        blocks = backbone.model.blocks if hasattr(backbone, "model") else backbone.blocks
+
+        n_blocks = len(blocks)
+        start = max(0, n_blocks - args.unfreeze_last_blocks)
+
+        for block in blocks[start:]:
+            for p in block.parameters():
+                p.requires_grad = True
+
+        print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
 
     return backbone, dim
 
@@ -304,6 +331,7 @@ def main():
     parser.add_argument("--visual-coef", type=float, default=0.0)
     parser.add_argument("--cover-coef", type=float, default=0.0)
 
+
     parser.add_argument(
         "--backbone",
         type=str,
@@ -315,6 +343,12 @@ def main():
     parser.add_argument("--clip-patch-size", type=int, default=16)
     parser.add_argument("--freeze-backbone", action="store_true", default=False)
     parser.add_argument("--num-splits", type=int, default=1)
+    parser.add_argument(
+        "--unfreeze-last-blocks",
+        type=int,
+        default=0,
+        help="Number of last transformer blocks to unfreeze in the backbone",
+    )
 
     parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_nouns_clip_cache.pt")
     parser.add_argument("--clip-text-dim", type=int, default=512)
@@ -430,14 +464,12 @@ def main():
     ]
 
     if not args.freeze_backbone:
-        if hasattr(net.backbone, "set_requires_grad"):
-            net.backbone.set_requires_grad()
-        if hasattr(net.backbone, "learnable_parameters"):
-            backbone_params = list(net.backbone.learnable_parameters())
-        else:
-            backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
+        backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
         if backbone_params:
-            param_groups.append({"params": backbone_params, "lr": args.backbone_lr})
+            param_groups.append({
+                "params": backbone_params,
+                "lr": args.backbone_lr,
+            })
 
     optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
