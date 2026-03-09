@@ -460,14 +460,20 @@ def main():
     param_groups = [
         {"params": net.text_projection_head.parameters(), "lr": args.text_proj_lr},
     ]
-
-    if not args.freeze_backbone:
-        backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
-        if backbone_params:
-            param_groups.append({
-                "params": backbone_params,
-                "lr": args.backbone_lr,
-            })
+    # add backbone as separate group
+    backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
+    if backbone_params:
+        param_groups.append({
+            "params": backbone_params,
+            "lr": args.backbone_lr,
+        })
+    # add backbone as separate group
+    backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
+    if backbone_params:
+        param_groups.append({
+            "params": backbone_params,
+            "lr": args.backbone_lr,
+        })
 
     optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
