@@ -203,7 +203,7 @@ def train(
     clip_model: nn.Module,
     tokenizer,
     noun_embeddings: torch.Tensor,
-    target_temperature: float = 0.03,
+    target_temperature: float = 0.01,
     *,
     log_every: int = 100,
     heatmap_items: int = 2,
@@ -651,7 +651,7 @@ def main():
             clip_model=clip_model,
             tokenizer=tokenizer,
             noun_embeddings=noun_embeddings,
-            target_temperature=0.07,
+            target_temperature=0.03,
         )
 
         epoch_metrics = test(
