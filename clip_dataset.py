@@ -14,7 +14,6 @@ class CocoCLIPDataset(Dataset):
         coco_root: str,
         vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         split: str = "train",
-        val_ratio: float = 0.1,
         seed: int = 42,
         device: str = "cuda",
         model_name: str = "ViT-B-32",
@@ -53,14 +52,7 @@ class CocoCLIPDataset(Dataset):
         rng = random.Random(seed)
         rng.shuffle(samples)
 
-        split_idx = int(len(samples) * (1 - val_ratio))
-        if split == "train":
-            self.samples = samples[:split_idx]
-        elif split == "val":
-            self.samples = samples[split_idx:]
-        else:
-            raise ValueError("split must be 'train' or 'val'")
-
+        self.samples = samples
         model, preprocess, _ = open_clip.create_model_and_transforms(
             model_name,
             pretrained=pretrained,

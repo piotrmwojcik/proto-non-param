@@ -595,21 +595,15 @@ def main():
     logger.info("Train on COCO CLIP dataset")
 
     dataset_train = CocoCLIPDataset(
-        csv_path=args.coco_csv_path,
-        coco_root=args.coco_root,
-        split="train",
-        val_ratio=args.coco_val_ratio,
-        seed=args.seed,
+        annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
+        coco_root="/data/pwojcik/coco_2014",
         model_name=args.coco_clip_model_name,
         pretrained=args.coco_clip_pretrained,
     )
 
     dataset_test = CocoCLIPDataset(
-        csv_path=args.coco_csv_path,
-        coco_root=args.coco_root,
-        split="val",
-        val_ratio=args.coco_val_ratio,
-        seed=args.seed,
+        annotations_json="/data/pwojcik/coco_2014/annotations/captions_val2014.json",
+        coco_root="/data/pwojcik/coco_2014",
         model_name=args.coco_clip_model_name,
         pretrained=args.coco_clip_pretrained,
     )
