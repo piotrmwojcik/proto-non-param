@@ -1,6 +1,6 @@
 import os
+import json
 import random
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -10,7 +10,7 @@ import open_clip
 class CocoCLIPDataset(Dataset):
     def __init__(
         self,
-        csv_path: str,
+        annotations_json: str,
         coco_root: str,
         vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         split: str = "train",
@@ -20,28 +20,33 @@ class CocoCLIPDataset(Dataset):
         model_name: str = "ViT-B-32",
         pretrained: str = "openai",
     ):
-        self.csv_path = csv_path
+        self.annotations_json = annotations_json
         self.coco_root = coco_root
         self.device = torch.device(device)
 
-        # -------------------------------------------------
-        # Build filename → full path
-        # -------------------------------------------------
-        val2014_dir = os.path.join(self.coco_root, "val2014")
-        self.file_index = {
-            fname: os.path.join(val2014_dir, fname)
-            for fname in os.listdir(val2014_dir)
-            if fname.endswith(".jpg")
+        with open(annotations_json, "r") as f:
+            coco_data = json.load(f)
+
+        # Build image_id -> file_name mapping from the JSON
+        image_id_to_file = {
+            img["id"]: img["file_name"]
+            for img in coco_data["images"]
         }
 
-        df = pd.read_csv(csv_path)
+        # Keep only the first annotation for each image_id
+        first_caption_per_image = {}
+        for ann in coco_data["annotations"]:
+            image_id = int(ann["image_id"])
+            if image_id not in first_caption_per_image:
+                first_caption_per_image[image_id] = ann["caption"]
 
         samples = []
-        for _, row in df.iterrows():
-            coco_id = int(row["coco_id"])
-            caption = row["prompt"]
+        for image_id, caption in first_caption_per_image.items():
+            file_name = image_id_to_file.get(image_id)
+            if file_name is None:
+                continue
 
-            im_path = self._find_image_path(coco_id)
+            im_path = self._find_image_path(file_name)
             if im_path is not None:
                 samples.append((im_path, caption))
 
@@ -56,17 +61,12 @@ class CocoCLIPDataset(Dataset):
         else:
             raise ValueError("split must be 'train' or 'val'")
 
-        # -------------------------------------------------
-        # CLIP model
-        # -------------------------------------------------
         model, preprocess, _ = open_clip.create_model_and_transforms(
             model_name,
             pretrained=pretrained,
         )
 
-        self.model = model.eval()
-
-        self.model = self.model.to(self.device)
+        self.model = model.eval().to(self.device)
         for p in self.model.parameters():
             p.requires_grad = False
 
@@ -76,27 +76,24 @@ class CocoCLIPDataset(Dataset):
         self.transform = None
         self.target_transform = None
 
-        # -------------------------------------------------
-        # Load cached noun CLIP embeddings
-        # -------------------------------------------------
         cache = torch.load(vocab_cache_path, map_location="cpu")
 
         self.vocab_words = list(cache.keys())
-
-        noun_embs = torch.stack(
-            [cache[w] for w in self.vocab_words],
-            dim=0
-        )  # [V, 512]
-
+        noun_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)
         noun_embs = noun_embs / noun_embs.norm(dim=-1, keepdim=True)
+        self.noun_embeddings = noun_embs.to(self.device)
 
-        # frozen buffer
-        self.noun_embeddings = noun_embs  # [V, 512]
-        self.noun_embeddings = self.noun_embeddings.to(self.device)
-
-    def _find_image_path(self, coco_id: int):
-        filename = f"COCO_val2014_{coco_id:012d}.jpg"
-        return self.file_index.get(filename)
+    def _find_image_path(self, file_name: str):
+        # Try common COCO locations
+        candidates = [
+            os.path.join(self.coco_root, "train2014", file_name),
+            os.path.join(self.coco_root, "val2014", file_name),
+            os.path.join(self.coco_root, file_name),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+        return None
 
     def __len__(self):
         return len(self.samples)
@@ -105,10 +102,6 @@ class CocoCLIPDataset(Dataset):
         im_path, caption = self.samples[index]
 
         img = Image.open(im_path).convert("RGB")
-
-        if self.transform is not None:
-            img_tensor = self.transform(img)
-        else:
-            img_tensor = self.preprocess(img)
+        img_tensor = self.transform(img) if self.transform is not None else self.preprocess(img)
 
         return img_tensor, caption, index
