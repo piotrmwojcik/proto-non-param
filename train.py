@@ -342,6 +342,11 @@ def test(
     num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
+        images, captions, indices = batch
+        images = images.to(device, non_blocking=True)
+
+        text_tokens = tokenizer(list(captions)).to(device)
+
         txt_feat = clip_model.encode_text(text_tokens)
         txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
@@ -351,9 +356,7 @@ def test(
         noun_sim_distribution = torch.zeros(B, V, device=device)
 
         for b, caption in enumerate(captions):
-
             noun_idxs = extract_caption_nouns(caption, vocab_to_idx)
-
             if len(noun_idxs) == 0:
                 sims = txt_feat[b] @ noun_embeddings.T
                 probs = F.softmax(sims / target_temperature, dim=-1)
@@ -361,7 +364,6 @@ def test(
                 continue
 
             noun_idxs = torch.tensor(noun_idxs, device=device)
-
             noun_embs = noun_embeddings[noun_idxs]
 
             sims = txt_feat[b] @ noun_embs.T
