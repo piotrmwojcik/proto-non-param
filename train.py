@@ -333,7 +333,7 @@ def test(
     target_temperature: float = 0.07,
     *,
     train_steps_per_epoch: int,
-    log_every: int = 20,
+    log_every: int = 5,
     heatmap_items: int = 2,
     heatmap_top_k: int = 5,
     vocab_to_idx=None,
