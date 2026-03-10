@@ -334,6 +334,8 @@ def test(
     *,
     train_steps_per_epoch: int,
     log_every: int = 20,
+    heatmap_items: int = 2,
+    heatmap_top_k: int = 5,
     vocab_to_idx=None,
 ):
     model.eval()
@@ -345,6 +347,11 @@ def test(
         images, captions, indices = batch
         images = images.to(device, non_blocking=True)
 
+        global_step = epoch * train_steps_per_epoch + i
+
+        # --------------------------
+        # Caption → noun distribution
+        # --------------------------
         text_tokens = tokenizer(list(captions)).to(device)
 
         txt_feat = clip_model.encode_text(text_tokens)
@@ -356,7 +363,9 @@ def test(
         noun_sim_distribution = torch.zeros(B, V, device=device)
 
         for b, caption in enumerate(captions):
+
             noun_idxs = extract_caption_nouns(caption, vocab_to_idx)
+
             if len(noun_idxs) == 0:
                 sims = txt_feat[b] @ noun_embeddings.T
                 probs = F.softmax(sims / target_temperature, dim=-1)
@@ -372,6 +381,10 @@ def test(
             noun_sim_distribution[b, noun_idxs] = probs
 
         noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
+
+        # --------------------------
+        # Model forward
+        # --------------------------
         outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
@@ -381,44 +394,71 @@ def test(
         for k, v in loss_dict.items():
             running_losses[k] += v.item() * bs
 
-            global_step = epoch * train_steps_per_epoch + i
+        # --------------------------
+        # Logging
+        # --------------------------
+        if i % log_every == 0:
 
             log_dict = {
-                "eval/batch_idx": i,
                 "epoch": epoch,
                 "global_step": global_step,
+                "eval/batch_idx": i,
             }
 
             if "mixture_weights" in outputs:
                 topk_vals, topk_idx = outputs["mixture_weights"].topk(k=5, dim=-1)
-                preview_words = []
-                for b in range(min(4, images.size(0))):
-                    words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
-                    preview_words.append(", ".join(words))
 
-                if preview_words:
-                    log_dict["eval/top_words_sample0"] = preview_words[0]
+                words = [
+                    model.vocab_words[j]
+                    for j in topk_idx[0].tolist()
+                ]
+
+                log_dict["eval/top_words_sample0"] = ", ".join(words)
 
             for k, v in loss_dict.items():
                 log_dict[f"eval/{k}"] = v.item()
 
             wandb.log(log_dict)
 
-    avg_losses = {}
-    for k, v in running_losses.items():
-        avg_losses[k] = v / len(dataloader.dataset)
-        logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
+            # --------------------------
+            # Visualization logging
+            # --------------------------
+            wandb_log_top_proto_heatmaps(
+                model=model,
+                images=images[:heatmap_items],
+                outputs={
+                    k: v[:heatmap_items]
+                    if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0]
+                    else v
+                    for k, v in outputs.items()
+                },
+                step=global_step,
+                max_items=heatmap_items,
+                top_k=heatmap_top_k,
+                log_key="eval/top_proto_heatmaps",
+                tsne_key="eval/proto_tsne",
+            )
 
-    avg_losses["total_loss"] = sum(v for k, v in avg_losses.items() if not k.startswith("_"))
+        # --------------------------
+        # Epoch metrics
+        # --------------------------
+        avg_losses = {}
 
-    wandb.log({
-        "epoch": epoch,
-        "global_step": epoch * train_steps_per_epoch + (len(dataloader) - 1),
-        **{f"test/{k}": v for k, v in avg_losses.items()},
-    })
+        for k, v in running_losses.items():
+            avg_losses[k] = v / num_samples
+            logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
 
-    return avg_losses
+        avg_losses["total_loss"] = sum(
+            v for k, v in avg_losses.items() if not k.startswith("_")
+        )
 
+        wandb.log({
+            "epoch": epoch,
+            "global_step": epoch * train_steps_per_epoch + len(dataloader) - 1,
+            **{f"test/{k}": v for k, v in avg_losses.items()},
+        })
+
+        return avg_losses
 
 def build_backbone(args):
     if "dinov2" in args.backbone:
