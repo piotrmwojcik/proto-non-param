@@ -517,7 +517,6 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip"])
-    parser.add_argument("--coco-csv-path", type=str, default="assets/coco_30k.csv")
     parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
     parser.add_argument("--coco-val-ratio", type=float, default=0.1)
     parser.add_argument("--coco-clip-model-name", type=str, default="ViT-B-32")
