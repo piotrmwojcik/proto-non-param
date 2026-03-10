@@ -120,7 +120,7 @@ class PNP(nn.Module):
         temperature: float = 0.2,
         clip_text_dim: int = 512,
         text_proj_hidden_dim: int = 768,
-        vocab_cache_path: str = "vocab/mscoco_nouns_clip_cache.pt",
+        vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         prototype_init_noise: float = 0.01,
     ):
         super().__init__()
