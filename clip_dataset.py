@@ -12,7 +12,7 @@ class CocoCLIPDataset(Dataset):
         self,
         csv_path: str,
         coco_root: str,
-        vocab_cache_path: str = "vocab/mscoco_nouns_clip_cache.pt",
+        vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         split: str = "train",
         val_ratio: float = 0.1,
         seed: int = 42,
