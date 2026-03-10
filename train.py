@@ -63,29 +63,46 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     return out.clip(0, 255).astype(np.uint8)
 
 
-def extract_caption_nouns(caption: str, vocab_to_idx: dict[str, int]):
+COMMON_VERBS = {
+    "be", "is", "am", "are", "was", "were", "been", "being",
+    "have", "has", "had", "having",
+    "do", "does", "did", "doing"
+}
+
+def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
     """
-    Extract nouns from caption using NLTK and map them to vocab indices.
+    Extract nouns, verbs, and adjectives from caption using NLTK
+    and map them to vocab indices, excluding very common verbs.
     """
 
     tokens = nltk.word_tokenize(caption.lower())
     pos_tags = nltk.pos_tag(tokens)
 
-    noun_idxs = []
+    word_idxs = []
     seen = set()
 
     for word, pos in pos_tags:
 
-        # keep only nouns
-        if pos.startswith("NN"):
+        if pos.startswith(("NN", "VB", "JJ")):
 
-            lemma = lemmatizer.lemmatize(word, pos="n")
+            if pos.startswith("NN"):
+                lemma = lemmatizer.lemmatize(word, pos="n")
+
+            elif pos.startswith("VB"):
+                lemma = lemmatizer.lemmatize(word, pos="v")
+
+                # remove common verbs
+                if lemma in COMMON_VERBS:
+                    continue
+
+            else:  # adjective
+                lemma = lemmatizer.lemmatize(word, pos="a")
 
             if lemma in vocab_to_idx and lemma not in seen:
-                noun_idxs.append(vocab_to_idx[lemma])
+                word_idxs.append(vocab_to_idx[lemma])
                 seen.add(lemma)
 
-    return noun_idxs
+    return word_idxs
 
 @torch.no_grad()
 def wandb_log_top_proto_heatmaps(
@@ -259,7 +276,7 @@ def train(
 
             for b, caption in enumerate(captions):
 
-                noun_idxs = extract_caption_nouns(caption, vocab_to_idx)
+                noun_idxs = extract_caption_words(caption, vocab_to_idx)
 
                 if len(noun_idxs) == 0:
                     # fallback to global similarity
@@ -364,7 +381,7 @@ def test(
 
         for b, caption in enumerate(captions):
 
-            noun_idxs = extract_caption_nouns(caption, vocab_to_idx)
+            noun_idxs = extract_caption_words(caption, vocab_to_idx)
 
             if len(noun_idxs) == 0:
                 sims = txt_feat[b] @ noun_embeddings.T
