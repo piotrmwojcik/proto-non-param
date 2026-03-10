@@ -71,7 +71,7 @@ COMMON_VERBS = {
 
 def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
     """
-    Extract nouns, verbs, and adjectives from caption using NLTK
+    Extract nouns, verbs, adjectives, and adverbs from caption using NLTK
     and map them to vocab indices, excluding very common verbs.
     """
 
@@ -83,7 +83,7 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
 
     for word, pos in pos_tags:
 
-        if pos.startswith(("NN", "VB", "JJ")):
+        if pos.startswith(("NN", "VB", "JJ", "RB")):
 
             if pos.startswith("NN"):
                 lemma = lemmatizer.lemmatize(word, pos="n")
@@ -91,12 +91,14 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
             elif pos.startswith("VB"):
                 lemma = lemmatizer.lemmatize(word, pos="v")
 
-                # remove common verbs
                 if lemma in COMMON_VERBS:
                     continue
 
-            else:  # adjective
+            elif pos.startswith("JJ"):
                 lemma = lemmatizer.lemmatize(word, pos="a")
+
+            else:  # adverbs (RB)
+                lemma = lemmatizer.lemmatize(word, pos="r")
 
             if lemma in vocab_to_idx and lemma not in seen:
                 word_idxs.append(vocab_to_idx[lemma])
