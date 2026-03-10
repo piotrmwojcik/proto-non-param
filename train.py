@@ -235,9 +235,6 @@ def train(
     noun_embeddings: torch.Tensor,
     target_temperature: float = 0.01,
     *,
-    log_every: int = 100,
-    heatmap_items: int = 2,
-    heatmap_top_k: int = 5,
     vocab_to_idx = None,
 ):
     model.train()
@@ -317,25 +314,10 @@ def train(
         log_dict["global_step"] = global_step
         wandb.log(log_dict)
 
-        if i % log_every == 0:
-            with torch.no_grad():
-                wandb_log_top_proto_heatmaps(
-                    model=model,
-                    images=images[:heatmap_items],
-                    outputs={
-                        k: v[:heatmap_items]
-                        if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0]
-                        else v
-                        for k, v in outputs.items()
-                    },
-                    step=global_step,
-                    max_items=heatmap_items,
-                    top_k=heatmap_top_k,
-                    log_key="train/top_proto_heatmaps",
-                )
     for k, v in running_losses.items():
         loss_avg = v / len(dataloader.dataset)
         logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
+
 
 @torch.inference_mode()
 def test(
@@ -352,6 +334,7 @@ def test(
     *,
     train_steps_per_epoch: int,
     log_every: int = 20,
+    vocab_to_idx=None,
 ):
     model.eval()
 
@@ -359,18 +342,34 @@ def test(
     num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, indices = batch
-        images = images.to(device, non_blocking=True)
-
-        text_tokens = tokenizer(list(captions)).to(device)
-
         txt_feat = clip_model.encode_text(text_tokens)
         txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
-        noun_sim_distribution = txt_feat @ noun_embeddings.T
-        noun_sim_distribution = F.softmax(noun_sim_distribution / target_temperature, dim=-1)
-        noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
+        B, D = txt_feat.shape
+        V = noun_embeddings.shape[0]
 
+        noun_sim_distribution = torch.zeros(B, V, device=device)
+
+        for b, caption in enumerate(captions):
+
+            noun_idxs = extract_caption_nouns(caption, vocab_to_idx)
+
+            if len(noun_idxs) == 0:
+                sims = txt_feat[b] @ noun_embeddings.T
+                probs = F.softmax(sims / target_temperature, dim=-1)
+                noun_sim_distribution[b] = probs
+                continue
+
+            noun_idxs = torch.tensor(noun_idxs, device=device)
+
+            noun_embs = noun_embeddings[noun_idxs]
+
+            sims = txt_feat[b] @ noun_embs.T
+            probs = F.softmax(sims / target_temperature, dim=-1)
+
+            noun_sim_distribution[b, noun_idxs] = probs
+
+        noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
         outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
@@ -722,6 +721,7 @@ def main():
             noun_embeddings=noun_embeddings,
             target_temperature=0.07,
             train_steps_per_epoch=len(dataloader_train),
+            vocab_to_idx=vocab_to_idx,  # ADD THIS
         )
 
         epoch_metric = -sum(
