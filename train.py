@@ -381,7 +381,6 @@ def test(
         for k, v in loss_dict.items():
             running_losses[k] += v.item() * bs
 
-        if i % log_every == 0:
             global_step = epoch * train_steps_per_epoch + i
 
             log_dict = {
