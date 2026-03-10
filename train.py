@@ -423,22 +423,24 @@ def test(
             # --------------------------
             # Visualization logging
             # --------------------------
+            B = images.shape[0]
+            n = min(heatmap_items, B)
+
+            rand_idx = torch.randperm(B, device=images.device)[:n]
+
             wandb_log_top_proto_heatmaps(
                 model=model,
-                images=images[:heatmap_items],
+                images=images[rand_idx],
                 outputs={
-                    k: v[:heatmap_items]
-                    if isinstance(v, torch.Tensor) and v.shape[0] == images.shape[0]
-                    else v
+                    k: v[rand_idx] if isinstance(v, torch.Tensor) and v.shape[0] == B else v
                     for k, v in outputs.items()
                 },
                 step=global_step,
-                max_items=heatmap_items,
+                max_items=n,
                 top_k=heatmap_top_k,
                 log_key="eval/top_proto_heatmaps",
                 tsne_key="eval/proto_tsne",
             )
-
         # --------------------------
         # Epoch metrics
         # --------------------------
