@@ -755,7 +755,6 @@ def main():
             clip_model=clip_model,
             noun_embeddings=noun_embeddings,
             target_temperature=0.01,
-            heatmap_items=20,
             train_steps_per_epoch=len(dataloader_train),
             vocab_to_idx=vocab_to_idx,  # ADD THIS
         )
