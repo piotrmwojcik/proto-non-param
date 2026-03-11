@@ -254,13 +254,11 @@ class PNPCriterion(nn.Module):
             reduction="batchmean",
         )
         loss_dict["l_dist"] = self.kl_coef * l_kl
-        loss_dict["_l_dist_unadjusted"] = l_kl
 
         # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:
             entropy = -(mixture_weights * torch.log(mixture_weights + 1e-8)).sum(dim=-1).mean()
             loss_dict["l_entropy"] = self.entropy_coef * entropy
-            loss_dict["_l_entropy_unadjusted"] = entropy
 
         # 3) optional visual similarity: learned prototype mixture should match some patches
         if self.visual_coef != 0:
@@ -275,13 +273,11 @@ class PNPCriterion(nn.Module):
             l_visual = 1.0 - topk_vals.mean()
 
             loss_dict["l_visual"] = self.visual_coef * l_visual
-            loss_dict["_l_visual_unadjusted"] = l_visual
 
         # 4) optional coverage: selected prototype mixture should explain at least one patch well
         if self.cover_coef != 0:
             patch_scores = torch.einsum("bnv,bv->bn", patch_logits, mixture_weights)  # [B, N]
             l_cover = -patch_scores.max(dim=1).values.mean()
             loss_dict["l_cover"] = self.cover_coef * l_cover
-            loss_dict["_l_cover_unadjusted"] = l_cover
 
         return loss_dict

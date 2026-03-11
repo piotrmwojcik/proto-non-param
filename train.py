@@ -112,12 +112,12 @@ def wandb_log_top_proto_heatmaps(
     outputs: dict,
     step: int,
     captions=None,
-    max_items: int = 2,
+    max_items: int = 20,
     top_k: int = 5,
     mean=CLIP_MEAN,
     std=CLIP_STD,
-    log_key: str = "train/top_proto_heatmaps",
-    tsne_key: str = "train/proto_tsne",
+    log_key: str = "test/top_proto_heatmaps",
+    tsne_key: str = "test/proto_tsne",
     tsne_max_points: int = 300,
     log_tsne: bool = False,
 ):
@@ -349,8 +349,6 @@ def test(
     *,
     train_steps_per_epoch: int,
     log_every: int = 5,
-    heatmap_items: int = 20,
-    heatmap_top_k: int = 7,
     vocab_to_idx=None,
 ):
     model.eval()
@@ -436,9 +434,6 @@ def test(
             # --------------------------
             # Visualization logging
             # --------------------------
-            B = images.shape[0]
-            n = min(heatmap_items, B)
-
             wandb_log_top_proto_heatmaps(
                 model=model,
                 images=images,
