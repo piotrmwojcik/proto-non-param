@@ -7,65 +7,6 @@ from torch import nn
 import open_clip
 
 
-class CLIPPatch16Backbone(nn.Module):
-    def __init__(self, model_name: str = "ViT-B-14", pretrained: str = "openai", patch_size: int = 16):
-        super().__init__()
-
-        model, _, _ = open_clip.create_model_and_transforms(
-            model_name,
-            pretrained=pretrained,
-        )
-
-        self.model = model
-        self.visual = model.visual
-        self.dim = self.visual.output_dim
-        self.patch_size = patch_size
-
-        for p in self.parameters():
-            p.requires_grad = False
-
-    def set_requires_grad(self, requires_grad: bool = True):
-        for p in self.parameters():
-            p.requires_grad = requires_grad
-        if not requires_grad:
-            self.eval()
-
-    def learnable_parameters(self):
-        return [p for p in self.parameters() if p.requires_grad]
-
-    @torch.no_grad()
-    def forward(self, x: torch.Tensor):
-        """
-        Args:
-            x: [B, 3, H, W], already CLIP-normalized
-
-        Returns:
-            patch_tokens: [B, N, D]
-            raw_patch_tokens: [B, N, D]
-            cls_tokens: [B, D]
-        """
-        B, C, H, W = x.shape
-        p = self.patch_size
-        assert H % p == 0 and W % p == 0, f"H,W must be divisible by {p}."
-
-        patches = F.unfold(x, kernel_size=p, stride=p).transpose(1, 2)  # [B, N, C*p*p]
-        N = patches.shape[1]
-        patches = patches.reshape(B * N, C, p, p)  # [B*N, 3, p, p]
-
-        # OpenAI CLIP checkpoints typically expect 224x224
-        patches = F.interpolate(patches, size=(224, 224), mode="bilinear", align_corners=False)
-
-        feats = self.model.encode_image(patches)  # [B*N, D]
-        feats = F.normalize(feats, dim=-1)
-        feats = feats.reshape(B, N, -1)  # [B, N, D]
-
-        patch_tokens = feats
-        raw_patch_tokens = feats
-        cls_tokens = feats.mean(dim=1)
-
-        return patch_tokens, raw_patch_tokens, cls_tokens
-
-
 class ProjectionHead(nn.Module):
     """
     SimCLR-style projection head.

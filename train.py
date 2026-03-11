@@ -477,14 +477,6 @@ def build_backbone(args):
 
         dim = backbone.dim
 
-    elif "clip" in args.backbone:
-        backbone = CLIPPatch16Backbone(
-            model_name=args.clip_model_name,
-            pretrained=args.clip_pretrained,
-            patch_size=args.clip_patch_size,
-        )
-        dim = backbone.dim
-
     elif "dino" in args.backbone:
         backbone = DINOBackboneExpanded(
             name=args.backbone,
@@ -493,15 +485,17 @@ def build_backbone(args):
             freeze_norm_layer=True,
         )
         dim = backbone.dim
-
+    elif "clip" in args.backbone:
+        backbone = CLIPBackbone(name=args.backbone)
+        dim = backbone.dim
     else:
         raise NotImplementedError(f"Backbone {args.backbone} not implemented.")
 
     # ---------------------------------------------------
     # Freeze everything first
     # ---------------------------------------------------
-    #for p in backbone.parameters():
-    #    p.requires_grad = False
+    for p in backbone.parameters():
+        p.requires_grad = False
 
     # ---------------------------------------------------
     # Unfreeze last N transformer blocks
