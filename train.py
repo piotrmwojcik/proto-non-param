@@ -268,10 +268,10 @@ def train(
         text_tokens = tokenizer(list(captions)).to(device)
 
         with torch.no_grad():
-            txt_feat = clip_model.encode_text(text_tokens)
-            txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
+            img_feat = clip_model.encode_image(images)
+            img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
 
-            B, D = txt_feat.shape
+            B, D = img_feat.shape
             V = noun_embeddings.shape[0]
 
             noun_sim_distribution = torch.zeros(B, V, device=device)
@@ -281,8 +281,7 @@ def train(
                 noun_idxs = extract_caption_words(caption, vocab_to_idx)
 
                 if len(noun_idxs) == 0:
-                    # fallback to global similarity
-                    sims = txt_feat[b] @ noun_embeddings.T
+                    sims = img_feat[b] @ noun_embeddings.T
                     probs = F.softmax(sims / target_temperature, dim=-1)
                     noun_sim_distribution[b] = probs
                     continue
@@ -371,10 +370,8 @@ def test(
         # --------------------------
         # Caption → noun distribution
         # --------------------------
-        text_tokens = tokenizer(list(captions)).to(device)
-
-        txt_feat = clip_model.encode_text(text_tokens)
-        txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
+        img_feat = clip_model.encode_image(images)
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
 
         B, D = txt_feat.shape
         V = noun_embeddings.shape[0]
@@ -386,7 +383,7 @@ def test(
             noun_idxs = extract_caption_words(caption, vocab_to_idx)
 
             if len(noun_idxs) == 0:
-                sims = txt_feat[b] @ noun_embeddings.T
+                sims = img_feat[b] @ noun_embeddings.T
                 probs = F.softmax(sims / target_temperature, dim=-1)
                 noun_sim_distribution[b] = probs
                 continue
