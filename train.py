@@ -465,8 +465,8 @@ def test(
 
 def build_backbone(args):
     if "dinov2" in args.backbone:
-        print('!!!!!')
         if args.num_splits and args.num_splits > 0:
+            print('!!!!!!!!!!')
             backbone = DINOv2BackboneExpanded(
                 name=args.backbone,
                 n_splits=args.num_splits,
@@ -560,7 +560,6 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
 
     parser.add_argument("--cosine-coef", type=float, default=1.0)
-    parser.add_argument("--mse-coef", type=float, default=0.0)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
 
     args = parser.parse_args()
