@@ -465,6 +465,7 @@ def test(
 
 def build_backbone(args):
     if "dinov2" in args.backbone:
+        print('!!!!!')
         if args.num_splits and args.num_splits > 0:
             backbone = DINOv2BackboneExpanded(
                 name=args.backbone,
@@ -671,14 +672,14 @@ def main():
                 print(name)
             raise AttributeError("Could not find transformer blocks in net.backbone")
 
-        n_blocks = len(blocks)
-        start = max(0, n_blocks - args.unfreeze_last_blocks)
+        #n_blocks = len(blocks)
+        #start = max(0, n_blocks - args.unfreeze_last_blocks)
 
-        for block in blocks[start:]:
-            for p in block.parameters():
-                p.requires_grad = True
+        #for block in blocks[start:]:
+        #    for p in block.parameters():
+        #        p.requires_grad = True
 
-        print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
+        #print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
 
         for name, p in bb.named_parameters():
             if p.requires_grad:
