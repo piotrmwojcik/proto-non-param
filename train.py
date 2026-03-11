@@ -636,8 +636,8 @@ def main():
         prototype_init_noise=args.prototype_init_noise,
     )
     # freeze backbone first
-    for p in net.backbone.parameters():
-        p.requires_grad = False
+    #for p in net.backbone.parameters():
+    #    p.requires_grad = False
 
     if args.unfreeze_last_blocks > 0:
         bb = net.backbone
