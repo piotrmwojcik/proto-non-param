@@ -466,7 +466,6 @@ def test(
 def build_backbone(args):
     if "dinov2" in args.backbone:
         if args.num_splits and args.num_splits > 0:
-            print('!!!!!!!!!!')
             backbone = DINOv2BackboneExpanded(
                 name=args.backbone,
                 n_splits=args.num_splits,
@@ -501,8 +500,8 @@ def build_backbone(args):
     # ---------------------------------------------------
     # Freeze everything first
     # ---------------------------------------------------
-    for p in backbone.parameters():
-        p.requires_grad = False
+    #for p in backbone.parameters():
+    #    p.requires_grad = False
 
     # ---------------------------------------------------
     # Unfreeze last N transformer blocks
