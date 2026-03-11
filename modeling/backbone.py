@@ -64,7 +64,7 @@ class CLIPBackbone(nn.Module):
 
         # load CLIP weights
         state_dict = torch.hub.load_state_dict_from_url(
-            CLIP_URL_DICT[name],
+            URL_DICT[name],
             map_location="cpu"
         )
 
