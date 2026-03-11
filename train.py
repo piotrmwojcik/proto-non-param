@@ -294,7 +294,7 @@ def train(
             print("\nCaption:", captions[b])
             print("Top-10 nouns:")
             for w, s in zip(words, weights):
-                print(f"  {w:15s} {s:.4f}")
+                print(f"  {w:15s} {s:.7f}")
 
         outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
