@@ -21,7 +21,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 
 from clip_dataset import CocoCLIPDataset
-from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded
+from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
 
