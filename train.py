@@ -265,8 +265,6 @@ def train(
         images, captions, indices = batch
         images = images.to(device, non_blocking=True)
 
-        text_tokens = tokenizer(list(captions)).to(device)
-
         with torch.no_grad():
             img_feat = clip_model.encode_image(images)
             img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
@@ -277,23 +275,15 @@ def train(
             noun_sim_distribution = torch.zeros(B, V, device=device)
 
             for b, caption in enumerate(captions):
-
                 noun_idxs = extract_caption_words(caption, vocab_to_idx)
 
-                if len(noun_idxs) == 0:
-                    sims = img_feat[b] @ noun_embeddings.T
-                    probs = F.softmax(sims / target_temperature, dim=-1)
-                    noun_sim_distribution[b] = probs
-                    continue
-
-                noun_idxs = torch.tensor(noun_idxs, device=device)
-
-                noun_embs = noun_embeddings[noun_idxs]
-
-                sims = txt_feat[b] @ noun_embs.T
+                sims = img_feat[b] @ noun_embeddings.T
                 probs = F.softmax(sims / target_temperature, dim=-1)
 
-                noun_sim_distribution[b, noun_idxs] = probs
+                if len(noun_idxs) == 0:
+                    noun_sim_distribution[b] = probs
+                else:
+                    noun_sim_distribution[b, noun_idxs] = probs[noun_idxs]
 
             noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
 
@@ -379,22 +369,22 @@ def test(
         noun_sim_distribution = torch.zeros(B, V, device=device)
 
         for b, caption in enumerate(captions):
-
             noun_idxs = extract_caption_words(caption, vocab_to_idx)
 
             if len(noun_idxs) == 0:
-                sims = img_feat[b] @ noun_embeddings.T
-                probs = F.softmax(sims / target_temperature, dim=-1)
-                noun_sim_distribution[b] = probs
-                continue
+                target_idxs = None
+                target_embs = noun_embeddings
+            else:
+                target_idxs = torch.as_tensor(noun_idxs, device=device, dtype=torch.long)
+                target_embs = noun_embeddings[target_idxs]
 
-            noun_idxs = torch.tensor(noun_idxs, device=device)
-            noun_embs = noun_embeddings[noun_idxs]
-
-            sims = txt_feat[b] @ noun_embs.T
+            sims = img_feat[b] @ target_embs.T
             probs = F.softmax(sims / target_temperature, dim=-1)
 
-            noun_sim_distribution[b, noun_idxs] = probs
+            if target_idxs is None:
+                noun_sim_distribution[b] = probs
+            else:
+                noun_sim_distribution[b, target_idxs] = probs
 
         noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
 
