@@ -83,7 +83,7 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
 
     for word, pos in pos_tags:
 
-        if pos.startswith(("NN", "VB", "JJ", "RB")):
+        if pos.startswith(("NN", "VB", "JJ")):
 
             if pos.startswith("NN"):
                 lemma = lemmatizer.lemmatize(word, pos="n")
@@ -94,11 +94,8 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
                 if lemma in COMMON_VERBS:
                     continue
 
-            elif pos.startswith("JJ"):
+            else:  # adjectives (JJ)
                 lemma = lemmatizer.lemmatize(word, pos="a")
-
-            else:  # adverbs (RB)
-                lemma = lemmatizer.lemmatize(word, pos="r")
 
             if lemma in vocab_to_idx and lemma not in seen:
                 word_idxs.append(vocab_to_idx[lemma])
@@ -363,7 +360,7 @@ def test(
         img_feat = clip_model.encode_image(images)
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
 
-        B, D = txt_feat.shape
+        B, D = img_feat.shape
         V = noun_embeddings.shape[0]
 
         noun_sim_distribution = torch.zeros(B, V, device=device)
