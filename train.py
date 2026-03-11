@@ -524,7 +524,7 @@ def main():
         "--backbone",
         type=str,
         default="dinov2_vitb14",
-        choices=["dinov2_vitb14", "dinov2_vits14", "clip", "dino_vitb16"],
+        choices=["dinov2_vitb14", "dinov2_vits14", "clip_vitb14", "dino_vitb16"],
     )
     parser.add_argument("--clip-model-name", type=str, default="ViT-L-14")
     parser.add_argument("--clip-pretrained", type=str, default="openai")
