@@ -163,6 +163,12 @@ class PNP(nn.Module):
             "B dim, V dim -> B V",
         )  # [B, V]
 
+        clip_top_k = 64
+
+        _, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
+
+        clip_mask = torch.zeros_like(clip_vocab_logits, dtype=torch.bool)  # [B, V]
+        clip_mask.scatter_(1, clip_top_idx, True)
 
         # -----------------------------------
         # Trainable soft mask from CLIP image embedding
