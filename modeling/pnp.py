@@ -99,6 +99,12 @@ class PNP(nn.Module):
         self.vocab_size = vocab_clip_embs.shape[0]
         self.vocab_scale = nn.Parameter(torch.zeros(self.vocab_size))  # unconstrained
 
+        self.clip_gate_mlp = nn.Sequential(
+            nn.Linear(self.clip_text_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, self.vocab_size),
+        )
+
     def get_prototypes(self) -> torch.Tensor:
         """
         Compute visual prototypes on the fly from cached CLIP text embeddings.
@@ -113,12 +119,15 @@ class PNP(nn.Module):
 
         Returns:
             dict with:
+                patch_tokens: [B, N, D]
                 patch_prototype_logits: [B, N, V]
                 vocab_logits: [B, V]
                 clip_vocab_logits: [B, V]
+                clip_gate_logits: [B, V]
                 mixture_weights: [B, V]
                 pred_text_embedding: [B, 512]
                 clip_image_embedding: [B, 512]
+                prototypes: [V, D]
             """
         # -----------------------------------
         # Backbone patch features
@@ -155,36 +164,56 @@ class PNP(nn.Module):
             "B dim, V dim -> B V",
         )  # [B, V]
 
-        clip_top_k = 64  # number of vocab elements allowed by CLIP
-
-        # select top-k according to CLIP
+        # -----------------------------------
+        # Hard candidate mask from CLIP top-k
+        # -----------------------------------
+        clip_top_k = 64
         _, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
 
         clip_mask = torch.zeros_like(clip_vocab_logits, dtype=torch.bool)  # [B, V]
         clip_mask.scatter_(1, clip_top_idx, True)
 
-        # filter vocab logits using CLIP mask
-        filtered_vocab_logits = vocab_logits.masked_fill(~clip_mask, float("-inf"))
+        # -----------------------------------
+        # Trainable soft mask from CLIP image embedding
+        # -----------------------------------
+        clip_gate_logits = self.clip_gate_mlp(clip_image_embedding)  # [B, V]
+        clip_gate = torch.sigmoid(clip_gate_logits)  # [B, V] in (0, 1)
+
+        # zero out concepts rejected by CLIP hard mask
+        clip_gate = clip_gate * clip_mask.float()  # [B, V]
+
+        # renormalize optional
+        clip_gate = clip_gate / (clip_gate.sum(dim=-1, keepdim=True) + 1e-8)
+
+        # -----------------------------------
+        # Use only vocab logits, filtered by CLIP
+        # -----------------------------------
+        filtered_vocab_logits = vocab_logits.masked_fill(~clip_mask, -1e9)
 
         weights = F.softmax(filtered_vocab_logits / self.temperature, dim=-1)  # [B, V]
+
+        # apply learned gate inside the masked set
+        weights = weights * clip_gate
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
 
         pred_text_embedding = einsum(
             weights,
             vocab_clip_embeddings,
             "B V, V dim -> B dim",
         )  # [B, 512]
-
         pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
 
         outputs = dict(
-            patch_tokens=patch_tokens,  # [B, N, D]
-            patch_prototype_logits=patch_prototype_logits,  # [B, N, V]
-            vocab_logits=vocab_logits,  # [B, V]
-            mixture_weights=weights,  # [B, V]
-            pred_text_embedding=pred_text_embedding,  # [B, 512]
-            prototypes=prototypes,  # [V, D] (useful for losses)
+            patch_tokens=patch_tokens,
+            patch_prototype_logits=patch_prototype_logits,
+            vocab_logits=vocab_logits,
+            clip_vocab_logits=clip_vocab_logits,
+            clip_gate_logits=clip_gate_logits,
+            mixture_weights=weights,
+            pred_text_embedding=pred_text_embedding,
+            clip_image_embedding=clip_image_embedding,
+            prototypes=prototypes,
         )
-
         return outputs
 
     def push_forward(self, x: torch.Tensor):
