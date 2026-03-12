@@ -265,7 +265,8 @@ class PNPCriterion(nn.Module):
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...]):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
         mixture_weights = outputs["mixture_weights"]        # [B, V]
-        patch_logits = outputs["patch_prototype_logits"]    # [B, N, V]
+        patch_logits = outputs["patch_prototype_logits"]
+        gate_logits = outputs["clip_gate_logits"] # [B, N, V]
         target_dist = batch[1]                              # [B, V]
 
         loss_dict = {}
@@ -275,7 +276,7 @@ class PNPCriterion(nn.Module):
         pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
 
         l_kl = F.kl_div(
-            pred_log_probs,
+            gate_logits,
             target_dist,
             reduction="batchmean",
         )
@@ -287,7 +288,7 @@ class PNPCriterion(nn.Module):
         target_binary = (target_dist > 1e-6).float()
 
         l_bin = F.binary_cross_entropy_with_logits(
-            pred_logits,
+            g_logits,
             target_binary,
             reduction="mean",
         )
