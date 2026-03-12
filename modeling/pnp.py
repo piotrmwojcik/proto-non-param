@@ -276,7 +276,7 @@ class PNPCriterion(nn.Module):
         pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
 
         l_kl = F.kl_div(
-            gate_logits,
+            pred_log_probs,
             target_dist,
             reduction="batchmean",
         )
