@@ -163,14 +163,6 @@ class PNP(nn.Module):
             "B dim, V dim -> B V",
         )  # [B, V]
 
-        # -----------------------------------
-        # Hard candidate mask from CLIP top-k
-        # -----------------------------------
-        clip_top_k = 64
-        _, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
-
-        clip_mask = torch.zeros_like(clip_vocab_logits, dtype=torch.bool)  # [B, V]
-        clip_mask.scatter_(1, clip_top_idx, True)
 
         # -----------------------------------
         # Trainable soft mask from CLIP image embedding
@@ -249,6 +241,7 @@ class PNPCriterion(nn.Module):
     def __init__(
         self,
         kl_coef: float = 1.0,
+        bin_coef: float = 0.1,
         entropy_coef: float = 0.0,
         visual_coef: float = 0.0,
         cover_coef: float = 0.0,
@@ -256,6 +249,7 @@ class PNPCriterion(nn.Module):
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
+        self.bin_coef = bin_coef
         self.entropy_coef = entropy_coef
         self.visual_coef = visual_coef
         self.cover_coef = cover_coef
@@ -279,6 +273,19 @@ class PNPCriterion(nn.Module):
             reduction="batchmean",
         )
         loss_dict["l_dist"] = self.kl_coef * l_kl
+
+        # -----------------------------------
+        # binary supervision from target_dist
+        # -----------------------------------
+        target_binary = (target_dist > 1e-6).float()
+
+        l_bin = F.binary_cross_entropy_with_logits(
+            pred_logits,
+            target_binary,
+            reduction="mean",
+        )
+
+        loss_dict["l_bin"] = self.bin_coef * l_bin
 
         # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:

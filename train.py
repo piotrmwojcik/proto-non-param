@@ -568,6 +568,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--bin-coef", type=float, default=0.1)
     parser.add_argument("--backbone-lr", type=float, default=1.0e-5)
     parser.add_argument("--text-proj-lr", type=float, default=1.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
