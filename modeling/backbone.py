@@ -77,6 +77,90 @@ CLIP_DIM_DICT = {
 }
 
 
+class CLIPBackbone(nn.Module):
+    def __init__(
+        self,
+        name: str = "clip_vitb32",
+        pretrained: str = "openai",
+    ):
+        super().__init__()
+        assert name in CLIP_NAME_MAP, f"Unsupported CLIP backbone: {name}"
+
+        model_name = CLIP_NAME_MAP[name]
+        model, _, _ = open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=pretrained,
+        )
+
+        self.clip = model.visual
+        self.dim = CLIP_DIM_DICT[name]
+
+    def learnable_parameters(self):
+        return self.clip.parameters()
+
+    def set_requires_grad(self):
+        for param in self.parameters():
+            param.requires_grad = True
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        key: str = "x_norm_patchtokens",
+        cls_key: str = "x_norm_clstoken",
+        reshape: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compatible with DINOv2Backbone interface.
+
+        Supported keys:
+            - key="x_norm_patchtokens"
+            - cls_key="x_norm_clstoken"
+
+        Returns:
+            feature:   [B, N, C] or [B, C, H, W] if reshape=True
+            cls_token: [B, C]
+        """
+        if key != "x_norm_patchtokens":
+            raise ValueError(f"Unsupported key for CLIPBackbone: {key}")
+        if cls_key != "x_norm_clstoken":
+            raise ValueError(f"Unsupported cls_key for CLIPBackbone: {cls_key}")
+
+        # Patch embedding
+        x = self.clip.conv1(x)                      # [B, C, H', W']
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # [B, C, N]
+        x = x.permute(0, 2, 1)                     # [B, N, C]
+
+        # CLS token
+        cls = self.clip.class_embedding.to(x.dtype)
+        cls = cls + torch.zeros(
+            x.shape[0], 1, x.shape[-1],
+            dtype=x.dtype, device=x.device
+        )
+        x = torch.cat([cls, x], dim=1)             # [B, 1+N, C]
+
+        # Positional embedding + pre-norm
+        x = x + self.clip.positional_embedding.to(x.dtype)
+        x = self.clip.ln_pre(x)
+
+        # Transformer
+        x = x.permute(1, 0, 2)                     # [L, B, C]
+        x = self.clip.transformer(x)
+        x = x.permute(1, 0, 2)                     # [B, 1+N, C]
+
+        # Final norm
+        x = self.clip.ln_post(x)
+
+        cls_token = x[:, 0, :]                     # [B, C]
+        feature = x[:, 1:, :]                      # [B, N, C]
+
+        if reshape:
+            B, n_patches, dim = feature.shape
+            H = W = int(sqrt(n_patches))
+            feature = rearrange(feature, "B (H W) dim -> B dim H W", H=H, W=W)
+
+        return feature, cls_token
+
+
 class DINOv2Backbone(nn.Module):
     def __init__(self, name: str = "dinov2_vitb14"):
         super().__init__()
