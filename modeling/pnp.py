@@ -288,7 +288,7 @@ class PNPCriterion(nn.Module):
         target_binary = (target_dist > 1e-6).float()
 
         l_bin = F.binary_cross_entropy_with_logits(
-            g_logits,
+            gate_logits,
             target_binary,
             reduction="mean",
         )
