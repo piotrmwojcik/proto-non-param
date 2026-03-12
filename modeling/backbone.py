@@ -53,55 +53,28 @@ DIM_DICT = {
     "clip_vitb14": 768
 }
 
+CLIP_NAME_MAP = {
+    "clip_vitb32": "ViT-B-32",
+    "clip_vitb16": "ViT-B-16",
+    "clip_vitl14": "ViT-L-14",
+}
 
-class CLIPBackbone(nn.Module):
-    def __init__(self, name: str = "clip_vitb14"):
-        super().__init__()
+CLIP_DIM_DICT = {
+    "clip_vitb32": 768,
+    "clip_vitb16": 768,
+    "clip_vitl14": 1024,
+}
+CLIP_NAME_MAP = {
+    "clip_vitb32": "ViT-B-32",
+    "clip_vitb16": "ViT-B-16",
+    "clip_vitl14": "ViT-L-14",
+}
 
-        # build DINO-style ViT architecture
-        arch = MODEL_DICT["dinov2_vitb14"]
-        self.dino = arch(depth=12)
-
-        # load CLIP weights
-        state_dict = torch.hub.load_state_dict_from_url(
-            URL_DICT[name],
-            map_location="cpu"
-        )
-
-        # CLIP visual weights are under "visual."
-        state_dict = {
-            k.replace("visual.", ""): v
-            for k, v in state_dict.items()
-            if k.startswith("visual.")
-        }
-
-        # ignore incompatible keys (register tokens etc.)
-        missing, unexpected = self.dino.load_state_dict(state_dict, strict=False)
-
-        print("Missing keys:", missing)
-        print("Unexpected keys:", unexpected)
-
-        self.dim = CLIP_DIM_DICT[name]
-
-    def learnable_parameters(self):
-        return self.dino.parameters()
-
-    def set_requires_grad(self):
-        for param in self.parameters():
-            param.requires_grad = True
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        key: str = "x_norm_patchtokens",
-        cls_key: str = "x_norm_clstoken",
-    ):
-        feature_dict = self.dino.forward_features(x)
-
-        feature = feature_dict[key]
-        cls_token = feature_dict[cls_key]
-
-        return feature, cls_token
+CLIP_DIM_DICT = {
+    "clip_vitb32": 768,
+    "clip_vitb16": 768,
+    "clip_vitl14": 1024,
+}
 
 
 class DINOv2Backbone(nn.Module):
