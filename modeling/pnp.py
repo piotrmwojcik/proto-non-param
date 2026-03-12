@@ -86,10 +86,10 @@ class PNP(nn.Module):
 
         vocab_clip_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)  # [V, 512]
         vocab_clip_embs = F.normalize(vocab_clip_embs, dim=-1)
-        self.vocab_scale = nn.Parameter(torch.zeros(self.vocab_size))  # unconstrained
 
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
+        self.vocab_scale = nn.Parameter(torch.zeros(self.vocab_size))  # unconstrained
 
     def get_prototypes(self) -> torch.Tensor:
         """
