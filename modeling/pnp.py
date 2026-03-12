@@ -168,17 +168,20 @@ class PNP(nn.Module):
         # Trainable soft mask from CLIP image embedding
         # -----------------------------------
         clip_gate_logits = self.clip_gate_mlp(clip_image_embedding)  # [B, V]
-        clip_gate = torch.sigmoid(clip_gate_logits)  # [B, V] in (0, 1)
 
+        # zero out concepts rejected by CLIP top-k mask
+        clip_gate_logits = clip_gate_logits.masked_fill(~clip_mask, -1e9)
 
-        # renormalize optional
+        clip_gate = torch.sigmoid(clip_gate_logits)  # [B, V]
+        clip_gate = clip_gate * clip_mask.float()  # safety
+
+        # renormalize over selected concepts only
         clip_gate = clip_gate / (clip_gate.sum(dim=-1, keepdim=True) + 1e-8)
 
         # -----------------------------------
         # Use only vocab logits, filtered by CLIP
         # -----------------------------------
         filtered_vocab_logits = vocab_logits.masked_fill(~clip_mask, -1e9)
-
         weights = F.softmax(filtered_vocab_logits / self.temperature, dim=-1)  # [B, V]
 
         # apply learned gate inside the masked set
