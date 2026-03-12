@@ -126,6 +126,7 @@ class PNP(nn.Module):
 
         weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
 
+        k = 7
         gumbel_samples = []
         for _ in range(k):
             g = F.gumbel_softmax(
