@@ -170,8 +170,6 @@ class PNP(nn.Module):
         clip_gate_logits = self.clip_gate_mlp(clip_image_embedding)  # [B, V]
         clip_gate = torch.sigmoid(clip_gate_logits)  # [B, V] in (0, 1)
 
-        # zero out concepts rejected by CLIP hard mask
-        clip_gate = clip_gate * clip_mask.float()  # [B, V]
 
         # renormalize optional
         clip_gate = clip_gate / (clip_gate.sum(dim=-1, keepdim=True) + 1e-8)
