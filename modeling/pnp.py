@@ -155,20 +155,18 @@ class PNP(nn.Module):
             "B dim, V dim -> B V",
         )  # [B, V]
 
-        clip_top_k = 64  # choose how many vocab items to keep
+        clip_top_k = 64  # number of vocab elements allowed by CLIP
 
-        clip_top_vals, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
+        # select top-k according to CLIP
+        _, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
 
         clip_mask = torch.zeros_like(clip_vocab_logits, dtype=torch.bool)  # [B, V]
         clip_mask.scatter_(1, clip_top_idx, True)
 
-        # combine prototype evidence with CLIP visual evidence
-        gated_vocab_logits = vocab_logits + clip_vocab_logits
+        # filter vocab logits using CLIP mask
+        filtered_vocab_logits = vocab_logits.masked_fill(~clip_mask, float("-inf"))
 
-        # mask out non-selected vocab items
-        gated_vocab_logits = gated_vocab_logits.masked_fill(~clip_mask, float("-inf"))
-
-        weights = F.softmax(gated_vocab_logits / self.temperature, dim=-1)  # [B, V]
+        weights = F.softmax(filtered_vocab_logits / self.temperature, dim=-1)  # [B, V]
 
         pred_text_embedding = einsum(
             weights,
