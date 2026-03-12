@@ -2,6 +2,7 @@ import os
 import re
 from functools import partial
 from math import sqrt
+import open_clip
 
 import torch
 from dinov2.layers.block import Block, MemEffAttention
