@@ -104,62 +104,47 @@ class CLIPBackbone(nn.Module):
             param.requires_grad = True
 
     def forward(
-        self,
-        x: torch.Tensor,
-        key: str = "x_norm_patchtokens",
-        cls_key: str = "x_norm_clstoken",
-        reshape: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compatible with DINOv2Backbone interface.
-
-        Supported keys:
-            - key="x_norm_patchtokens"
-            - cls_key="x_norm_clstoken"
-
-        Returns:
-            feature:   [B, N, C] or [B, C, H, W] if reshape=True
-            cls_token: [B, C]
-        """
+            self,
+            x: torch.Tensor,
+            key: str = "x_norm_patchtokens",
+            cls_key: str = "x_norm_clstoken",
+            reshape: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if key != "x_norm_patchtokens":
             raise ValueError(f"Unsupported key for CLIPBackbone: {key}")
         if cls_key != "x_norm_clstoken":
             raise ValueError(f"Unsupported cls_key for CLIPBackbone: {cls_key}")
 
-        # Patch embedding
-        x = self.clip.conv1(x)                      # [B, C, H', W']
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # [B, C, N]
-        x = x.permute(0, 2, 1)                     # [B, N, C]
+        x = self.clip.conv1(x)
+        x = x.reshape(x.shape[0], x.shape[1], -1)
+        x = x.permute(0, 2, 1)
 
-        # CLS token
         cls = self.clip.class_embedding.to(x.dtype)
         cls = cls + torch.zeros(
             x.shape[0], 1, x.shape[-1],
             dtype=x.dtype, device=x.device
         )
-        x = torch.cat([cls, x], dim=1)             # [B, 1+N, C]
+        x = torch.cat([cls, x], dim=1)
 
-        # Positional embedding + pre-norm
         x = x + self.clip.positional_embedding.to(x.dtype)
         x = self.clip.ln_pre(x)
 
-        # Transformer
-        x = x.permute(1, 0, 2)                     # [L, B, C]
+        x = x.permute(1, 0, 2)
         x = self.clip.transformer(x)
-        x = x.permute(1, 0, 2)                     # [B, 1+N, C]
+        x = x.permute(1, 0, 2)
 
-        # Final norm
         x = self.clip.ln_post(x)
 
-        cls_token = x[:, 0, :]                     # [B, C]
-        feature = x[:, 1:, :]                      # [B, N, C]
+        cls_token = x[:, 0, :]
+        feature = x[:, 1:, :]
 
         if reshape:
             B, n_patches, dim = feature.shape
             H = W = int(sqrt(n_patches))
             feature = rearrange(feature, "B (H W) dim -> B dim H W", H=H, W=W)
 
-        return feature, cls_token
+        # Match the 3-output backbone interface
+        return feature, feature, cls_token
 
 
 class DINOv2Backbone(nn.Module):
