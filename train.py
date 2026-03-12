@@ -307,7 +307,7 @@ def train(
             print("Top-10 nouns:")
             for w, s in zip(words, weights):
                 print(f"  {w:15s} {s:.7f}")
-
+        outputs = model(images)
         if i % 200 == 0:
             b = 0
 
@@ -329,7 +329,6 @@ def train(
             for w, s in zip(mix_words, mix_vals.tolist()):
                 print(f"  {w:15s} {s:.7f}")
 
-        outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
