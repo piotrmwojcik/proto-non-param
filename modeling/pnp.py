@@ -86,6 +86,7 @@ class PNP(nn.Module):
 
         vocab_clip_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)  # [V, 512]
         vocab_clip_embs = F.normalize(vocab_clip_embs, dim=-1)
+        self.vocab_scale = nn.Parameter(torch.zeros(self.vocab_size))  # unconstrained
 
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
@@ -123,25 +124,27 @@ class PNP(nn.Module):
 
         # Image-level logits over vocab pool
         vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
-
+        # positive scaling
+        scale = F.softplus(self.vocab_scale) + 1e-6  # [V], strictly positive
+        vocab_logits = vocab_logits * scale  # broadcast to [B, V]
         weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
 
-        k = 7
-        gumbel_samples = []
-        for _ in range(k):
-            g = F.gumbel_softmax(
-                torch.log(weights + 1e-9),
-                tau=0.5,
-                hard=True,
-                dim=-1,
-            )  # [B, V]
-            gumbel_samples.append(g)
-
-        # soft k-hot mask
-        gumbel_mask = torch.stack(gumbel_samples).sum(dim=0) / k  # [B, V]
-
-        # apply mask
-        weights = weights * gumbel_mask
+        # k = 7
+        # gumbel_samples = []
+        # for _ in range(k):
+        #     g = F.gumbel_softmax(
+        #         torch.log(weights + 1e-9),
+        #         tau=0.5,
+        #         hard=True,
+        #         dim=-1,
+        #     )  # [B, V]
+        #     gumbel_samples.append(g)
+        #
+        # # soft k-hot mask
+        # gumbel_mask = torch.stack(gumbel_samples).sum(dim=0) / k  # [B, V]
+        #
+        # # apply mask
+        # weights = weights * gumbel_mask
 
         outputs = {
             "patch_prototype_logits": patch_prototype_logits,  # [B, N, V]

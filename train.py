@@ -632,10 +632,10 @@ def main():
     #for p in net.backbone.parameters():
     #    p.requires_grad = False
 
+    print("Backbone class:", type(bb))
+
     if args.unfreeze_last_blocks > 0:
         bb = net.backbone
-
-        print("Backbone class:", type(bb))
         print("Backbone child modules:", list(bb._modules.keys()))
 
         blocks = None
