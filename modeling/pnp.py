@@ -140,9 +140,6 @@ class PNP(nn.Module):
         # -----------------------------------
         vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
 
-        scale = F.softplus(self.vocab_scale) + 1e-6  # [V]
-        vocab_logits = vocab_logits * scale
-
         # -----------------------------------
         # CLIP visual embedding -> vocab prior
         # -----------------------------------
@@ -158,25 +155,27 @@ class PNP(nn.Module):
             "B dim, V dim -> B V",
         )  # [B, V]
 
-        # -----------------------------------
-        # Soft gating from CLIP
-        # -----------------------------------
-        clip_weights = F.softmax(clip_vocab_logits / self.temperature, dim=-1)  # [B, V]
+        clip_top_k = 64  # choose how many vocab items to keep
+
+        clip_top_vals, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
+
+        clip_mask = torch.zeros_like(clip_vocab_logits, dtype=torch.bool)  # [B, V]
+        clip_mask.scatter_(1, clip_top_idx, True)
 
         # combine prototype evidence with CLIP visual evidence
         gated_vocab_logits = vocab_logits + clip_vocab_logits
 
-        weights = F.softmax(gated_vocab_logits / self.temperature, dim=-1)  # [B, V]
+        # mask out non-selected vocab items
+        gated_vocab_logits = gated_vocab_logits.masked_fill(~clip_mask, float("-inf"))
 
-        # optional: multiply by clip prior and renormalize
-        weights = weights * clip_weights
-        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+        weights = F.softmax(gated_vocab_logits / self.temperature, dim=-1)  # [B, V]
 
         pred_text_embedding = einsum(
             weights,
             vocab_clip_embeddings,
             "B V, V dim -> B dim",
         )  # [B, 512]
+
         pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
 
         outputs = dict(
