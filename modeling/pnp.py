@@ -60,7 +60,7 @@ class PNP(nn.Module):
         dim: int = 768,
         temperature: float = 0.2,
         clip_text_dim: int = 512,
-        text_proj_hidden_dim: int = 768,
+        text_proj_hidden_dim: int = 1024,
         vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         prototype_init_noise: float = 0.01,
     ):
