@@ -712,6 +712,7 @@ def main():
         kl_coef=args.kl_coef,
         entropy_coef=args.entropy_coef,
         visual_coef=args.visual_coef,
+        bin_coef=args.bin_coef,
         cover_coef=args.cover_coef,
         temperature=args.temperature,
     )
