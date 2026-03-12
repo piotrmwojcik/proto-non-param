@@ -180,12 +180,14 @@ class PNP(nn.Module):
         pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
 
         outputs = dict(
-            patch_tokens=patch_tokens,
-            patch_prototype_logits=patch_prototype_logits,
-            vocab_logits=vocab_logits,
-            mixture_weights=weights,
-            pred_text_embedding=pred_text_embedding,
+            patch_tokens=patch_tokens,  # [B, N, D]
+            patch_prototype_logits=patch_prototype_logits,  # [B, N, V]
+            vocab_logits=vocab_logits,  # [B, V]
+            mixture_weights=weights,  # [B, V]
+            pred_text_embedding=pred_text_embedding,  # [B, 512]
+            prototypes=prototypes,  # [V, D] (useful for losses)
         )
+
         return outputs
 
     def push_forward(self, x: torch.Tensor):
