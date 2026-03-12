@@ -619,6 +619,15 @@ def main():
 
     backbone, dim = build_backbone(args)
 
+    clip_model, _, _ = open_clip.create_model_and_transforms(
+        args.coco_clip_model_name,
+        pretrained=args.coco_clip_pretrained,
+    )
+    clip_model = clip_model.eval().to(device)
+
+    for p in clip_model.parameters():
+        p.requires_grad = False
+
     net = PNP(
         backbone=backbone,
         dim=dim,
@@ -627,6 +636,7 @@ def main():
         text_proj_hidden_dim=args.text_proj_hidden_dim,
         vocab_cache_path=args.vocab_cache_path,
         prototype_init_noise=args.prototype_init_noise,
+        clip_model=clip_model,  # ← added
     )
     # freeze backbone first
     #for p in net.backbone.parameters():
@@ -705,17 +715,6 @@ def main():
 
     best_epoch = 0
     best_val_cosine = float("-inf")
-
-    clip_model, _, _ = open_clip.create_model_and_transforms(
-        args.coco_clip_model_name,
-        pretrained=args.coco_clip_pretrained,
-    )
-    clip_model = clip_model.eval().to(device)
-
-    for p in clip_model.parameters():
-        p.requires_grad = False
-
-    tokenizer = open_clip.get_tokenizer(args.coco_clip_model_name)
 
     cache = torch.load(args.vocab_cache_path, map_location="cpu")
     vocab_words = list(cache.keys())

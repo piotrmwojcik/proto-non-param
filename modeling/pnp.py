@@ -63,6 +63,7 @@ class PNP(nn.Module):
         text_proj_hidden_dim: int = 1024,
         vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         prototype_init_noise: float = 0.01,
+        clip_model = None
     ):
         super().__init__()
         self.backbone = backbone
@@ -70,6 +71,13 @@ class PNP(nn.Module):
         self.temperature = temperature
         self.clip_text_dim = clip_text_dim
         self.prototype_init_noise = prototype_init_noise
+
+        # CLIP image model used for visual gating / concept selection
+        self.clip_model = clip_model
+        if self.clip_model is not None:
+            self.clip_model.eval()
+            for p in self.clip_model.parameters():
+                p.requires_grad = False
 
         # CLIP text space -> image / ViT feature space
         self.text_projection_head = ProjectionHead(
@@ -107,53 +115,78 @@ class PNP(nn.Module):
             dict with:
                 patch_prototype_logits: [B, N, V]
                 vocab_logits: [B, V]
+                clip_vocab_logits: [B, V]
                 mixture_weights: [B, V]
                 pred_text_embedding: [B, 512]
-        """
+                clip_image_embedding: [B, 512]
+            """
+        # -----------------------------------
+        # Backbone patch features
+        # -----------------------------------
         patch_tokens, _, _ = self.backbone(x)  # [B, N, D]
         patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
 
         prototypes = self.get_prototypes()  # [V, D]
+        prototypes = F.normalize(prototypes, p=2, dim=-1)
 
-        # Patch-to-vocab prototype logits
         patch_prototype_logits = einsum(
             patch_tokens,
             prototypes,
             "B n_patches dim, V dim -> B n_patches V",
         )  # [B, N, V]
 
-        # Image-level logits over vocab pool
+        # -----------------------------------
+        # Image-level prototype logits
+        # -----------------------------------
         vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
-        # positive scaling
-        scale = F.softplus(self.vocab_scale) + 1e-6  # [V], strictly positive
-        vocab_logits = vocab_logits * scale  # broadcast to [B, V]
-        weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
 
-        # k = 7
-        # gumbel_samples = []
-        # for _ in range(k):
-        #     g = F.gumbel_softmax(
-        #         torch.log(weights + 1e-9),
-        #         tau=0.5,
-        #         hard=True,
-        #         dim=-1,
-        #     )  # [B, V]
-        #     gumbel_samples.append(g)
-        #
-        # # soft k-hot mask
-        # gumbel_mask = torch.stack(gumbel_samples).sum(dim=0) / k  # [B, V]
-        #
-        # # apply mask
-        # weights = weights * gumbel_mask
+        scale = F.softplus(self.vocab_scale) + 1e-6  # [V]
+        vocab_logits = vocab_logits * scale
 
-        outputs = {
-            "patch_prototype_logits": patch_prototype_logits,  # [B, N, V]
-            "vocab_logits": vocab_logits,                      # [B, V]
-            "mixture_weights": weights,                        # [B, V]
-            "patch_tokens": patch_tokens,                      # [B, N, D]
-            "prototypes": prototypes,                          # [V, D]
+        # -----------------------------------
+        # CLIP visual embedding -> vocab prior
+        # -----------------------------------
+        with torch.no_grad():
+            clip_image_embedding = self.clip_model.encode_image(x)  # [B, 512]
+            clip_image_embedding = F.normalize(clip_image_embedding, p=2, dim=-1)
+
+        vocab_clip_embeddings = F.normalize(self.vocab_clip_embeddings, p=2, dim=-1)  # [V, 512]
+
+        clip_vocab_logits = einsum(
+            clip_image_embedding,
+            vocab_clip_embeddings,
+            "B dim, V dim -> B V",
+        )  # [B, V]
+
+        # -----------------------------------
+        # Soft gating from CLIP
+        # -----------------------------------
+        clip_weights = F.softmax(clip_vocab_logits / self.temperature, dim=-1)  # [B, V]
+
+        # combine prototype evidence with CLIP visual evidence
+        gated_vocab_logits = vocab_logits + clip_vocab_logits
+
+        weights = F.softmax(gated_vocab_logits / self.temperature, dim=-1)  # [B, V]
+
+        # optional: multiply by clip prior and renormalize
+        weights = weights * clip_weights
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+
+        pred_text_embedding = einsum(
+            weights,
+            vocab_clip_embeddings,
+            "B V, V dim -> B dim",
+        )  # [B, 512]
+        pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
+
+        return {
+            "patch_prototype_logits": patch_prototype_logits,
+            "vocab_logits": vocab_logits,
+            "clip_vocab_logits": clip_vocab_logits,
+            "mixture_weights": weights,
+            "pred_text_embedding": pred_text_embedding,
+            "clip_image_embedding": clip_image_embedding,
         }
-        return outputs
 
     def push_forward(self, x: torch.Tensor):
         """
