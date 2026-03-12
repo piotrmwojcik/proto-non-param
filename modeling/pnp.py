@@ -97,7 +97,6 @@ class PNP(nn.Module):
 
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
-        self.vocab_scale = nn.Parameter(torch.zeros(self.vocab_size))  # unconstrained
 
         self.clip_gate_mlp = nn.Sequential(
             nn.Linear(self.clip_text_dim, 256),
@@ -203,12 +202,16 @@ class PNP(nn.Module):
         )  # [B, 512]
         pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
 
+        diag_k = 7
+        clip_gate_vals, clip_gate_idx = clip_gate.topk(k=diag_k, dim=-1)  # [B, 7]
         outputs = dict(
             patch_tokens=patch_tokens,
             patch_prototype_logits=patch_prototype_logits,
             vocab_logits=vocab_logits,
             clip_vocab_logits=clip_vocab_logits,
             clip_gate_logits=clip_gate_logits,
+            clip_gate_top_idx=clip_gate_idx,  # [B, 7]
+            clip_gate_top_vals=clip_gate_vals,  # [B, 7]
             mixture_weights=weights,
             pred_text_embedding=pred_text_embedding,
             clip_image_embedding=clip_image_embedding,

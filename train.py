@@ -308,6 +308,27 @@ def train(
             for w, s in zip(words, weights):
                 print(f"  {w:15s} {s:.7f}")
 
+        if i % 200 == 0:
+            b = 0
+
+            # words selected by CLIP-gated MLP
+            gate_idx = outputs["clip_gate_top_idx"][b]
+            gate_vals = outputs["clip_gate_top_vals"][b]
+
+            gate_words = [model.vocab_words[j] for j in gate_idx.tolist()]
+
+            print("\nModel-selected words (CLIP gate):")
+            for w, s in zip(gate_words, gate_vals.tolist()):
+                print(f"  {w:15s} {s:.7f}")
+
+            # words from final mixture
+            mix_vals, mix_idx = outputs["mixture_weights"][b].topk(10)
+            mix_words = [model.vocab_words[j] for j in mix_idx.tolist()]
+
+            print("\nFinal mixture words:")
+            for w, s in zip(mix_words, mix_vals.tolist()):
+                print(f"  {w:15s} {s:.7f}")
+
         outputs = model(images)
         loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
 
