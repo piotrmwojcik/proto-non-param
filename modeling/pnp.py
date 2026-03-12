@@ -126,6 +126,22 @@ class PNP(nn.Module):
 
         weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
 
+        gumbel_samples = []
+        for _ in range(k):
+            g = F.gumbel_softmax(
+                torch.log(weights + 1e-9),
+                tau=0.5,
+                hard=True,
+                dim=-1,
+            )  # [B, V]
+            gumbel_samples.append(g)
+
+        # soft k-hot mask
+        gumbel_mask = torch.stack(gumbel_samples).sum(dim=0) / k  # [B, V]
+
+        # apply mask
+        weights = weights * gumbel_mask
+
         outputs = {
             "patch_prototype_logits": patch_prototype_logits,  # [B, N, V]
             "vocab_logits": vocab_logits,                      # [B, V]
