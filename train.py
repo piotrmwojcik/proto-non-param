@@ -471,7 +471,7 @@ def main():
         help="Number of last transformer blocks to unfreeze in the backbone",
     )
 
-    parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_nouns_clip_cache.pt")
+    parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt")
     parser.add_argument("--clip-text-dim", type=int, default=512)
     parser.add_argument("--kl-coef", type=float, default=1.0)
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
@@ -521,9 +521,14 @@ def main():
 
     logger.info("Train on COCO CLIP dataset")
 
+    cache = torch.load(args.vocab_cache_path, map_location="cpu")
+    vocab_words = list(cache.keys())
+    vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
+
     dataset_train = CocoCLIPDataset(
         annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
         coco_root="/data/pwojcik/coco_2014",
+        vocab_to_idx=vocab_to_idx,
         model_name=args.coco_clip_model_name,
         pretrained=args.coco_clip_pretrained,
     )
@@ -531,6 +536,7 @@ def main():
     dataset_test = CocoCLIPDataset(
         annotations_json="/data/pwojcik/coco_2014/annotations/captions_val2014.json",
         coco_root="/data/pwojcik/coco_2014",
+        vocab_to_idx=vocab_to_idx,
         model_name=args.coco_clip_model_name,
         pretrained=args.coco_clip_pretrained,
     )

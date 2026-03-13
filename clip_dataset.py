@@ -61,6 +61,8 @@ class CocoCLIPDataset(Dataset):
         self,
         annotations_json: str,
         coco_root: str,
+        vocab_to_idx: dict[str, int],   # ← add this
+        vocab_cache_path: str = "vocab/mscoco_new_cache.pt",
         seed: int = 42,
         device: str = "cuda",
         model_name: str = "ViT-B-32",
