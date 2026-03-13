@@ -98,11 +98,6 @@ class PNP(nn.Module):
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
 
-        self.clip_gate_mlp = nn.init.normal_(self.clip_gate_mlp.weight, std=0.01)
-        self.clip_gate_mlp.weight.data = F.normalize(
-            self.clip_gate_mlp.weight.data, dim=-1
-        )
-
     def get_prototypes(self) -> torch.Tensor:
         """
         Compute visual prototypes on the fly from cached CLIP text embeddings.
