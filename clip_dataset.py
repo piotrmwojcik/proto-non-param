@@ -91,7 +91,7 @@ class CocoCLIPDataset(Dataset):
             if image_id not in captions_per_image:
                 captions_per_image[image_id] = []
             captions_per_image[image_id].append(caption)
-
+        print('Done gather annotations')
         samples = []
         for image_id, captions in captions_per_image.items():
             file_name = image_id_to_file.get(image_id)
