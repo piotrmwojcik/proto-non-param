@@ -126,6 +126,7 @@ class CocoCLIPDataset(Dataset):
         self.samples = samples
         self.transform = None
         self.target_transform = None
+        print('done computing frequency')
 
     def _find_image_path(self, file_name: str):
         candidates = [
