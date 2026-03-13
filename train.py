@@ -228,22 +228,17 @@ def train(
 
         images, captions, target_dist, indices   = batch
         images = images.to(device, non_blocking=True)
+        target_dist = target_dist.to(device, non_blocking=True)
 
-        for i, batch in enumerate(tqdm(dataloader)):
+        # avoid exact zeros for KL / log-based losses
+        words_sim_distribution = target_dist.clamp_min(1e-8)
+        outputs = model(images)
 
-            images, captions, target_dist, indices = batch
-            images = images.to(device, non_blocking=True)
-            target_dist = target_dist.to(device, non_blocking=True)
+        loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
 
-            # avoid exact zeros for KL / log-based losses
-            words_sim_distribution = target_dist.clamp_min(1e-8)
-            outputs = model(images)
-
-            loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
-
-            loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
-            if not isinstance(loss, torch.Tensor):
-                raise ValueError("Loss is not a tensor")
+        loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
+        if not isinstance(loss, torch.Tensor):
+            raise ValueError("Loss is not a tensor")
 
         # ---- DEBUG PRINT ----
         if i % 200 == 0:  # print occasionally
