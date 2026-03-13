@@ -61,8 +61,6 @@ class CocoCLIPDataset(Dataset):
         self,
         annotations_json: str,
         coco_root: str,
-        vocab_to_idx: dict[str, int],
-        vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         seed: int = 42,
         device: str = "cuda",
         model_name: str = "ViT-B-32",
