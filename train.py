@@ -218,42 +218,34 @@ def train(
     noun_embeddings: torch.Tensor,
     target_temperature: float = 0.01,
     *,
-    vocab_to_idx = None,
+    vocab_to_idx=None,
 ):
     model.train()
 
     running_losses = defaultdict(float)
 
     for i, batch in enumerate(tqdm(dataloader)):
-
-        images, captions, target_dist, indices   = batch
+        images, captions, target_dist, indices = batch
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
 
         # avoid exact zeros for KL / log-based losses
         words_sim_distribution = target_dist.clamp_min(1e-8)
-        outputs = model(images)
-
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
-
-        loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
-        if not isinstance(loss, torch.Tensor):
-            raise ValueError("Loss is not a tensor")
 
         # ---- DEBUG PRINT ----
-        if i % 200 == 0:  # print occasionally
-            b = 0  # first example in batch
+        if i % 200 == 0:
+            b = 0
             topk_vals, topk_idx = words_sim_distribution[b].topk(10)
 
             words = [model.vocab_words[j] for j in topk_idx.tolist()]
             weights = topk_vals.tolist()
 
             print("\nCaption:", captions[b])
-            print("Top-10 nouns:")
+            print("Top-10 words:")
             for w, s in zip(words, weights):
                 print(f"  {w:15s} {s:.7f}")
-        outputs = model(images)
 
+        outputs = model(images)
         loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
