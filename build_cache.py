@@ -5,8 +5,8 @@ import open_clip
 from pathlib import Path
 
 
-VOCAB_PATH = "vocab/laion.txt"
-CACHE_PATH = "vocab/laion_clip_cache.pt"
+VOCAB_PATH = "vocab/mscoco_new.txt"
+CACHE_PATH = "vocab/mscoco_new_cache.pt"
 
 
 @torch.no_grad()

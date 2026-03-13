@@ -69,12 +69,6 @@ class CocoCLIPDataset(Dataset):
         self.transform = None
         self.target_transform = None
 
-        cache = torch.load(vocab_cache_path, map_location="cpu")
-        self.vocab_words = list(cache.keys())
-        noun_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)
-        noun_embs = noun_embs / noun_embs.norm(dim=-1, keepdim=True)
-        self.noun_embeddings = noun_embs.to(self.device)
-
     def _find_image_path(self, file_name: str):
         candidates = [
             os.path.join(self.coco_root, "train2014", file_name),
