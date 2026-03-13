@@ -83,6 +83,7 @@ class CocoCLIPDataset(Dataset):
 
         # image_id -> list of captions
         captions_per_image = {}
+        print('Gather annotations')
         for ann in coco_data["annotations"]:
             image_id = int(ann["image_id"])
             caption = ann["caption"]
