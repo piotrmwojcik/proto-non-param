@@ -126,19 +126,6 @@ class CocoCLIPDataset(Dataset):
             samples.append((im_path, captions, prob_dist))
 
         self.samples = samples
-
-        model, preprocess, _ = open_clip.create_model_and_transforms(
-            model_name,
-            pretrained=pretrained,
-        )
-
-        self.model = model.eval().to(self.device)
-        for p in self.model.parameters():
-            p.requires_grad = False
-
-        self.preprocess = preprocess
-        self.tokenizer = open_clip.get_tokenizer(model_name)
-
         self.transform = None
         self.target_transform = None
 
