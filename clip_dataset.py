@@ -75,7 +75,7 @@ class CocoCLIPDataset(Dataset):
 
         self.transform = transforms.Compose([
             transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(224),
+            #transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=(0.485, 0.456, 0.406),
@@ -135,8 +135,8 @@ class CocoCLIPDataset(Dataset):
             samples.append((im_path, captions, prob_dist))
 
         self.samples = samples
-        self.transform = None
-        self.target_transform = None
+        self.transform = transforms
+        self.target_transform = transforms
         print('done computing frequency')
 
     def _find_image_path(self, file_name: str):
