@@ -21,37 +21,39 @@ class CocoCLIPDataset(Dataset):
         self.annotations_json = annotations_json
         self.coco_root = coco_root
         self.device = torch.device(device)
+        self.rng = random.Random(seed)
 
         with open(annotations_json, "r") as f:
             coco_data = json.load(f)
 
-        # Build image_id -> file_name mapping from the JSON
+        # image_id -> file_name
         image_id_to_file = {
             img["id"]: img["file_name"]
             for img in coco_data["images"]
         }
 
-        # Keep only the first annotation for each image_id
-        first_caption_per_image = {}
+        # image_id -> list of captions
+        captions_per_image = {}
         for ann in coco_data["annotations"]:
             image_id = int(ann["image_id"])
-            if image_id not in first_caption_per_image:
-                first_caption_per_image[image_id] = ann["caption"]
+            caption = ann["caption"]
+
+            if image_id not in captions_per_image:
+                captions_per_image[image_id] = []
+            captions_per_image[image_id].append(caption)
 
         samples = []
-        for image_id, caption in first_caption_per_image.items():
+        for image_id, captions in captions_per_image.items():
             file_name = image_id_to_file.get(image_id)
             if file_name is None:
                 continue
 
             im_path = self._find_image_path(file_name)
-            if im_path is not None:
-                samples.append((im_path, caption))
-
-        rng = random.Random(seed)
-        rng.shuffle(samples)
+            if im_path is not None and len(captions) > 0:
+                samples.append((im_path, captions))
 
         self.samples = samples
+
         model, preprocess, _ = open_clip.create_model_and_transforms(
             model_name,
             pretrained=pretrained,
@@ -68,18 +70,15 @@ class CocoCLIPDataset(Dataset):
         self.target_transform = None
 
         cache = torch.load(vocab_cache_path, map_location="cpu")
-
         self.vocab_words = list(cache.keys())
         noun_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)
         noun_embs = noun_embs / noun_embs.norm(dim=-1, keepdim=True)
         self.noun_embeddings = noun_embs.to(self.device)
 
     def _find_image_path(self, file_name: str):
-        # Try common COCO locations
         candidates = [
             os.path.join(self.coco_root, "train2014", file_name),
             os.path.join(self.coco_root, "val2014", file_name),
-            os.path.join(self.coco_root, file_name),
         ]
         for path in candidates:
             if os.path.isfile(path):
@@ -90,9 +89,11 @@ class CocoCLIPDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int):
-        im_path, caption = self.samples[index]
+        im_path, captions = self.samples[index]
 
         img = Image.open(im_path).convert("RGB")
         img_tensor = self.transform(img) if self.transform is not None else self.preprocess(img)
+
+        caption = self.rng.choice(captions)
 
         return img_tensor, caption, index
