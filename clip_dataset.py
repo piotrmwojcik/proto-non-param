@@ -1,10 +1,59 @@
 import os
 import json
 import random
+from collections import Counter
+
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import open_clip
+
+
+import nltk
+from nltk.stem import WordNetLemmatizer
+
+lemmatizer = WordNetLemmatizer()
+
+COMMON_VERBS = {
+    "be", "is", "am", "are", "was", "were", "been", "being",
+    "have", "has", "had", "having",
+    "do", "does", "did", "doing"
+}
+
+
+def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
+    """
+    Extract nouns, verbs, adjectives, and adverbs from caption using NLTK
+    and map them to vocab indices, excluding very common verbs.
+    """
+
+    tokens = nltk.word_tokenize(caption.lower())
+    pos_tags = nltk.pos_tag(tokens)
+
+    word_idxs = []
+    seen = set()
+
+    for word, pos in pos_tags:
+
+        if pos.startswith(("NN", "VB", "JJ")):
+
+            if pos.startswith("NN"):
+                lemma = lemmatizer.lemmatize(word, pos="n")
+
+            elif pos.startswith("VB"):
+                lemma = lemmatizer.lemmatize(word, pos="v")
+
+                if lemma in COMMON_VERBS:
+                    continue
+
+            else:  # adjectives (JJ)
+                lemma = lemmatizer.lemmatize(word, pos="a")
+
+            if lemma in vocab_to_idx and lemma not in seen:
+                word_idxs.append(vocab_to_idx[lemma])
+                seen.add(lemma)
+
+    return word_idxs
 
 
 class CocoCLIPDataset(Dataset):
@@ -12,6 +61,7 @@ class CocoCLIPDataset(Dataset):
         self,
         annotations_json: str,
         coco_root: str,
+        vocab_to_idx: dict[str, int],
         vocab_cache_path: str = "vocab/laion_clip_cache.pt",
         seed: int = 42,
         device: str = "cuda",
@@ -22,6 +72,8 @@ class CocoCLIPDataset(Dataset):
         self.coco_root = coco_root
         self.device = torch.device(device)
         self.rng = random.Random(seed)
+        self.vocab_to_idx = vocab_to_idx
+        self.vocab_size = len(vocab_to_idx)
 
         with open(annotations_json, "r") as f:
             coco_data = json.load(f)
@@ -49,8 +101,29 @@ class CocoCLIPDataset(Dataset):
                 continue
 
             im_path = self._find_image_path(file_name)
-            if im_path is not None and len(captions) > 0:
-                samples.append((im_path, captions))
+            if im_path is None or len(captions) == 0:
+                continue
+
+            # -----------------------------------
+            # Build probability distribution from all captions
+            # -----------------------------------
+            counts = Counter()
+            total_valid_words = 0
+
+            for caption in captions:
+                word_idxs = extract_caption_words(caption, self.vocab_to_idx)
+
+                for idx in word_idxs:
+                    counts[idx] += 1
+                total_valid_words += len(word_idxs)
+
+            prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+
+            if total_valid_words > 0:
+                for idx, cnt in counts.items():
+                    prob_dist[idx] = cnt / total_valid_words
+
+            samples.append((im_path, captions, prob_dist))
 
         self.samples = samples
 
@@ -83,11 +156,12 @@ class CocoCLIPDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int):
-        im_path, captions = self.samples[index]
+        im_path, captions, prob_dist = self.samples[index]
 
         img = Image.open(im_path).convert("RGB")
         img_tensor = self.transform(img) if self.transform is not None else self.preprocess(img)
 
+        # keep one random caption for logging/debugging
         caption = self.rng.choice(captions)
 
-        return img_tensor, caption, index
+        return img_tensor, caption, prob_dist, index

@@ -30,12 +30,6 @@ CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
-import nltk
-from nltk.stem import WordNetLemmatizer
-
-lemmatizer = WordNetLemmatizer()
-
-
 def denorm_to_uint8(
     x: torch.Tensor,
     mean=CLIP_MEAN,
@@ -63,45 +57,7 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     return out.clip(0, 255).astype(np.uint8)
 
 
-COMMON_VERBS = {
-    "be", "is", "am", "are", "was", "were", "been", "being",
-    "have", "has", "had", "having",
-    "do", "does", "did", "doing"
-}
 
-def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
-    """
-    Extract nouns, verbs, adjectives, and adverbs from caption using NLTK
-    and map them to vocab indices, excluding very common verbs.
-    """
-
-    tokens = nltk.word_tokenize(caption.lower())
-    pos_tags = nltk.pos_tag(tokens)
-
-    word_idxs = []
-    seen = set()
-
-    for word, pos in pos_tags:
-
-        if pos.startswith(("NN", "VB", "JJ")):
-
-            if pos.startswith("NN"):
-                lemma = lemmatizer.lemmatize(word, pos="n")
-
-            elif pos.startswith("VB"):
-                lemma = lemmatizer.lemmatize(word, pos="v")
-
-                if lemma in COMMON_VERBS:
-                    continue
-
-            else:  # adjectives (JJ)
-                lemma = lemmatizer.lemmatize(word, pos="a")
-
-            if lemma in vocab_to_idx and lemma not in seen:
-                word_idxs.append(vocab_to_idx[lemma])
-                seen.add(lemma)
-
-    return word_idxs
 
 
 @torch.no_grad()
@@ -270,35 +226,29 @@ def train(
 
     for i, batch in enumerate(tqdm(dataloader)):
 
-        images, captions, indices = batch
+        images, captions, target_dist, indices   = batch
         images = images.to(device, non_blocking=True)
 
-        with torch.no_grad():
-            img_feat = clip_model.encode_image(images)
-            img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+        for i, batch in enumerate(tqdm(dataloader)):
 
-            B, D = img_feat.shape
-            V = noun_embeddings.shape[0]
+            images, captions, target_dist, indices = batch
+            images = images.to(device, non_blocking=True)
+            target_dist = target_dist.to(device, non_blocking=True)
 
-            noun_sim_distribution = torch.zeros(B, V, device=device)
+            # avoid exact zeros for KL / log-based losses
+            words_sim_distribution = target_dist.clamp_min(1e-8)
+            outputs = model(images)
 
-            for b, caption in enumerate(captions):
-                noun_idxs = extract_caption_words(caption, vocab_to_idx)
+            loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
 
-                sims = img_feat[b] @ noun_embeddings.T
-                probs = F.softmax(sims / target_temperature, dim=-1)
-
-                if len(noun_idxs) == 0:
-                    noun_sim_distribution[b] = probs
-                else:
-                    noun_sim_distribution[b, noun_idxs] = probs[noun_idxs]
-
-            noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
+            loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
+            if not isinstance(loss, torch.Tensor):
+                raise ValueError("Loss is not a tensor")
 
         # ---- DEBUG PRINT ----
         if i % 200 == 0:  # print occasionally
             b = 0  # first example in batch
-            topk_vals, topk_idx = noun_sim_distribution[b].topk(10)
+            topk_vals, topk_idx = words_sim_distribution[b].topk(10)
 
             words = [model.vocab_words[j] for j in topk_idx.tolist()]
             weights = topk_vals.tolist()
@@ -308,28 +258,8 @@ def train(
             for w, s in zip(words, weights):
                 print(f"  {w:15s} {s:.7f}")
         outputs = model(images)
-        if i % 200 == 0:
-            b = 0
 
-            # words selected by CLIP-gated MLP
-            gate_idx = outputs["clip_gate_top_idx"][b]
-            gate_vals = outputs["clip_gate_top_vals"][b]
-
-            gate_words = [model.vocab_words[j] for j in gate_idx.tolist()]
-
-            print("\nModel-selected words (CLIP gate):")
-            for w, s in zip(gate_words, gate_vals.tolist()):
-                print(f"  {w:15s} {s:.7f}")
-
-            # words from final mixture
-            mix_vals, mix_idx = outputs["mixture_weights"][b].topk(10)
-            mix_words = [model.vocab_words[j] for j in mix_idx.tolist()]
-
-            print("\nFinal mixture words:")
-            for w, s in zip(mix_words, mix_vals.tolist()):
-                print(f"  {w:15s} {s:.7f}")
-
-        loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
+        loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
         if not isinstance(loss, torch.Tensor):
@@ -391,33 +321,16 @@ def test(
         B, D = img_feat.shape
         V = noun_embeddings.shape[0]
 
-        noun_sim_distribution = torch.zeros(B, V, device=device)
-
-        for b, caption in enumerate(captions):
-            noun_idxs = extract_caption_words(caption, vocab_to_idx)
-
-            if len(noun_idxs) == 0:
-                target_idxs = None
-                target_embs = noun_embeddings
-            else:
-                target_idxs = torch.as_tensor(noun_idxs, device=device, dtype=torch.long)
-                target_embs = noun_embeddings[target_idxs]
-
-            sims = img_feat[b] @ target_embs.T
-            probs = F.softmax(sims / target_temperature, dim=-1)
-
-            if target_idxs is None:
-                noun_sim_distribution[b] = probs
-            else:
-                noun_sim_distribution[b, target_idxs] = probs
-
-        noun_sim_distribution = noun_sim_distribution.clamp_min(1e-8)
+        images, captions, target_dist, indices = batch
+        images = images.to(device, non_blocking=True)
+        target_dist = target_dist.to(device, non_blocking=True)
+        words_sim_distribution = target_dist.clamp_min(1e-8)
 
         # --------------------------
         # Model forward
         # --------------------------
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, noun_sim_distribution, indices))
+        loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
 
         bs = images.size(0)
         num_samples += bs

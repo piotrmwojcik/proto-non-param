@@ -61,7 +61,7 @@ class PNP(nn.Module):
         temperature: float = 0.2,
         clip_text_dim: int = 512,
         text_proj_hidden_dim: int = 1024,
-        vocab_cache_path: str = "vocab/laion_clip_cache.pt",
+        vocab_cache_path: str = "vocab/mscoco_new_cache.pt",
         prototype_init_noise: float = 0.01,
         clip_model = None
     ):
@@ -98,10 +98,9 @@ class PNP(nn.Module):
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
 
-        self.clip_gate_mlp = nn.Sequential(
-            nn.Linear(self.clip_text_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, self.vocab_size),
+        self.clip_gate_mlp = nn.init.normal_(self.clip_gate_mlp.weight, std=0.01)
+        self.clip_gate_mlp.weight.data = F.normalize(
+            self.clip_gate_mlp.weight.data, dim=-1
         )
 
     def get_prototypes(self) -> torch.Tensor:
@@ -122,12 +121,11 @@ class PNP(nn.Module):
                 patch_prototype_logits: [B, N, V]
                 vocab_logits: [B, V]
                 clip_vocab_logits: [B, V]
-                clip_gate_logits: [B, V]
                 mixture_weights: [B, V]
                 pred_text_embedding: [B, 512]
                 clip_image_embedding: [B, 512]
                 prototypes: [V, D]
-            """
+        """
         # -----------------------------------
         # Backbone patch features
         # -----------------------------------
@@ -149,7 +147,7 @@ class PNP(nn.Module):
         vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
 
         # -----------------------------------
-        # CLIP visual embedding -> vocab prior
+        # CLIP visual embedding -> vocab diagnostics
         # -----------------------------------
         with torch.no_grad():
             clip_image_embedding = self.clip_model.encode_image(x)  # [B, 512]
@@ -163,36 +161,10 @@ class PNP(nn.Module):
             "B dim, V dim -> B V",
         )  # [B, V]
 
-        clip_top_k = 64
-
-        _, clip_top_idx = clip_vocab_logits.topk(k=clip_top_k, dim=-1)  # [B, K]
-
-        clip_mask = torch.zeros_like(clip_vocab_logits, dtype=torch.bool)  # [B, V]
-        clip_mask.scatter_(1, clip_top_idx, True)
-
         # -----------------------------------
-        # Trainable soft mask from CLIP image embedding
+        # Use prototype logits only
         # -----------------------------------
-        clip_gate_logits = self.clip_gate_mlp(clip_image_embedding)  # [B, V]
-
-        # zero out concepts rejected by CLIP top-k mask
-        clip_gate_logits = clip_gate_logits.masked_fill(~clip_mask, -1e9)
-
-        clip_gate = torch.sigmoid(clip_gate_logits)  # [B, V]
-        clip_gate = clip_gate * clip_mask.float()  # safety
-
-        # renormalize over selected concepts only
-        clip_gate = clip_gate / (clip_gate.sum(dim=-1, keepdim=True) + 1e-8)
-
-        # -----------------------------------
-        # Use only vocab logits, filtered by CLIP
-        # -----------------------------------
-        filtered_vocab_logits = vocab_logits.masked_fill(~clip_mask, -1e9)
-        weights = F.softmax(filtered_vocab_logits / self.temperature, dim=-1)  # [B, V]
-
-        # apply learned gate inside the masked set
-        weights = weights * clip_gate
-        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+        weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
 
         pred_text_embedding = einsum(
             weights,
@@ -201,16 +173,18 @@ class PNP(nn.Module):
         )  # [B, 512]
         pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
 
+        # diagnostics: top CLIP words
         diag_k = 7
-        clip_gate_vals, clip_gate_idx = clip_gate.topk(k=diag_k, dim=-1)  # [B, 7]
+        clip_top_vals, clip_top_idx = clip_vocab_logits.topk(k=diag_k, dim=-1)  # [B, 7]
+
         outputs = dict(
             patch_tokens=patch_tokens,
             patch_prototype_logits=patch_prototype_logits,
             vocab_logits=vocab_logits,
             clip_vocab_logits=clip_vocab_logits,
-            clip_gate_logits=clip_gate_logits,
-            clip_gate_top_idx=clip_gate_idx,  # [B, 7]
-            clip_gate_top_vals=clip_gate_vals,  # [B, 7]
+            clip_gate_logits=None,
+            clip_gate_top_idx=clip_top_idx,  # [B, 7]
+            clip_gate_top_vals=clip_top_vals,  # [B, 7]
             mixture_weights=weights,
             pred_text_embedding=pred_text_embedding,
             clip_image_embedding=clip_image_embedding,
@@ -285,15 +259,15 @@ class PNPCriterion(nn.Module):
         # -----------------------------------
         # binary supervision from target_dist
         # -----------------------------------
-        target_binary = (target_dist > 1e-6).float()
+        #target_binary = (target_dist > 1e-6).float()
 
-        l_bin = F.binary_cross_entropy_with_logits(
-            gate_logits,
-            target_binary,
-            reduction="mean",
-        )
+        #l_bin = F.binary_cross_entropy_with_logits(
+        #    gate_logits,
+        #    target_binary,
+        #    reduction="mean",
+        #)
 
-        loss_dict["l_bin"] = self.bin_coef * l_bin
+        #loss_dict["l_bin"] = self.bin_coef * l_bin
 
         # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:
