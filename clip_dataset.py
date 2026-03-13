@@ -6,6 +6,7 @@ from collections import Counter
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+from torchvision import transforms
 import open_clip
 
 
