@@ -57,9 +57,6 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     return out.clip(0, 255).astype(np.uint8)
 
 
-
-
-
 @torch.no_grad()
 def wandb_log_top_proto_heatmaps(
     *,
@@ -305,8 +302,8 @@ def test(
         img_feat = clip_model.encode_image(images)
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
 
-        B, D = img_feat.shape
-        V = noun_embeddings.shape[0]
+        #B, D = img_feat.shape
+        #V = noun_embeddings.shape[0]
 
         images, captions, target_dist, indices = batch
         images = images.to(device, non_blocking=True)
@@ -512,6 +509,8 @@ def main():
     vocab_words = list(cache.keys())
     vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
 
+    print('Building datasets')
+
     dataset_train = CocoCLIPDataset(
         annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
         coco_root="/data/pwojcik/coco_2014",
@@ -527,6 +526,8 @@ def main():
         model_name=args.coco_clip_model_name,
         pretrained=args.coco_clip_pretrained,
     )
+
+    print('Done with datasets')
 
     dataloader_train = DataLoader(
         dataset=dataset_train,
