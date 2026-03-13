@@ -1,14 +1,13 @@
 import os
 import json
 import random
+import hashlib
 from collections import Counter
 
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
-import open_clip
-
 
 import nltk
 from nltk.stem import WordNetLemmatizer
@@ -24,10 +23,9 @@ COMMON_VERBS = {
 
 def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
     """
-    Extract nouns, verbs, adjectives, and adverbs from caption using NLTK
+    Extract nouns, verbs, and adjectives from caption using NLTK
     and map them to vocab indices, excluding very common verbs.
     """
-
     tokens = nltk.word_tokenize(caption.lower())
     pos_tags = nltk.pos_tag(tokens)
 
@@ -35,19 +33,14 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
     seen = set()
 
     for word, pos in pos_tags:
-
         if pos.startswith(("NN", "VB", "JJ")):
-
             if pos.startswith("NN"):
                 lemma = lemmatizer.lemmatize(word, pos="n")
-
             elif pos.startswith("VB"):
                 lemma = lemmatizer.lemmatize(word, pos="v")
-
                 if lemma in COMMON_VERBS:
                     continue
-
-            else:  # adjectives (JJ)
+            else:  # adjectives
                 lemma = lemmatizer.lemmatize(word, pos="a")
 
             if lemma in vocab_to_idx and lemma not in seen:
@@ -57,14 +50,29 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
     return word_idxs
 
 
+def _make_cache_path(annotation_file: str, vocab_to_idx: dict, cache_dir: str = None):
+    if cache_dir is None:
+        cache_dir = os.path.join(os.path.dirname(annotation_file), ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    vocab_hash = hashlib.md5(
+        json.dumps(vocab_to_idx, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+
+    ann_base = os.path.splitext(os.path.basename(annotation_file))[0]
+    return os.path.join(cache_dir, f"{ann_base}_samples_{vocab_hash}.pt")
+
+
 class CocoCLIPDataset(Dataset):
     def __init__(
         self,
         annotations_json: str,
         coco_root: str,
-        vocab_to_idx: dict[str, int],   # ← add this
+        vocab_to_idx: dict[str, int],
         seed: int = 42,
         device: str = "cuda",
+        cache_dir: str = None,
+        use_cache: bool = True,
     ):
         self.annotations_json = annotations_json
         self.coco_root = coco_root
@@ -75,7 +83,6 @@ class CocoCLIPDataset(Dataset):
 
         self.transform = transforms.Compose([
             transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-            #transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=(0.485, 0.456, 0.406),
@@ -83,18 +90,27 @@ class CocoCLIPDataset(Dataset):
             ),
         ])
 
+        cache_path = _make_cache_path(annotations_json, vocab_to_idx, cache_dir)
+
+        # Try loading from cache first
+        if use_cache and os.path.exists(cache_path):
+            print(f"Loading dataset cache from: {cache_path}")
+            cached = torch.load(cache_path, map_location="cpu")
+            self.samples = cached["samples"]
+            print(f"Loaded {len(self.samples)} cached samples")
+            return
+
+        # Otherwise build dataset
         with open(annotations_json, "r") as f:
             coco_data = json.load(f)
 
-        # image_id -> file_name
         image_id_to_file = {
             img["id"]: img["file_name"]
             for img in coco_data["images"]
         }
 
-        # image_id -> list of captions
         captions_per_image = {}
-        print('Gather annotations')
+        print("Gather annotations")
         for ann in coco_data["annotations"]:
             image_id = int(ann["image_id"])
             caption = ann["caption"]
@@ -102,8 +118,10 @@ class CocoCLIPDataset(Dataset):
             if image_id not in captions_per_image:
                 captions_per_image[image_id] = []
             captions_per_image[image_id].append(caption)
-        print('Done gather annotations')
+        print("Done gather annotations")
+
         samples = []
+        print("Building samples")
         for image_id, captions in captions_per_image.items():
             file_name = image_id_to_file.get(image_id)
             if file_name is None:
@@ -113,15 +131,11 @@ class CocoCLIPDataset(Dataset):
             if im_path is None or len(captions) == 0:
                 continue
 
-            # -----------------------------------
-            # Build probability distribution from all captions
-            # -----------------------------------
             counts = Counter()
             total_valid_words = 0
 
             for caption in captions:
                 word_idxs = extract_caption_words(caption, self.vocab_to_idx)
-
                 for idx in word_idxs:
                     counts[idx] += 1
                 total_valid_words += len(word_idxs)
@@ -135,9 +149,12 @@ class CocoCLIPDataset(Dataset):
             samples.append((im_path, captions, prob_dist))
 
         self.samples = samples
-        self.transform = transforms
-        self.target_transform = transforms
-        print('done computing frequency')
+        print(f"Done computing frequency. Total samples: {len(self.samples)}")
+
+        # Save cache
+        if use_cache:
+            torch.save({"samples": self.samples}, cache_path)
+            print(f"Saved dataset cache to: {cache_path}")
 
     def _find_image_path(self, file_name: str):
         candidates = [
