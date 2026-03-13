@@ -82,7 +82,7 @@ class CocoCLIPDataset(Dataset):
         self.vocab_size = len(vocab_to_idx)
 
         self.transform = transforms.Compose([
-            transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=(0.485, 0.456, 0.406),
