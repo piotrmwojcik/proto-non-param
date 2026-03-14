@@ -237,7 +237,13 @@ def train(
             words = [model.vocab_words[j] for j in topk_idx.tolist()]
             weights = topk_vals.tolist()
 
-            print("\nCaption:", captions[b])
+            print("\nAll captions:")
+            for c in all_captions[b]:
+                print(" ", c)
+
+            print("Top-10 words:")
+            for w, s in zip(words, weights):
+                print(f"  {w:15s} {s:.7f}")
             print("Top-10 words:")
             for w, s in zip(words, weights):
                 print(f"  {w:15s} {s:.7f}")

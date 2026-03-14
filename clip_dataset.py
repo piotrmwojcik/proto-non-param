@@ -191,6 +191,4 @@ class CocoCLIPDataset(Dataset):
         else:
             img_tensor = self.eval_transform(img)
 
-        caption = self.rng.choice(captions)
-
-        return img_tensor, caption, prob_dist, index
+        return img_tensor, captions, prob_dist, index
