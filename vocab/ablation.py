@@ -322,7 +322,7 @@ def run_ablation_experiment(
 
     all_words = set()
     for ann in coco_data["annotations"]:
-        tokens = word_tokenize(ann["caption"].lower())
+        tokens = nltk.word_tokenize(ann["caption"].lower())
         for t in tokens:
             if t.isalpha():
                 all_words.add(t)
