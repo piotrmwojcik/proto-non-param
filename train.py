@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch.nn.functional as F
 
-from clip_dataset import CocoCLIPDataset
+from clip_dataset import CocoCLIPDataset, coco_clip_collate_fn
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -533,6 +533,7 @@ def main():
         dataset=dataset_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        collate_fn=coco_clip_collate_fn,
         shuffle=True,
         pin_memory=True,
     )
@@ -541,6 +542,7 @@ def main():
         dataset=dataset_test,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        collate_fn=coco_clip_collate_fn,
         shuffle=False,
         pin_memory=True,
     )

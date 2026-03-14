@@ -63,6 +63,19 @@ def _make_cache_path(annotation_file: str, vocab_to_idx: dict, cache_dir: str = 
     return os.path.join(cache_dir, f"{ann_base}_samples_{vocab_hash}.pt")
 
 
+def coco_clip_collate_fn(batch):
+    images, captions, prob_dists, indices = zip(*batch)
+
+    images = torch.stack(images, dim=0)
+    prob_dists = torch.stack(prob_dists, dim=0)
+    indices = torch.tensor(indices, dtype=torch.long)
+
+    # keep variable-length caption lists as-is
+    captions = list(captions)
+
+    return images, captions, prob_dists, indices
+
+
 class CocoCLIPDataset(Dataset):
     def __init__(
         self,
