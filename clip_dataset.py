@@ -81,6 +81,7 @@ class CocoCLIPDataset(Dataset):
         self.rng = random.Random(seed)
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
+        self.train = train
 
         self.train_transform = transforms.Compose([
             transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
