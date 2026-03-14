@@ -73,6 +73,7 @@ class CocoCLIPDataset(Dataset):
         device: str = "cuda",
         cache_dir: str = None,
         use_cache: bool = True,
+        train: bool = True
     ):
         self.annotations_json = annotations_json
         self.coco_root = coco_root
@@ -81,7 +82,18 @@ class CocoCLIPDataset(Dataset):
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
 
-        self.transform = transforms.Compose([
+        self.train_transform = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
+        ])
+
+        # validation / test transform
+        self.eval_transform = transforms.Compose([
             transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize(
@@ -173,7 +185,10 @@ class CocoCLIPDataset(Dataset):
         im_path, captions, prob_dist = self.samples[index]
 
         img = Image.open(im_path).convert("RGB")
-        img_tensor = self.transform(img)
+        if self.train:
+            img_tensor = self.train_transform(img)
+        else:
+            img_tensor = self.eval_transform(img)
 
         caption = self.rng.choice(captions)
 
