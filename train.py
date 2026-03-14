@@ -511,12 +511,14 @@ def main():
         annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
         coco_root="/data/pwojcik/coco_2014",
         vocab_to_idx=vocab_to_idx,
+        train=True,
     )
 
     dataset_test = CocoCLIPDataset(
         annotations_json="/data/pwojcik/coco_2014/annotations/captions_val2014.json",
         coco_root="/data/pwojcik/coco_2014",
         vocab_to_idx=vocab_to_idx,
+        train=False,
     )
 
     print('Done with datasets')
