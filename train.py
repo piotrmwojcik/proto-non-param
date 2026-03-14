@@ -386,7 +386,7 @@ def build_backbone(args):
             backbone = DINOv2BackboneExpanded(
                 name=args.backbone,
                 n_splits=args.num_splits,
-                mode="block_expansion",
+                mode="append",
                 freeze_norm_layer=True,
             )
         else:
@@ -411,12 +411,8 @@ def build_backbone(args):
     # ---------------------------------------------------
     # Freeze everything first
     # ---------------------------------------------------
-    for p in backbone.parameters():
-        p.requires_grad = False
-
-    # ---------------------------------------------------
-    # Unfreeze last N transformer blocks
-    # ---------------------------------------------------
+    #for p in backbone.parameters():
+    #    p.requires_grad = False
 
     return backbone, dim
 

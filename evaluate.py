@@ -94,7 +94,7 @@ def main():
             backbone = DINOv2BackboneExpanded(
                 name=hparams.backbone,
                 n_splits=hparams.num_splits,
-                mode="block_expansion",
+                mode="append",
                 freeze_norm_layer=True
             )
         else:
