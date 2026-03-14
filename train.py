@@ -291,7 +291,7 @@ def test(
     num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, indices = batch
+        images, captions, indices, _ = batch
         images = images.to(device, non_blocking=True)
 
         global_step = epoch * train_steps_per_epoch + i
