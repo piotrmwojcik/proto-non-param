@@ -243,7 +243,7 @@ class PNPCriterion(nn.Module):
         b = 0
 
         target = target_dist[b]
-        pred = pred_logs[b].exp()  # convert log-prob → prob
+        pred = pred_log_probs[b].exp()  # convert log-prob → prob
 
         # top tokens in target distribution
         topk_vals, topk_idx = target.topk(10)
