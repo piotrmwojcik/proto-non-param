@@ -250,9 +250,9 @@ class PNPCriterion(nn.Module):
 
         print("\n========== SAMPLE DEBUG ==========")
 
-        print("\nAll captions:")
-        for c in captions[b]:
-            print(" ", c)
+        #print("\nAll captions:")
+        #for c in captions[b]:
+        #    print(" ", c)
 
         print("\nTop target tokens vs prediction:")
         print(f"{'token':15s} {'target':>10s} {'pred':>10s} {'diff':>10s}")
