@@ -244,9 +244,6 @@ def train(
             print("Top-10 words:")
             for w, s in zip(words, weights):
                 print(f"  {w:15s} {s:.7f}")
-            print("Top-10 words:")
-            for w, s in zip(words, weights):
-                print(f"  {w:15s} {s:.7f}")
 
         outputs = model(images)
         loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
