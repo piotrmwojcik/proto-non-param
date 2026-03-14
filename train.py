@@ -246,7 +246,7 @@ def train(
                 print(f"  {w:15s} {s:.7f}")
 
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
+        loss_dict = criterion(outputs, (images, words_sim_distribution, indices, captions), model)
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
         if not isinstance(loss, torch.Tensor):
@@ -317,7 +317,7 @@ def test(
         # Model forward
         # --------------------------
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices))
+        loss_dict = criterion(outputs, (images, words_sim_distribution, indices, captions), model)
 
         bs = images.size(0)
         num_samples += bs

@@ -228,11 +228,12 @@ class PNPCriterion(nn.Module):
         self.cover_coef = cover_coef
         self.temperature = temperature
 
-    def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...]):
+    def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
         mixture_weights = outputs["mixture_weights"]        # [B, V]
         patch_logits = outputs["patch_prototype_logits"]
-        target_dist = batch[1]                              # [B, V]
+        target_dist = batch[1]
+        captions = batch[-1]
 
         loss_dict = {}
 
@@ -250,9 +251,9 @@ class PNPCriterion(nn.Module):
 
         print("\n========== SAMPLE DEBUG ==========")
 
-        #print("\nAll captions:")
-        #for c in captions[b]:
-        #    print(" ", c)
+        print("\nAll captions:")
+        for c in captions[b]:
+            print(" ", c)
 
         print("\nTop target tokens vs prediction:")
         print(f"{'token':15s} {'target':>10s} {'pred':>10s} {'diff':>10s}")
