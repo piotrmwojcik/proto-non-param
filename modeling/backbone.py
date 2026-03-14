@@ -176,29 +176,38 @@ class DINOv2Backbone(nn.Module):
 
 
 class DINOv2BackboneExpanded(nn.Module):
-    def __init__(self, name: str ="dinov2_vitb14", n_splits: int = 0, mode: str = "block_expansion",
-                 freeze_norm_layer: bool = True):
+    def __init__(
+            self,
+            name: str = "dinov2_vitb14",
+            n_splits: int = 0,
+            mode: str = "block_expansion",
+            freeze_norm_layer: bool = True,
+    ):
         super().__init__()
         self.dim = DIM_DICT[name]
         assert mode in ["block_expansion", "append"]
+
         expand_state_dict = block_expansion_dino if mode == "block_expansion" else append_blocks
+
         if n_splits > 0:
             arch = MODEL_DICT[name]
             state_dict = torch.hub.load_state_dict_from_url(URL_DICT[name], map_location="cpu")
             expanded_state_dict, n_blocks, learnable_param_names, zero_param_names = expand_state_dict(
                 state_dict=state_dict,
                 n_splits=n_splits,
-                freeze_layer_norm=freeze_norm_layer
+                freeze_layer_norm=freeze_norm_layer,
             )
             self.dino = arch(depth=n_blocks)
             self.dino.load_state_dict(expanded_state_dict)
-            self.learnable_param_names = learnable_param_names
+            self.learnable_param_names = set(learnable_param_names)
         else:
-            self.dino = torch.hub.load('facebookresearch/dinov2', name[:-1])  # type: nn.Module
-            self.learnable_param_names = []
+            self.dino = torch.hub.load("facebookresearch/dinov2", name[:-1])  # type: nn.Module
+            self.learnable_param_names = set()
+
+        self.set_requires_grad()
 
     def learnable_parameters(self):
-        return list(param for name, param in self.dino.named_parameters() if name in self.learnable_param_names)
+        return [p for n, p in self.dino.named_parameters() if n in self.learnable_param_names]
 
     def set_requires_grad(self):
         for name, param in self.dino.named_parameters():
