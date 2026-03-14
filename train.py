@@ -238,7 +238,7 @@ def train(
             weights = topk_vals.tolist()
 
             print("\nAll captions:")
-            for c in all_captions[b]:
+            for c in captions[b]:
                 print(" ", c)
 
             print("Top-10 words:")
