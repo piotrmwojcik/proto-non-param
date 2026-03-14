@@ -241,45 +241,45 @@ class PNPCriterion(nn.Module):
         target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
         pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
 
-        b = 0
-
-        target = target_dist[b]
-        pred = pred_log_probs[b].exp()  # convert log-prob → prob
-
-        # top tokens in target distribution
-        topk_vals, topk_idx = target.topk(10)
-
-        print("\n========== SAMPLE DEBUG ==========")
-
-        print("\nAll captions:")
-        for c in captions[b]:
-            print(" ", c)
-
-        print("\nTop target tokens vs prediction:")
-        print(f"{'token':15s} {'target':>10s} {'pred':>10s} {'diff':>10s}")
-
-        for idx in topk_idx.tolist():
-            token = model.vocab_words[idx]
-            t = target[idx].item()
-            p = pred[idx].item()
-            diff = p - t
-
-            print(f"{token:15s} {t:10.6f} {p:10.6f} {diff:10.6f}")
-
-        # also show model's top predictions
-        pred_vals, pred_idx = pred.topk(10)
-
-        print("\nTop predicted tokens:")
-        print(f"{'token':15s} {'pred':>10s} {'target':>10s}")
-
-        for idx in pred_idx.tolist():
-            token = model.vocab_words[idx]
-            p = pred[idx].item()
-            t = target[idx].item()
-
-            print(f"{token:15s} {p:10.6f} {t:10.6f}")
-
-        print("==================================\n")
+        # b = 0
+        #
+        # target = target_dist[b]
+        # pred = pred_log_probs[b].exp()  # convert log-prob → prob
+        #
+        # # top tokens in target distribution
+        # topk_vals, topk_idx = target.topk(10)
+        #
+        # print("\n========== SAMPLE DEBUG ==========")
+        #
+        # print("\nAll captions:")
+        # for c in captions[b]:
+        #     print(" ", c)
+        #
+        # print("\nTop target tokens vs prediction:")
+        # print(f"{'token':15s} {'target':>10s} {'pred':>10s} {'diff':>10s}")
+        #
+        # for idx in topk_idx.tolist():
+        #     token = model.vocab_words[idx]
+        #     t = target[idx].item()
+        #     p = pred[idx].item()
+        #     diff = p - t
+        #
+        #     print(f"{token:15s} {t:10.6f} {p:10.6f} {diff:10.6f}")
+        #
+        # # also show model's top predictions
+        # pred_vals, pred_idx = pred.topk(10)
+        #
+        # print("\nTop predicted tokens:")
+        # print(f"{'token':15s} {'pred':>10s} {'target':>10s}")
+        #
+        # for idx in pred_idx.tolist():
+        #     token = model.vocab_words[idx]
+        #     p = pred[idx].item()
+        #     t = target[idx].item()
+        #
+        #     print(f"{token:15s} {p:10.6f} {t:10.6f}")
+        #
+        # print("==================================\n")
 
         l_kl = F.kl_div(
             pred_log_probs,
