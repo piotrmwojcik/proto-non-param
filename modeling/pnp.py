@@ -251,7 +251,7 @@ class PNPCriterion(nn.Module):
         print("\n========== SAMPLE DEBUG ==========")
 
         print("\nAll captions:")
-        for c in aptions[b]:
+        for c in captions[b]:
             print(" ", c)
 
         print("\nTop target tokens vs prediction:")
