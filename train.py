@@ -326,8 +326,8 @@ def test(
         # --------------------------
         log_batches = set(
             random.sample(
-                range(len(loader)),
-                k=max(1, len(loader) // log_every)
+                range(len(dataloader)),
+                k=max(1, len(dataloader) // log_every)
             )
         )
 
