@@ -165,8 +165,8 @@ class PNP(nn.Module):
         # -----------------------------------
         # Image-level prototype logits
         # -----------------------------------
-        #vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
-        vocab_logits = self.prototype_classifier(prototype_scores)  # [B, V]
+        vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
+        vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
 
         # -----------------------------------
         # CLIP visual embedding -> vocab diagnostics
