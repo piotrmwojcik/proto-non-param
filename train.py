@@ -6,6 +6,7 @@ from logging import Logger
 from pathlib import Path
 import numpy as np
 import math
+import random
 import open_clip
 from collections import defaultdict
 import argparse
