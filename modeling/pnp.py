@@ -108,12 +108,6 @@ class PNP(nn.Module):
             normalize_output=True,
         )
 
-        self.prototype_classifier = NonNegLinear(
-            in_features=self.vocab_size,
-            out_features=self.vocab_size,
-            bias=True
-        )
-
         # Load frozen vocab CLIP embeddings: dict[str, tensor(512)]
         cache = torch.load(vocab_cache_path, map_location="cpu")
         self.vocab_words = list(cache.keys())
@@ -123,6 +117,12 @@ class PNP(nn.Module):
 
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
+
+        self.prototype_classifier = NonNegLinear(
+            in_features=self.vocab_size,
+            out_features=self.vocab_size,
+            bias=True
+        )
 
     def get_prototypes(self) -> torch.Tensor:
         """
