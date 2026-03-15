@@ -281,11 +281,9 @@ def test(
     logger: Logger,
     device: torch.device,
     clip_model: nn.Module,
-    noun_embeddings: torch.Tensor,
-    target_temperature: float = 0.07,
     *,
     train_steps_per_epoch: int,
-    log_every: int = 5,
+    log_every: int = 1,
     vocab_to_idx=None,
 ):
     model.eval()
@@ -673,8 +671,6 @@ def main():
             logger=logger,
             device=device,
             clip_model=clip_model,
-            noun_embeddings=noun_embeddings,
-            target_temperature=0.01,
             train_steps_per_epoch=len(dataloader_train),
             vocab_to_idx=vocab_to_idx,  # ADD THIS
         )
