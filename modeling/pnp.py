@@ -118,11 +118,11 @@ class PNP(nn.Module):
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
 
-        self.prototype_classifier = NonNegLinear(
-            in_features=self.vocab_size,
-            out_features=self.vocab_size,
-            bias=True
-        )
+        #self.prototype_classifier = NonNegLinear(
+        #    in_features=self.vocab_size,
+        #    out_features=self.vocab_size,
+        #    bias=True
+        #)
 
     def get_prototypes(self) -> torch.Tensor:
         """
@@ -165,8 +165,10 @@ class PNP(nn.Module):
         # -----------------------------------
         # Image-level prototype logits
         # -----------------------------------
-        vocab_logits = patch_prototype_logits.max(dim=1).values  # [B, V]
-        vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
+        k = 5
+        topk_vals = patch_prototype_logits.topk(k, dim=1).values
+        vocab_logits = topk_vals.mean(dim=1)
+        #vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
 
         # -----------------------------------
         # CLIP visual embedding -> vocab diagnostics
