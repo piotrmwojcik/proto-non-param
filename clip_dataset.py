@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import v2
 
 import nltk
 from nltk.stem import WordNetLemmatizer
@@ -96,11 +97,15 @@ class CocoCLIPDataset(Dataset):
         self.vocab_size = len(vocab_to_idx)
         self.train = train
 
-        self.train_transform = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ToTensor(),
-            transforms.Normalize(
+        self.train_transform = v2.Compose([
+            v2.RandomResizedCrop(
+                size=224,
+                scale=(0.8, 1.0),
+                interpolation=v2.InterpolationMode.BICUBIC
+            ),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.ToTensor(),
+            v2.Normalize(
                 mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),
             ),

@@ -118,6 +118,10 @@ class PNP(nn.Module):
         self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
         self.vocab_size = vocab_clip_embs.shape[0]
 
+        self.prototype_residual = nn.Parameter(
+            torch.randn(self.vocab_size, self.clip_text_dim) * self.prototype_init_noise
+        )
+
         #self.prototype_classifier = NonNegLinear(
         #    in_features=self.vocab_size,
         #    out_features=self.vocab_size,
@@ -126,9 +130,14 @@ class PNP(nn.Module):
 
     def get_prototypes(self) -> torch.Tensor:
         """
-        Compute visual prototypes on the fly from cached CLIP text embeddings.
+        Compute visual prototypes from frozen CLIP text embeddings plus
+        a trainable residual, then project to visual space.
         """
-        proto = self.text_projection_head(self.vocab_clip_embeddings)  # [V, D]
+        clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
+        clip_proto = F.normalize(clip_proto, dim=-1)
+
+        proto = self.text_projection_head(clip_proto)  # [V, D]
+        proto = F.normalize(proto, dim=-1)
         return proto
 
     def forward(self, x: torch.Tensor):

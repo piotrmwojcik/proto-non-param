@@ -523,6 +523,8 @@ def main():
     )
 
     print('Done with datasets')
+    print('Train: ', len(dataset_train))
+    print('Test: ', len(dataset_test))
 
     dataloader_train = DataLoader(
         dataset=dataset_train,
