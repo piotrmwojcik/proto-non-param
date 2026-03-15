@@ -44,6 +44,7 @@ class ProjectionHead(nn.Module):
         x = x.reshape(*orig_shape[:-1], -1)
         return x
 
+
 class NonNegLinear(nn.Module):
     """Applies a linear transformation to the incoming data with non-negative weights`
     """
@@ -60,7 +61,7 @@ class NonNegLinear(nn.Module):
         else:
             self.register_parameter('bias', None)
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input):
         return F.linear(input,torch.relu(self.weight), self.bias)
 
 
