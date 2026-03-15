@@ -293,15 +293,12 @@ def test(
 
     for i, batch in enumerate(tqdm(dataloader)):
         images, captions, indices, _ = batch
-        images = images.to(device, non_blocking=True)
 
         global_step = epoch * train_steps_per_epoch + i
 
         # --------------------------
         # Caption → noun distribution
         # --------------------------
-        img_feat = clip_model.encode_image(images)
-        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
 
         #B, D = img_feat.shape
         #V = noun_embeddings.shape[0]
@@ -326,12 +323,23 @@ def test(
         # --------------------------
         # Logging
         # --------------------------
-        if i % log_every == 0:
+        log_batches = set(
+            random.sample(
+                range(len(loader)),
+                k=max(1, len(loader) // log_every)
+            )
+        )
+
+        if i in log_batches:
+
+            # choose random image in the batch
+            b = random.randrange(images.shape[0])
 
             log_dict = {
                 "epoch": epoch,
                 "global_step": global_step,
                 "eval/batch_idx": i,
+                "eval/sample_idx": b,
             }
 
             if "mixture_weights" in outputs:
@@ -339,10 +347,10 @@ def test(
 
                 words = [
                     model.vocab_words[j]
-                    for j in topk_idx[0].tolist()
+                    for j in topk_idx[b].tolist()
                 ]
 
-                log_dict["eval/top_words_sample0"] = ", ".join(words)
+                log_dict["eval/top_words"] = ", ".join(words)
 
             for k, v in loss_dict.items():
                 log_dict[f"eval/{k}"] = v.item()
@@ -358,6 +366,7 @@ def test(
                 outputs=outputs,
                 step=global_step,
                 captions=captions,
+                sample_idx=b,  # optional if your function supports it
                 log_tsne=False,
             )
         # --------------------------
