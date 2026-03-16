@@ -11,6 +11,7 @@ import open_clip
 from collections import defaultdict
 import argparse
 from sklearn.manifold import TSNE
+from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 
 import wandb
@@ -58,6 +59,32 @@ def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
     return out.clip(0, 255).astype(np.uint8)
 
 
+def find_high_activation_crop(activation_map, percentile=95):
+    threshold = np.percentile(activation_map, percentile)
+    mask = activation_map >= threshold
+
+    ys, xs = np.where(mask)
+    if len(ys) == 0 or len(xs) == 0:
+        h, w = activation_map.shape
+        return 0, h, 0, w
+
+    lower_y, upper_y = ys.min(), ys.max() + 1
+    lower_x, upper_x = xs.min(), xs.max() + 1
+    return lower_y, upper_y, lower_x, upper_x
+
+
+def draw_rect_on_image(img_uint8, bbox, color=(255, 0, 0), width=3):
+    """
+    img_uint8: HxWx3 uint8 numpy array
+    bbox: (y0, y1, x0, x1)
+    """
+    y0, y1, x0, x1 = bbox
+    img_pil = Image.fromarray(img_uint8)
+    draw = ImageDraw.Draw(img_pil)
+    draw.rectangle([x0, y0, x1 - 1, y1 - 1], outline=color, width=width)
+    return np.array(img_pil)
+
+
 @torch.no_grad()
 def wandb_log_top_proto_heatmaps(
     *,
@@ -66,7 +93,7 @@ def wandb_log_top_proto_heatmaps(
     outputs: dict,
     step: int,
     captions=None,
-    max_items: int = 48,   # can now be larger
+    max_items: int = 48,
     top_k: int = 5,
     mean=CLIP_MEAN,
     std=CLIP_STD,
@@ -74,13 +101,13 @@ def wandb_log_top_proto_heatmaps(
     tsne_key: str = "test/proto_tsne",
     tsne_max_points: int = 300,
     log_tsne: bool = False,
+    crop_percentile: float = 95,
 ):
     """
     Logs one grid image per sample:
       - raw image
       - top-k prototype heatmaps with prototype words / scores
-
-    This is much more W&B-friendly than logging each panel separately.
+      - rectangle around high-activation region on each heatmap
     """
     patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
     mix_weights = outputs["mixture_weights"]           # [B, V]
@@ -99,9 +126,7 @@ def wandb_log_top_proto_heatmaps(
         raw_caption = str(captions[b]) if captions is not None else ""
 
         words = [model.vocab_words[j] for j in top_idx[b].tolist()]
-        vals = [float(v.item()) for v in top_vals[b]]
 
-        # collect images for this sample: raw + top-k overlays
         panel_imgs = [img_uint8]
         panel_titles = ["raw"]
 
@@ -111,15 +136,21 @@ def wandb_log_top_proto_heatmaps(
                 hm, size=(Hi, Wi), mode="bilinear", align_corners=False
             )[0, 0]
 
+            hm_np = hm_up.detach().cpu().numpy()
+
+            # find bounding box on the upsampled heatmap
+            bbox = find_high_activation_crop(hm_np, percentile=crop_percentile)
+
+            # draw rectangle on overlay
             overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
+            overlay_box = draw_rect_on_image(overlay, bbox, color=(255, 0, 0), width=3)
 
             word = model.vocab_words[proto_idx]
             score = float(top_vals[b, rank].item())
 
-            panel_imgs.append(overlay)
+            panel_imgs.append(overlay_box)
             panel_titles.append(f"top{rank+1}: {word}\n{score:.3f}")
 
-        # create one grid figure for the sample
         n_panels = len(panel_imgs)
         ncols = min(3, n_panels)
         nrows = int(math.ceil(n_panels / ncols))
@@ -140,7 +171,6 @@ def wandb_log_top_proto_heatmaps(
             ax.set_title(title, fontsize=10)
             ax.axis("off")
 
-        # hide unused axes
         for ax in axes[len(panel_imgs):]:
             ax.axis("off")
 
@@ -160,64 +190,6 @@ def wandb_log_top_proto_heatmaps(
         "global_step": step,
         log_key: sample_grids,
     }
-
-    if log_tsne:
-        frozen = F.normalize(model.vocab_clip_embeddings, dim=-1).detach().cpu()
-        learned = F.normalize(model.get_prototypes(), dim=-1).detach().cpu()
-
-        d_frozen = frozen.shape[1]
-        d_learned = learned.shape[1]
-
-        if d_frozen != d_learned:
-            common_dim = min(d_frozen, d_learned)
-            frozen_for_tsne = frozen[:, :common_dim]
-            learned_for_tsne = learned[:, :common_dim]
-        else:
-            frozen_for_tsne = frozen
-            learned_for_tsne = learned
-
-        n_total = frozen_for_tsne.shape[0]
-        n_keep = min(tsne_max_points, n_total)
-
-        perm = torch.randperm(n_total)[:n_keep]
-        frozen_sel = frozen_for_tsne[perm].numpy()
-        learned_sel = learned_for_tsne[perm].numpy()
-        words_sel = [model.vocab_words[i] for i in perm.tolist()]
-
-        X = np.concatenate([frozen_sel, learned_sel], axis=0)
-
-        tsne = TSNE(
-            n_components=2,
-            perplexity=min(30, max(5, n_keep // 10)),
-            init="pca",
-            learning_rate="auto",
-            random_state=42,
-        )
-        Z = tsne.fit_transform(X)
-
-        Z_frozen = Z[:n_keep]
-        Z_learned = Z[n_keep:]
-
-        fig = plt.figure(figsize=(8, 8), dpi=150)
-        plt.scatter(Z_frozen[:, 0], Z_frozen[:, 1], s=18, alpha=0.7, label="frozen_vocab")
-        plt.scatter(Z_learned[:, 0], Z_learned[:, 1], s=18, alpha=0.7, label="learned_proto")
-
-        if B_log > 0:
-            active_idx = top_idx[0].tolist()
-            active_words = [model.vocab_words[j] for j in active_idx]
-            active_set = set(active_words)
-
-            for i, w in enumerate(words_sel):
-                if w in active_set:
-                    plt.text(Z_frozen[i, 0], Z_frozen[i, 1], f"F:{w}", fontsize=7, alpha=0.8)
-                    plt.text(Z_learned[i, 0], Z_learned[i, 1], f"L:{w}", fontsize=7, alpha=0.8)
-
-        plt.legend()
-        plt.title("t-SNE: frozen vocab embeddings vs learned prototypes")
-        plt.tight_layout()
-
-        log_dict[tsne_key] = wandb.Image(fig, caption="frozen vs learned prototype space")
-        plt.close(fig)
 
     wandb.log(log_dict)
 
@@ -351,13 +323,6 @@ def test(
         print('!!! ', log_batches)
         # choose random image in the batch
         b = random.randrange(images.shape[0])
-
-        log_dict = {
-            "epoch": epoch,
-            "global_step": global_step,
-            "eval/batch_idx": i,
-            "eval/sample_idx": b,
-        }
 
         for i, batch in enumerate(dataloader):
             if i in log_batches:
