@@ -367,7 +367,6 @@ def test(
                 outputs=outputs,
                 step=global_step,
                 captions=captions,
-                sample_idx=b,  # optional if your function supports it
                 log_tsne=False,
             )
         # --------------------------
