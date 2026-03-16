@@ -66,7 +66,7 @@ def wandb_log_top_proto_heatmaps(
     outputs: dict,
     step: int,
     captions=None,
-    max_items: int = 20,
+    max_items: int = 48,   # can now be larger
     top_k: int = 5,
     mean=CLIP_MEAN,
     std=CLIP_STD,
@@ -76,10 +76,11 @@ def wandb_log_top_proto_heatmaps(
     log_tsne: bool = False,
 ):
     """
-    Logs, for a few images:
-      - raw image with original caption
-      - top-k prototype heatmaps with prototype words
-      - optional t-SNE of frozen vocab embeddings vs learned prototypes
+    Logs one grid image per sample:
+      - raw image
+      - top-k prototype heatmaps with prototype words / scores
+
+    This is much more W&B-friendly than logging each panel separately.
     """
     patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
     mix_weights = outputs["mixture_weights"]           # [B, V]
@@ -90,50 +91,74 @@ def wandb_log_top_proto_heatmaps(
 
     top_vals, top_idx = mix_weights.topk(k=top_k, dim=-1)   # [B, K]
 
-    panels = []
+    sample_grids = []
     B_log = min(B, max_items)
 
     for b in range(B_log):
         img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
-        top_words = [model.vocab_words[j] for j in top_idx[b].tolist()]
+        raw_caption = str(captions[b]) if captions is not None else ""
 
-        raw_caption = ""
-        if captions is not None:
-            raw_caption = str(captions[b])
+        words = [model.vocab_words[j] for j in top_idx[b].tolist()]
+        vals = [float(v.item()) for v in top_vals[b]]
 
-        panels.append(
-            wandb.Image(
-                img_uint8,
-                caption=(
-                    f"caption: {raw_caption}"
-                    + (f" | top: {', '.join(top_words)}" if top_words else "")
-                )
-            )
-        )
+        # collect images for this sample: raw + top-k overlays
+        panel_imgs = [img_uint8]
+        panel_titles = ["raw"]
 
         for rank, proto_idx in enumerate(top_idx[b].tolist()):
             hm = patch_logits[b, :, proto_idx].view(1, 1, H, W)
             hm_up = F.interpolate(
                 hm, size=(Hi, Wi), mode="bilinear", align_corners=False
             )[0, 0]
+
             overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
 
             word = model.vocab_words[proto_idx]
             score = float(top_vals[b, rank].item())
-            heatmap_caption = f"top{rank+1} | {word} | weight={score:.3f}"
-            if captions is not None:
-                heatmap_caption = f"caption: {raw_caption} | " + heatmap_caption
 
-            panels.append(
-                wandb.Image(
-                    overlay,
-                    caption=heatmap_caption
-                )
-            )
+            panel_imgs.append(overlay)
+            panel_titles.append(f"top{rank+1}: {word}\n{score:.3f}")
+
+        # create one grid figure for the sample
+        n_panels = len(panel_imgs)
+        ncols = min(3, n_panels)
+        nrows = int(math.ceil(n_panels / ncols))
+
+        fig, axes = plt.subplots(
+            nrows=nrows,
+            ncols=ncols,
+            figsize=(4 * ncols, 4 * nrows),
+            dpi=120,
+        )
+
+        if not isinstance(axes, np.ndarray):
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        for ax, im, title in zip(axes, panel_imgs, panel_titles):
+            ax.imshow(im)
+            ax.set_title(title, fontsize=10)
+            ax.axis("off")
+
+        # hide unused axes
+        for ax in axes[len(panel_imgs):]:
+            ax.axis("off")
+
+        suptitle = raw_caption
+        if words:
+            suptitle += f"\nTop words: {', '.join(words)}"
+
+        fig.suptitle(suptitle, fontsize=11)
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+
+        sample_grids.append(
+            wandb.Image(fig, caption=f"sample={b}")
+        )
+        plt.close(fig)
 
     log_dict = {
         "global_step": step,
-        log_key: panels,
+        log_key: sample_grids,
     }
 
     if log_tsne:
@@ -184,22 +209,14 @@ def wandb_log_top_proto_heatmaps(
 
             for i, w in enumerate(words_sel):
                 if w in active_set:
-                    plt.text(
-                        Z_frozen[i, 0], Z_frozen[i, 1], f"F:{w}",
-                        fontsize=7, alpha=0.8
-                    )
-                    plt.text(
-                        Z_learned[i, 0], Z_learned[i, 1], f"L:{w}",
-                        fontsize=7, alpha=0.8
-                    )
+                    plt.text(Z_frozen[i, 0], Z_frozen[i, 1], f"F:{w}", fontsize=7, alpha=0.8)
+                    plt.text(Z_learned[i, 0], Z_learned[i, 1], f"L:{w}", fontsize=7, alpha=0.8)
 
         plt.legend()
         plt.title("t-SNE: frozen vocab embeddings vs learned prototypes")
         plt.tight_layout()
 
-        log_dict[tsne_key] = wandb.Image(
-            fig, caption="frozen vs learned prototype space"
-        )
+        log_dict[tsne_key] = wandb.Image(fig, caption="frozen vs learned prototype space")
         plt.close(fig)
 
     wandb.log(log_dict)
