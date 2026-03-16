@@ -332,18 +332,27 @@ def test(
         )
 
         print('!!! ', log_batches)
-        if i in log_batches:
+        # choose random image in the batch
+        b = random.randrange(images.shape[0])
 
-            # choose random image in the batch
-            b = random.randrange(images.shape[0])
+        log_dict = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "eval/batch_idx": i,
+            "eval/sample_idx": b,
+        }
 
-            log_dict = {
-                "epoch": epoch,
-                "global_step": global_step,
-                "eval/batch_idx": i,
-                "eval/sample_idx": b,
-            }
+        for i, batch in enumerate(dataloader):
+            if i in log_batches:
+                # choose random image in batch
+                b = random.randrange(images.size(0))
 
+                log_dict = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "eval/batch_idx": i,
+                    "eval/sample_idx": b,
+                }
             if "mixture_weights" in outputs:
                 topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
 
