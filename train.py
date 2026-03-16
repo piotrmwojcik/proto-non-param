@@ -370,34 +370,34 @@ def test(
                     "eval/batch_idx": i,
                     "eval/sample_idx": b,
                 }
-            if "mixture_weights" in outputs:
-                topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
+                if "mixture_weights" in outputs:
+                    topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
 
-                words = [
-                    model.vocab_words[j]
-                    for j in topk_idx[b].tolist()
-                ]
+                    words = [
+                        model.vocab_words[j]
+                        for j in topk_idx[b].tolist()
+                    ]
 
-                log_dict["eval/top_words"] = ", ".join(words)
+                    log_dict["eval/top_words"] = ", ".join(words)
 
-            for k, v in loss_dict.items():
-                log_dict[f"eval/{k}"] = v.item()
+                for k, v in loss_dict.items():
+                    log_dict[f"eval/{k}"] = v.item()
 
-            wandb.log(log_dict)
+                wandb.log(log_dict)
 
-            # --------------------------
-            # Visualization logging
-            # --------------------------
-            wandb_log_top_proto_heatmaps(
-                model=model,
-                images=images[b:b + 1],
-                outputs={k: v[b:b + 1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
-                    v.shape) > 0 and v.shape[0] == images.shape[0] else v
-                         for k, v in outputs.items()},
-                step=global_step,
-                captions=[captions[b]],
-                log_tsne=False,
-            )
+                # --------------------------
+                # Visualization logging
+                # --------------------------
+                wandb_log_top_proto_heatmaps(
+                    model=model,
+                    images=images[b:b + 1],
+                    outputs={k: v[b:b + 1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
+                        v.shape) > 0 and v.shape[0] == images.shape[0] else v
+                             for k, v in outputs.items()},
+                    step=global_step,
+                    captions=[captions[b]],
+                    log_tsne=False,
+                )
         # --------------------------
         # Epoch metrics
         # --------------------------
