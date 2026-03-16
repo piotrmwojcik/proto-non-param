@@ -373,10 +373,12 @@ def test(
             # --------------------------
             wandb_log_top_proto_heatmaps(
                 model=model,
-                images=images,
-                outputs=outputs,
+                images=images[b:b + 1],
+                outputs={k: v[b:b + 1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
+                    v.shape) > 0 and v.shape[0] == images.shape[0] else v
+                         for k, v in outputs.items()},
                 step=global_step,
-                captions=captions,
+                captions=[captions[b]],
                 log_tsne=False,
             )
         # --------------------------
