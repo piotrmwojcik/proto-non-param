@@ -331,6 +331,7 @@ def test(
             )
         )
 
+        print('!!! ', log_batches)
         if i in log_batches:
 
             # choose random image in the batch
