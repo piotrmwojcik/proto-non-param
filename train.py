@@ -284,7 +284,7 @@ def test(
     clip_model: nn.Module,
     *,
     train_steps_per_epoch: int,
-    log_every: int = 1,
+    log_every: int = 50,
     vocab_to_idx=None,
 ):
     model.eval()
