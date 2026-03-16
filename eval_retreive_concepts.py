@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import math
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,15 +8,12 @@ import open_clip
 import torch
 import torch.nn.functional as F
 import wandb
+from PIL import Image, ImageDraw
+from torch import nn
 from torch.utils.data import DataLoader
 
 from clip_dataset import CocoCLIPDataset, coco_clip_collate_fn
-from modeling.backbone import (
-    DINOv2Backbone,
-    DINOv2BackboneExpanded,
-    DINOBackboneExpanded,
-    CLIPBackbone,
-)
+from modeling.backbone import DINOv2BackboneExpanded
 from modeling.pnp import PNP
 
 
@@ -34,50 +30,56 @@ def denorm_to_uint8(x: torch.Tensor, mean=CLIP_MEAN, std=CLIP_STD) -> np.ndarray
     return x
 
 
-def build_backbone(hparams):
-    backbone_name = hparams["backbone"]
-    num_splits = hparams.get("num_splits", 0)
+def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45) -> np.ndarray:
+    hm = hm.detach().cpu()
+    hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+    hm = hm.numpy()
 
-    if "dinov2" in backbone_name:
-        if num_splits and num_splits > 0:
-            backbone = DINOv2BackboneExpanded(
-                name=backbone_name,
-                n_splits=num_splits,
-                mode="append",
-                freeze_norm_layer=True,
-            )
-        else:
-            backbone = DINOv2Backbone(name=backbone_name)
-        dim = backbone.dim
+    r = hm
+    g = np.clip(hm * 0.9 + 0.1, 0, 1)
+    b = np.clip(1.0 - hm * 0.8, 0, 1)
+    hm_rgb = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
 
-    elif "dino" in backbone_name:
-        backbone = DINOBackboneExpanded(
-            name=backbone_name,
-            n_splits=num_splits,
-            mode="block_expansion",
-            freeze_norm_layer=True,
-        )
-        dim = backbone.dim
-
-    elif "clip" in backbone_name:
-        backbone = CLIPBackbone(name=backbone_name)
-        dim = backbone.dim
-
-    else:
-        raise NotImplementedError(f"Unsupported backbone: {backbone_name}")
-
-    return backbone, dim
+    out = alpha * hm_rgb.astype(np.float32) + (1 - alpha) * img_uint8.astype(np.float32)
+    return out.clip(0, 255).astype(np.uint8)
 
 
-def make_model(ckpt_path: str, device: torch.device):
+def find_high_activation_crop(activation_map, percentile=95):
+    threshold = np.percentile(activation_map, percentile)
+    mask = activation_map >= threshold
+    ys, xs = np.where(mask)
+
+    if len(ys) == 0 or len(xs) == 0:
+        h, w = activation_map.shape
+        return 0, h, 0, w
+
+    return ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+
+
+def draw_rect_on_image(img_uint8, bbox, color=(255, 0, 0), width=3):
+    y0, y1, x0, x1 = bbox
+    img_pil = Image.fromarray(img_uint8)
+    draw = ImageDraw.Draw(img_pil)
+    draw.rectangle([x0, y0, x1 - 1, y1 - 1], outline=color, width=width)
+    return np.array(img_pil)
+
+
+def build_model(device: torch.device, ckpt_path: str):
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    hparams = ckpt["hparams"]
+    state_dict = ckpt["state_dict"]
 
-    backbone, dim = build_backbone(hparams)
+    # params from your run
+    backbone = DINOv2BackboneExpanded(
+        name="dinov2_vitb14",
+        n_splits=1,
+        mode="append",
+        freeze_norm_layer=True,
+    )
+    dim = backbone.dim
 
     clip_model, _, _ = open_clip.create_model_and_transforms(
-        hparams["coco_clip_model_name"],
-        pretrained=hparams["coco_clip_pretrained"],
+        "ViT-B-32",
+        pretrained="openai",
     )
     clip_model = clip_model.eval().to(device)
     for p in clip_model.parameters():
@@ -86,25 +88,21 @@ def make_model(ckpt_path: str, device: torch.device):
     model = PNP(
         backbone=backbone,
         dim=dim,
-        temperature=hparams["temperature"],
-        clip_text_dim=hparams["clip_text_dim"],
-        text_proj_hidden_dim=hparams["text_proj_hidden_dim"],
-        vocab_cache_path=hparams["vocab_cache_path"],
-        prototype_init_noise=hparams["prototype_init_noise"],
+        temperature=0.07,
+        clip_text_dim=512,
+        text_proj_hidden_dim=768,
+        vocab_cache_path="vocab/laion_clip_cache.pt",
+        prototype_init_noise=0.01,
         clip_model=clip_model,
     )
 
-    model.load_state_dict(ckpt["state_dict"], strict=True)
+    model.load_state_dict(state_dict, strict=True)
     model = model.to(device).eval()
-    return model, hparams
+    return model
 
 
 @torch.inference_mode()
-def collect_scores(model, dataloader, device, concept_indices):
-    """
-    Returns:
-        concept_to_examples: dict[idx] -> list of dict(score, image, captions, dataset_index)
-    """
+def collect_top_examples(model, dataloader, device, concept_indices):
     concept_to_examples = {idx: [] for idx in concept_indices}
 
     for batch in dataloader:
@@ -112,13 +110,8 @@ def collect_scores(model, dataloader, device, concept_indices):
         images = images.to(device, non_blocking=True)
 
         outputs = model(images)
-
-        if "mixture_weights" in outputs:
-            scores = outputs["mixture_weights"]   # [B, V]
-        else:
-            scores = outputs["vocab_logits"].softmax(dim=-1)
-
-        scores = scores.detach().cpu()
+        scores = outputs["mixture_weights"].detach().cpu()
+        patch_logits = outputs["patch_prototype_logits"].detach().cpu()
         images_cpu = images.detach().cpu()
         indices_cpu = indices.detach().cpu()
 
@@ -131,67 +124,52 @@ def collect_scores(model, dataloader, device, concept_indices):
                         "image": images_cpu[b],
                         "captions": captions[b],
                         "dataset_index": int(indices_cpu[b].item()),
+                        "patch_logits": patch_logits[b, :, cidx].clone(),
                     }
                 )
 
     return concept_to_examples
 
 
-def log_top5_with_boxes(model, concept_word, concept_idx, examples, device):
-    """
-    Logs top-5 images for a concept with activation boxes.
-    """
-
+def log_top5_with_boxes(model, concept_word, examples):
     top5 = sorted(examples, key=lambda x: x["score"], reverse=True)[:5]
+    fig, axes = plt.subplots(1, len(top5), figsize=(4 * len(top5), 4), dpi=140)
 
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4), dpi=140)
+    if len(top5) == 1:
+        axes = [axes]
 
     for ax, ex in zip(axes, top5):
-
-        img = ex["image"].unsqueeze(0).to(device)
-
-        outputs = model(img)
-
-        patch_logits = outputs["patch_prototype_logits"]  # [1, N, V]
-        hm = patch_logits[0, :, concept_idx]
-
-        H = W = int(math.sqrt(hm.shape[0]))
-        hm = hm.view(1, 1, H, W)
-
-        hm_up = F.interpolate(
-            hm,
-            size=(img.shape[-2], img.shape[-1]),
-            mode="bilinear",
-            align_corners=False,
-        )[0, 0]
-
-        hm_np = hm_up.detach().cpu().numpy()
-
-        bbox = find_high_activation_crop(hm_np, percentile=95)
-
         img_uint8 = denorm_to_uint8(ex["image"])
 
+        hm = ex["patch_logits"]
+        N = hm.shape[0]
+        H = W = int(math.sqrt(N))
+        hm = hm.view(1, 1, H, W)
+
+        Hi, Wi = img_uint8.shape[:2]
+        hm_up = F.interpolate(
+            hm, size=(Hi, Wi), mode="bilinear", align_corners=False
+        )[0, 0]
+
+        bbox = find_high_activation_crop(hm_up.numpy(), percentile=95)
         overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
-
         overlay_box = draw_rect_on_image(overlay, bbox)
-
-        ax.imshow(overlay_box)
-        ax.axis("off")
 
         caption = ex["captions"][0] if isinstance(ex["captions"], list) else str(ex["captions"])
 
+        ax.imshow(overlay_box)
+        ax.axis("off")
         ax.set_title(
-            f"{concept_word}\nscore={ex['score']:.3f}\n{caption[:40]}",
-            fontsize=9
+            f"score={ex['score']:.3f}\nidx={ex['dataset_index']}\n{caption[:60]}",
+            fontsize=9,
         )
 
-    plt.tight_layout()
+    fig.suptitle(f"Top 5 images for concept: {concept_word}", fontsize=12)
+    plt.tight_layout(rect=[0, 0, 1, 0.90])
 
-    wandb.log({
-        f"retrieval/{concept_word}": wandb.Image(fig)
-    })
-
+    wandb.log({f"retrieval/{concept_word}": wandb.Image(fig)})
     plt.close(fig)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -199,17 +177,18 @@ def main():
     parser.add_argument("--concepts", type=str, nargs="+", required=True)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--wandb-project", type=str, default="proto-non-param")
-    parser.add_argument("--wandb-run-name", type=str, default="concept-retrieval")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--wandb-project", type=str, default="proto-non-param")
+    parser.add_argument("--wandb-run-name", type=str, default="concept-retrieval-boxes")
+    parser.add_argument("--annotations-json", type=str, default="/data/pwojcik/coco_2014/annotations/captions_train2014.json")
+    parser.add_argument("--coco-root", type=str, default="/data/pwojcik/coco_2014")
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    model, hparams = make_model(args.ckpt, device)
-
-    # vocab
-    cache = torch.load(hparams["vocab_cache_path"], map_location="cpu")
+    # run params
+    vocab_cache_path = "vocab/laion_clip_cache.pt"
+    cache = torch.load(vocab_cache_path, map_location="cpu")
     vocab_words = list(cache.keys())
     vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
 
@@ -219,16 +198,17 @@ def main():
 
     concept_indices = [vocab_to_idx[c] for c in args.concepts]
 
-    # training dataset only
-    dataset_train = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
-        coco_root="/data/pwojcik/coco_2014",
+    model = build_model(device, args.ckpt)
+
+    dataset = CocoCLIPDataset(
+        annotations_json=args.annotations_json,
+        coco_root=args.coco_root,
         vocab_to_idx=vocab_to_idx,
         train=False,
     )
 
     dataloader = DataLoader(
-        dataset_train,
+        dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -242,20 +222,18 @@ def main():
         config={
             "ckpt": args.ckpt,
             "concepts": args.concepts,
-            "batch_size": args.batch_size,
+            "backbone": "dinov2_vitb14",
+            "num_splits": 1,
+            "vocab_cache_path": vocab_cache_path,
+            "temperature": 0.07,
         },
     )
 
-    concept_to_examples = collect_scores(model, dataloader, device, concept_indices)
+    concept_to_examples = collect_top_examples(model, dataloader, device, concept_indices)
 
     for concept_word in args.concepts:
-        log_top5_with_boxes(
-            model,
-            concept_word,
-            vocab_to_idx[concept_word],
-            concept_to_examples[vocab_to_idx[concept_word]],
-            device,
-        )
+        cidx = vocab_to_idx[concept_word]
+        log_top5_with_boxes(model, concept_word, concept_to_examples[cidx])
 
     wandb.finish()
 
