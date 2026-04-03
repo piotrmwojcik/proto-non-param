@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch.nn.functional as F
 
-from clip_dataset import CocoCLIPDataset, coco_clip_collate_fn
+from clip_dataset import CocoCLIPDataset, Caltech101CLIPDataset, coco_clip_collate_fn
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -428,8 +428,12 @@ def main():
     parser.add_argument("--log-dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip"])
+    parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip", "caltech101"])
     parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
+    parser.add_argument("--caltech-root", type=str, default=None, help="Path to caltech101 directory")
+    parser.add_argument("--caltech-descriptions", type=str, default=None, help="Path to caltech101_descriptions.json")
+    parser.add_argument("--coco-annotations-train", type=str, default="/data/pwojcik/coco_2014/annotations/captions_train2014.json")
+    parser.add_argument("--coco-annotations-val", type=str, default="/data/pwojcik/coco_2014/annotations/captions_val2014.json")
     parser.add_argument("--coco-val-ratio", type=float, default=0.1)
     parser.add_argument("--coco-clip-model-name", type=str, default="ViT-B-32")
     parser.add_argument("--coco-clip-pretrained", type=str, default="openai")
@@ -503,7 +507,7 @@ def main():
 
     L.seed_everything(args.seed)
 
-    logger.info("Train on COCO CLIP dataset")
+    logger.info(f"Train on {args.dataset} dataset")
 
     cache = torch.load(args.vocab_cache_path, map_location="cpu")
     vocab_words = list(cache.keys())
@@ -511,19 +515,34 @@ def main():
 
     print('Building datasets')
 
-    dataset_train = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
-        coco_root="/data/pwojcik/coco_2014",
-        vocab_to_idx=vocab_to_idx,
-        train=True,
-    )
-
-    dataset_test = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_val2014.json",
-        coco_root="/data/pwojcik/coco_2014",
-        vocab_to_idx=vocab_to_idx,
-        train=False,
-    )
+    if args.dataset == "caltech101":
+        if args.caltech_root is None or args.caltech_descriptions is None:
+            raise ValueError("--caltech-root and --caltech-descriptions are required for caltech101 dataset")
+        dataset_train = Caltech101CLIPDataset(
+            descriptions_json=args.caltech_descriptions,
+            caltech_root=args.caltech_root,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+        )
+        dataset_test = Caltech101CLIPDataset(
+            descriptions_json=args.caltech_descriptions,
+            caltech_root=args.caltech_root,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+        )
+    else:
+        dataset_train = CocoCLIPDataset(
+            annotations_json=args.coco_annotations_train,
+            coco_root=args.coco_root,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+        )
+        dataset_test = CocoCLIPDataset(
+            annotations_json=args.coco_annotations_val,
+            coco_root=args.coco_root,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+        )
 
     print('Done with datasets')
     print('Train: ', len(dataset_train))

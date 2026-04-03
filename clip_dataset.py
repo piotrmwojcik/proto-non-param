@@ -210,3 +210,112 @@ class CocoCLIPDataset(Dataset):
             img_tensor = self.eval_transform(img)
 
         return img_tensor, captions, prob_dist, index
+
+
+class Caltech101CLIPDataset(Dataset):
+    """Dataset for Caltech-101 images with VLM-generated descriptions.
+
+    Expects a descriptions JSON with format:
+        { "/some/path/caltech101/train/ClassName/image_0001.jpg": ["desc1", ...], ... }
+
+    The machine-specific prefix before "caltech101/" is stripped so the
+    dataset works on any machine given the correct caltech_root.
+    """
+
+    def __init__(
+        self,
+        descriptions_json: str,
+        caltech_root: str,
+        vocab_to_idx: dict,
+        train: bool = True,
+        cache_dir: str = None,
+        use_cache: bool = True,
+    ):
+        self.caltech_root = caltech_root
+        self.vocab_to_idx = vocab_to_idx
+        self.vocab_size = len(vocab_to_idx)
+        self.train = train
+
+        self.train_transform = v2.Compose([
+            v2.RandomResizedCrop(
+                size=224,
+                scale=(0.8, 1.0),
+                interpolation=v2.InterpolationMode.BICUBIC,
+            ),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.ToTensor(),
+            v2.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+
+        self.eval_transform = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+
+        cache_path = _make_cache_path(descriptions_json, vocab_to_idx, cache_dir)
+
+        if use_cache and os.path.exists(cache_path):
+            print(f"Loading dataset cache from: {cache_path}")
+            cached = torch.load(cache_path, map_location="cpu")
+            self.samples = cached["samples"]
+            print(f"Loaded {len(self.samples)} cached samples")
+            return
+
+        split_key = "/train/" if train else "/val/"
+
+        with open(descriptions_json, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        samples = []
+        print(f"Building Caltech101 {'train' if train else 'val'} samples...")
+        for json_path, descriptions in raw.items():
+            # Normalise separators so the split check works on both OS
+            norm = json_path.replace("\\", "/")
+            if split_key not in norm:
+                continue
+
+            # Extract the relative part after "caltech101/"
+            marker = "caltech101/"
+            idx = norm.find(marker)
+            if idx == -1:
+                continue
+            rel = norm[idx + len(marker):]   # e.g. "train/Faces/image_0001.jpg"
+
+            im_path = os.path.join(caltech_root, *rel.split("/"))
+            if not os.path.isfile(im_path):
+                continue
+
+            if not descriptions:
+                continue
+
+            counts = Counter()
+            total_valid = 0
+            for desc in descriptions:
+                word_idxs = extract_caption_words(desc, vocab_to_idx)
+                for wi in word_idxs:
+                    counts[wi] += 1
+                total_valid += len(word_idxs)
+
+            prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+            if total_valid > 0:
+                for wi, cnt in counts.items():
+                    prob_dist[wi] = cnt / total_valid
+
+            samples.append((im_path, descriptions, prob_dist))
+
+        self.samples = samples
+        print(f"Done. Total samples: {len(self.samples)}")
+
+        if use_cache:
+            torch.save({"samples": self.samples}, cache_path)
+            print(f"Saved cache to: {cache_path}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        im_path, descriptions, prob_dist = self.samples[index]
+        img = Image.open(im_path).convert("RGB")
+        img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
+        return img_tensor, descriptions, prob_dist, index
