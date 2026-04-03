@@ -1,6 +1,13 @@
 """
-Extract unique content words (nouns, verbs, adjectives) from Caltech101 descriptions
+Extract meaningful nouns and adjectives from Caltech101 descriptions
 and build a CLIP embedding cache for use in training.
+
+Filters applied:
+  - Nouns and adjectives only (no verbs)
+  - Minimum word frequency (--min-count)
+  - Maximum document frequency (--max-doc-freq): drops words appearing in
+    too many images (generic words like "background", "image", "visible")
+  - VLM artifact blocklist: description-generation artifacts removed explicitly
 
 Usage:
     python build_caltech101_vocab.py \
@@ -27,29 +34,36 @@ nltk.download("wordnet", quiet=True)
 
 lemmatizer = WordNetLemmatizer()
 
-COMMON_VERBS = {
-    "be", "is", "am", "are", "was", "were", "been", "being",
-    "have", "has", "had", "having",
-    "do", "does", "did", "doing",
+# Words that are VLM description artifacts or too generic to be meaningful
+VLM_BLOCKLIST = {
+    # description artifacts
+    "image", "images", "photo", "photograph", "picture", "pictures",
+    "background", "foreground", "scene", "view", "shot",
+    # generic visual verbs turned nouns
+    "appear", "show", "display", "depict", "feature", "capture",
+    "visible", "visual", "overall", "general",
+    # generic spatial/quantity words
+    "area", "part", "section", "side", "top", "bottom", "center",
+    "left", "right", "number", "variety", "type", "kind", "example",
+    # common but meaningless adjectives in descriptions
+    "various", "several", "different", "similar", "possible",
+    "additional", "certain", "particular", "specific",
 }
 
 
 def extract_words(text: str) -> list:
+    """Extract nouns and adjectives only."""
     tokens = nltk.word_tokenize(text.lower())
     pos_tags = nltk.pos_tag(tokens)
     words = []
     for word, pos in pos_tags:
         if pos.startswith("NN"):
             lemma = lemmatizer.lemmatize(word, pos="n")
-        elif pos.startswith("VB"):
-            lemma = lemmatizer.lemmatize(word, pos="v")
-            if lemma in COMMON_VERBS:
-                continue
         elif pos.startswith("JJ"):
             lemma = lemmatizer.lemmatize(word, pos="a")
         else:
-            continue
-        if lemma.isalpha() and len(lemma) >= 3:
+            continue  # skip verbs and everything else
+        if lemma.isalpha() and len(lemma) >= 3 and lemma not in VLM_BLOCKLIST:
             words.append(lemma)
     return words
 
@@ -87,21 +101,44 @@ def main():
     parser.add_argument("--descriptions", required=True, help="Path to caltech101_descriptions.json")
     parser.add_argument("--vocab-out", default="vocab/caltech101.txt", help="Output vocab text file")
     parser.add_argument("--cache-out", default="vocab/caltech101_cache.pt", help="Output CLIP cache file")
-    parser.add_argument("--min-count", type=int, default=2, help="Minimum word frequency to include (default: 2)")
+    parser.add_argument("--min-count", type=int, default=3,
+                        help="Minimum total word occurrences to include (default: 3)")
+    parser.add_argument("--max-doc-freq", type=float, default=0.3,
+                        help="Exclude words appearing in more than this fraction of images (default: 0.3)")
     args = parser.parse_args()
 
     print(f"Loading descriptions from {args.descriptions}...")
     with open(args.descriptions, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    counts = Counter()
+    total_images = len(data)
+    word_counts = Counter()      # total occurrences
+    doc_counts = Counter()       # number of images containing each word
+
     for descriptions in data.values():
+        words_in_image = set()
         for desc in descriptions:
             for word in extract_words(desc):
-                counts[word] += 1
+                word_counts[word] += 1
+                words_in_image.add(word)
+        for word in words_in_image:
+            doc_counts[word] += 1
 
-    vocab = sorted(w for w, c in counts.items() if c >= args.min_count)
-    print(f"Vocabulary size: {len(vocab)} words (min_count={args.min_count})")
+    max_doc_count = int(args.max_doc_freq * total_images)
+    print(f"Total images: {total_images}, max doc count threshold: {max_doc_count} ({args.max_doc_freq*100:.0f}%)")
+
+    vocab = sorted(
+        w for w, c in word_counts.items()
+        if c >= args.min_count and doc_counts[w] <= max_doc_count
+    )
+
+    print(f"Vocabulary size: {len(vocab)} words "
+          f"(min_count={args.min_count}, max_doc_freq={args.max_doc_freq})")
+
+    # Show top filtered-out words for debugging
+    filtered_out = [w for w in word_counts if w not in vocab and word_counts[w] >= args.min_count]
+    filtered_out.sort(key=lambda w: doc_counts[w], reverse=True)
+    print(f"Top words removed by doc-freq filter: {filtered_out[:20]}")
 
     Path(args.vocab_out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.vocab_out, "w", encoding="utf-8") as f:
