@@ -275,6 +275,7 @@ def test(
     train_steps_per_epoch: int,
     log_every: int = 50,
     vocab_to_idx=None,
+    wandb_log_images: int = 8,
 ):
     model.eval()
 
@@ -353,14 +354,15 @@ def test(
                 # --------------------------
                 # Visualization logging
                 # --------------------------
+                n_log = min(wandb_log_images, images.shape[0])
                 wandb_log_top_proto_heatmaps(
                     model=model,
-                    images=images[b:b + 1],
-                    outputs={k: v[b:b + 1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
+                    images=images[:n_log],
+                    outputs={k: v[:n_log] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
                         v.shape) > 0 and v.shape[0] == images.shape[0] else v
                              for k, v in outputs.items()},
                     step=global_step,
-                    captions=[captions[b]],
+                    captions=captions[:n_log],
                     log_tsne=False,
                 )
         # --------------------------
@@ -476,6 +478,8 @@ def main():
 
     parser.add_argument("--cosine-coef", type=float, default=1.0)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--wandb-log-images", type=int, default=8,
+                        help="Number of images to visualize per W&B log step (default: 8)")
 
     args = parser.parse_args()
 
@@ -696,7 +700,8 @@ def main():
             device=device,
             clip_model=clip_model,
             train_steps_per_epoch=len(dataloader_train),
-            vocab_to_idx=vocab_to_idx,  # ADD THIS
+            vocab_to_idx=vocab_to_idx,
+            wandb_log_images=args.wandb_log_images,
         )
 
         epoch_metric = -sum(

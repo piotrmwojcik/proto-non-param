@@ -19,8 +19,9 @@ python train.py \
   --dataset caltech101 \
   --caltech-root /net/tscratch/people/plgabedychaj/caltech101 \
   --caltech-descriptions /net/tscratch/people/plgabedychaj/descriptions/caltech101_descriptions.json \
-  --vocab-cache-path vocab/mscoco_new_cache.pt \
-  --log-dir /net/tscratch/people/plgabedychaj/train_logs/caltech_exp1 \
+  --vocab-cache-path /net/tscratch/people/plgabedychaj/vocab/caltech101_cache.pt \
+  --log-dir /net/tscratch/people/plgabedychaj/train_logs/caltech_exp2 \
   --batch-size 64 \
-  --epochs 10 \
-  --num-workers 8
+  --epochs 50 \
+  --num-workers 8 \
+  --wandb-log-images 16
