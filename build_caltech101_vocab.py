@@ -32,7 +32,22 @@ nltk.download("averaged_perceptron_tagger", quiet=True)
 nltk.download("averaged_perceptron_tagger_eng", quiet=True)
 nltk.download("wordnet", quiet=True)
 
+from nltk.corpus import wordnet as wn
+
 lemmatizer = WordNetLemmatizer()
+
+
+def is_meaningful_noun_or_adj(word: str) -> bool:
+    """Return True only if the word is a genuine noun or adjective per WordNet,
+    and not primarily a verb (more verb synsets than noun+adj synsets)."""
+    noun_synsets = wn.synsets(word, pos=wn.NOUN)
+    adj_synsets = wn.synsets(word, pos=wn.ADJ) + wn.synsets(word, pos=wn.ADJ_SAT)
+    verb_synsets = wn.synsets(word, pos=wn.VERB)
+
+    has_noun_or_adj = len(noun_synsets) + len(adj_synsets) > 0
+    primarily_verb = len(verb_synsets) > len(noun_synsets) + len(adj_synsets)
+
+    return has_noun_or_adj and not primarily_verb
 
 # Words that are VLM description artifacts or too generic to be meaningful
 VLM_BLOCKLIST = {
@@ -129,7 +144,9 @@ def main():
 
     vocab = sorted(
         w for w, c in word_counts.items()
-        if c >= args.min_count and doc_counts[w] <= max_doc_count
+        if c >= args.min_count
+        and doc_counts[w] <= max_doc_count
+        and is_meaningful_noun_or_adj(w)
     )
 
     print(f"Vocabulary size: {len(vocab)} words "
