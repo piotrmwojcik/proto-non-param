@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=download_awa2
-#SBATCH --partition=plgrid
+#SBATCH --partition=all
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --time=04:00:00
