@@ -148,7 +148,7 @@ def main():
         if src.exists():
             shutil.copy2(src, ann_dir / fname)
 
-    # attributes/ subdirectory (312 binary attributes + per-image labels)
+    # attributes/ subdirectory (per-image labels, certainties)
     src_attrs = cub_root / "attributes"
     dst_attrs = ann_dir / "attributes"
     if src_attrs.exists() and not dst_attrs.exists():
@@ -156,6 +156,14 @@ def main():
         print(f"  Copied attributes/ → {dst_attrs}")
     elif not src_attrs.exists():
         print("  WARNING: attributes/ subdirectory not found in archive!")
+
+    # attributes.txt may be at the archive root (not inside attributes/)
+    dst_attrs.mkdir(parents=True, exist_ok=True)
+    for candidate in [extract_dir / "attributes.txt", cub_root / "attributes.txt"]:
+        if candidate.exists():
+            shutil.copy2(candidate, dst_attrs / "attributes.txt")
+            print(f"  Copied attributes.txt from {candidate}")
+            break
 
     # ── 6. Save val split file for reference ──────────────────────────────────
     with open(ann_dir / "val_ids.txt", "w") as f:
