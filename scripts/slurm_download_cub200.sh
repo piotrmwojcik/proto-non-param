@@ -4,7 +4,7 @@
 #SBATCH --account=plgbcfg-gpu-a100
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
-#SBATCH --time=00:30:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/net/tscratch/people/plgabedychaj/logs/download_cub200_%j.out
 #SBATCH --error=/net/tscratch/people/plgabedychaj/logs/download_cub200_%j.err
 
