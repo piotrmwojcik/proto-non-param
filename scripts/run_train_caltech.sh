@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_caltech
 #SBATCH --partition=plgrid-gpu-a100
+#SBATCH --account=plgbcfg-gpu-a100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=build_awa2_cache
 #SBATCH --partition=plgrid-gpu-a100
+#SBATCH --account=plgbcfg-gpu-a100
 #SBATCH --gres=gpu:1
 #SBATCH --mem=8G
 #SBATCH --time=00:05:00
