@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch.nn.functional as F
 
-from clip_dataset import CocoCLIPDataset, Caltech101CLIPDataset, coco_clip_collate_fn
+from clip_dataset import CocoCLIPDataset, Caltech101CLIPDataset, CUBCLIPDataset, AwA2CLIPDataset, coco_clip_collate_fn
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -430,10 +430,14 @@ def main():
     parser.add_argument("--log-dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip", "caltech101"])
+    parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip", "caltech101", "cub200", "awa2"])
     parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
     parser.add_argument("--caltech-root", type=str, default=None, help="Path to caltech101 directory")
     parser.add_argument("--caltech-descriptions", type=str, default=None, help="Path to caltech101_descriptions.json")
+    parser.add_argument("--cub-root", type=str, default=None, help="Path to CUB-200-2011 organized directory")
+    parser.add_argument("--cub-annotations", type=str, default=None, help="Path to CUB annotations dir (contains attributes/)")
+    parser.add_argument("--awa-root", type=str, default=None, help="Path to AwA2 organized directory")
+    parser.add_argument("--awa-annotations", type=str, default=None, help="Path to AwA2 annotations dir (contains predicates.txt)")
     parser.add_argument("--coco-annotations-train", type=str, default="/data/pwojcik/coco_2014/annotations/captions_train2014.json")
     parser.add_argument("--coco-annotations-val", type=str, default="/data/pwojcik/coco_2014/annotations/captions_val2014.json")
     parser.add_argument("--coco-val-ratio", type=float, default=0.1)
@@ -531,6 +535,36 @@ def main():
         dataset_test = Caltech101CLIPDataset(
             descriptions_json=args.caltech_descriptions,
             caltech_root=args.caltech_root,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+        )
+    elif args.dataset == "cub200":
+        if args.cub_root is None or args.cub_annotations is None:
+            raise ValueError("--cub-root and --cub-annotations are required for cub200 dataset")
+        dataset_train = CUBCLIPDataset(
+            dataset_root=args.cub_root,
+            annotations_dir=args.cub_annotations,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+        )
+        dataset_test = CUBCLIPDataset(
+            dataset_root=args.cub_root,
+            annotations_dir=args.cub_annotations,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+        )
+    elif args.dataset == "awa2":
+        if args.awa_root is None or args.awa_annotations is None:
+            raise ValueError("--awa-root and --awa-annotations are required for awa2 dataset")
+        dataset_train = AwA2CLIPDataset(
+            dataset_root=args.awa_root,
+            annotations_dir=args.awa_annotations,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+        )
+        dataset_test = AwA2CLIPDataset(
+            dataset_root=args.awa_root,
+            annotations_dir=args.awa_annotations,
             vocab_to_idx=vocab_to_idx,
             train=False,
         )
