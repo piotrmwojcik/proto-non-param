@@ -11,6 +11,7 @@
 mkdir -p /net/tscratch/people/plgabedychaj/logs
 export HF_HOME=/net/tscratch/people/plgabedychaj/hf_cache
 export TRANSFORMERS_CACHE=/net/tscratch/people/plgabedychaj/hf_cache
+export PYTHONPATH="/net/tscratch/people/plgabedychaj/dinov2:$PYTHONPATH"
 
 source /net/tscratch/people/plgabedychaj/venv/bin/activate
 cd ~/proto-VLM/proto-non-param
