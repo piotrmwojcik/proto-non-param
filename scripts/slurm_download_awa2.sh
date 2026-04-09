@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=download_awa2
-#SBATCH --partition=all
+#SBATCH --partition=plgrid-gpu-a100
 #SBATCH --account=plgbcfg-gpu-a100
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
