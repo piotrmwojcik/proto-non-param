@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH -A plgbcfg-gpu-a100
+#SBATCH -A plgtabcfs-gpu-a100
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32GB
 #SBATCH --time=24:00:00
