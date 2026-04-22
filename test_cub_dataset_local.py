@@ -3,10 +3,8 @@ import os
 import csv
 import re
 import argparse
-import hashlib
 import random
 from collections import Counter, defaultdict
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -16,12 +14,6 @@ from torchvision import transforms
 from torchvision.transforms import v2
 
 
-CACHE_VERSION = "v2_attr_phrase_extractor"
-
-
-# -----------------------------
-# Attribute vocab helpers
-# -----------------------------
 COLORS = {
     "blue",
     "brown",
@@ -42,17 +34,15 @@ COLORS = {
 
 PATTERNS = {"solid", "spotted", "striped", "multi-colored"}
 
-BODY_PARTS_FOR_COLOR = {
+COLOR_PARTS = {
     "wing",
     "upperparts",
     "underparts",
     "back",
-    "upper tail",
     "breast",
     "throat",
     "eye",
     "forehead",
-    "under tail",
     "nape",
     "belly",
     "leg",
@@ -61,159 +51,76 @@ BODY_PARTS_FOR_COLOR = {
     "primary",
 }
 
-BODY_PARTS_FOR_PATTERN = {"breast", "head", "back", "tail", "belly", "wing"}
-
-PHRASE_NORMALIZATION = {
-    # plurals / common variants
-    "eyes": "eye",
-    "legs": "leg",
-    "wings": "wing",
-    "bills": "bill",
-    "tails": "tail",
-    "breasts": "breast",
-    "throats": "throat",
-    "foreheads": "forehead",
-    # spelling / wording normalization
-    "gray": "grey",
-    "multi colored": "multi-colored",
-    # useful aliases
-    "beak": "bill",
-    "beaks": "bill",
-}
-
-MULTIWORD_PART_ALIASES = {
-    "upper tail": "upper tail",
-    "under tail": "under tail",
-}
-
-SKIP_WORDS_BETWEEN_ATTR_AND_PART = {
-    "and",
-    "with",
-    "a",
-    "an",
-    "the",
-    "very",
-    "quite",
-    "mostly",
-}
+PATTERN_PARTS = {"breast", "head", "back", "tail", "belly", "wing"}
 
 
 def normalize_caption_text(caption: str) -> str:
     text = caption.lower()
 
-    # normalize punctuation/hyphenation
-    text = text.replace("_", " ")
-    text = text.replace("/", " ")
-    text = re.sub(r"\s+", " ", text)
+    replacements = {
+        "eyes": "eye",
+        "legs": "leg",
+        "wings": "wing",
+        "bills": "bill",
+        "beak": "bill",
+        "beaks": "bill",
+        "tails": "tail",
+        "breasts": "breast",
+        "throats": "throat",
+        "foreheads": "forehead",
+        "gray": "grey",
+        "multi colored": "multi-colored",
+    }
 
-    for src, dst in PHRASE_NORMALIZATION.items():
+    for src, dst in replacements.items():
         text = re.sub(rf"\b{re.escape(src)}\b", dst, text)
 
     return text
 
 
-def tokenize_caption(text: str) -> list[str]:
-    return re.findall(r"[a-zA-Z-]+", text)
-
-
 def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]) -> list[int]:
     """
-    Extract CUB-style attribute phrases from free-form captions.
+    Strict CUB attribute extractor.
 
     Examples:
-      'A photo of a bird with black eyes, spotted head, red throat, and brown legs.'
-      -> eye color black
-      -> head pattern spotted
-      -> throat color red
-      -> leg color brown
+      'black eyes'    -> eye color black
+      'spotted head'  -> head pattern spotted
+      'red throat'    -> throat color red
+      'brown legs'    -> leg color brown
     """
     text = normalize_caption_text(caption)
-    tokens = tokenize_caption(text)
+    tokens = re.findall(r"[a-zA-Z-]+", text)
 
     matched_phrases: list[str] = []
 
-    # 1) direct full-phrase substring match
-    # works if a caption literally contains a vocab entry
-    for phrase in vocab_to_idx.keys():
-        if phrase in text:
+    def add_phrase(phrase: str):
+        if phrase in vocab_to_idx and phrase not in matched_phrases:
             matched_phrases.append(phrase)
 
-    # 2) adjective + noun patterns, e.g. "black eye", "spotted head"
-    for i in range(len(tokens) - 1):
+    n = len(tokens)
+
+    for i in range(n - 1):
         a, b = tokens[i], tokens[i + 1]
 
-        if a in COLORS:
-            part = b
-            if part in BODY_PARTS_FOR_COLOR:
-                phrase = f"{part} color {a}"
-                if phrase in vocab_to_idx:
-                    matched_phrases.append(phrase)
+        # adjective + noun, e.g. "black eye", "red throat"
+        if a in COLORS and b in COLOR_PARTS:
+            add_phrase(f"{b} color {a}")
 
-        if a in PATTERNS:
-            part = b
-            if part in BODY_PARTS_FOR_PATTERN:
-                phrase = f"{part} pattern {a}"
-                if phrase in vocab_to_idx:
-                    matched_phrases.append(phrase)
+        # adjective + noun, e.g. "spotted head"
+        if a in PATTERNS and b in PATTERN_PARTS:
+            add_phrase(f"{b} pattern {a}")
 
-    # 3) noun + adjective fallback, e.g. "eye black"
-    for i in range(len(tokens) - 1):
-        a, b = tokens[i], tokens[i + 1]
+        # noun + adjective fallback, e.g. "eye black"
+        if a in COLOR_PARTS and b in COLORS:
+            add_phrase(f"{a} color {b}")
 
-        if a in BODY_PARTS_FOR_COLOR and b in COLORS:
-            phrase = f"{a} color {b}"
-            if phrase in vocab_to_idx:
-                matched_phrases.append(phrase)
+        if a in PATTERN_PARTS and b in PATTERNS:
+            add_phrase(f"{a} pattern {b}")
 
-        if a in BODY_PARTS_FOR_PATTERN and b in PATTERNS:
-            phrase = f"{a} pattern {b}"
-            if phrase in vocab_to_idx:
-                matched_phrases.append(phrase)
-
-    # 4) support two-word parts like "upper tail", "under tail"
-    for i in range(len(tokens) - 2):
-        part_candidate = f"{tokens[i]} {tokens[i + 1]}"
-        attr = tokens[i + 2]
-
-        if part_candidate in MULTIWORD_PART_ALIASES:
-            canonical_part = MULTIWORD_PART_ALIASES[part_candidate]
-            if attr in COLORS:
-                phrase = f"{canonical_part} color {attr}"
-                if phrase in vocab_to_idx:
-                    matched_phrases.append(phrase)
-            if attr in PATTERNS:
-                phrase = f"{canonical_part} pattern {attr}"
-                if phrase in vocab_to_idx:
-                    matched_phrases.append(phrase)
-
-    # 5) handle "black eyes", "red throat", "brown legs" after plural normalization
-    # already mostly covered, but keep this for clarity and robustness
-    for i in range(len(tokens) - 1):
-        attr, part = tokens[i], tokens[i + 1]
-        if attr in COLORS and part in BODY_PARTS_FOR_COLOR:
-            phrase = f"{part} color {attr}"
-            if phrase in vocab_to_idx:
-                matched_phrases.append(phrase)
-        if attr in PATTERNS and part in BODY_PARTS_FOR_PATTERN:
-            phrase = f"{part} pattern {attr}"
-            if phrase in vocab_to_idx:
-                matched_phrases.append(phrase)
-
-    # deduplicate while preserving order
-    matched_phrases = list(dict.fromkeys(matched_phrases))
     return [vocab_to_idx[p] for p in matched_phrases]
 
 
 def load_vocab_cache(vocab_cache_path: str, device: str = "cpu"):
-    """
-    Load a vocab cache saved as:
-        {word: embedding_tensor}
-
-    Returns:
-        vocab_words: list[str]
-        vocab_to_idx: dict[str, int]
-        noun_embeddings: torch.Tensor [V, D]
-    """
     cache = torch.load(vocab_cache_path, map_location="cpu")
 
     if not isinstance(cache, dict) or len(cache) == 0:
@@ -253,22 +160,6 @@ def load_vocab_cache(vocab_cache_path: str, device: str = "cpu"):
     return vocab_words, vocab_to_idx, noun_embeddings
 
 
-def _make_csv_cache_path(
-    csv_path: str, vocab_to_idx: dict[str, int], cache_dir: str = None
-):
-    csv_path = os.path.abspath(csv_path)
-    vocab_items = tuple(sorted(vocab_to_idx.items()))
-    key = repr((CACHE_VERSION, csv_path, vocab_items)).encode("utf-8")
-    digest = hashlib.md5(key).hexdigest()[:12]
-
-    if cache_dir is None:
-        cache_dir = os.path.join(os.path.dirname(csv_path), ".dataset_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    name = Path(csv_path).stem
-    return os.path.join(cache_dir, f"{name}_{digest}.pt")
-
-
 class CUBCLIPDataset(Dataset):
     def __init__(
         self,
@@ -276,8 +167,6 @@ class CUBCLIPDataset(Dataset):
         vocab_to_idx: dict[str, int],
         seed: int = 42,
         device: str = "cuda",
-        cache_dir: str = None,
-        use_cache: bool = True,
         train: bool = True,
     ):
         self.csv_path = csv_path
@@ -316,15 +205,6 @@ class CUBCLIPDataset(Dataset):
                 ),
             ]
         )
-
-        cache_path = _make_csv_cache_path(csv_path, vocab_to_idx, cache_dir)
-
-        if use_cache and os.path.exists(cache_path):
-            print(f"Loading dataset cache from: {cache_path}")
-            cached = torch.load(cache_path, map_location="cpu")
-            self.samples = cached["samples"]
-            print(f"Loaded {len(self.samples)} cached samples")
-            return
 
         captions_per_image = defaultdict(list)
 
@@ -377,10 +257,6 @@ class CUBCLIPDataset(Dataset):
         self.samples = samples
         print(f"Done computing frequency. Total samples: {len(self.samples)}")
 
-        if use_cache:
-            torch.save({"samples": self.samples}, cache_path)
-            print(f"Saved dataset cache to: {cache_path}")
-
     def __len__(self):
         return len(self.samples)
 
@@ -423,13 +299,6 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--train", action="store_true")
-    parser.add_argument("--use-cache", action="store_true")
-    parser.add_argument("--cache-dir", type=str, default=None)
-    parser.add_argument(
-        "--show-matches",
-        action="store_true",
-        help="Print matched vocab phrases for the first caption in the sample",
-    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -443,14 +312,11 @@ def main():
     print(f"Loaded vocab cache: {args.vocab_cache_path}")
     print(f"Vocab size: {len(vocab_words)}")
     print(f"Noun embeddings shape: {tuple(noun_embeddings.shape)}")
-    print(f"Cache version: {CACHE_VERSION}")
 
     dataset = CUBCLIPDataset(
         csv_path=args.csv_path,
         vocab_to_idx=vocab_to_idx,
         train=args.train,
-        use_cache=args.use_cache,
-        cache_dir=args.cache_dir,
         device=args.device,
         seed=args.seed,
     )
@@ -472,20 +338,19 @@ def main():
     print(" index:", index)
     print(" image shape:", tuple(img_tensor.shape))
     print(" num captions:", len(captions))
-    print(" first caption:", captions[0] if captions else "<none>")
     print(" prob_dist shape:", tuple(prob_dist.shape))
-    print(" nonzero vocab indices:", nonzero[:30])
+    print(" nonzero vocab indices:", nonzero[:50])
 
     if nonzero:
-        print(" first nonzero vocab words:", [vocab_words[i] for i in nonzero[:15]])
-        print(" first nonzero probs:", [float(prob_dist[i]) for i in nonzero[:15]])
+        print(" nonzero vocab words:", [vocab_words[i] for i in nonzero])
+        print(" nonzero probs:", [float(prob_dist[i]) for i in nonzero])
 
-    if args.show_matches and captions:
-        matched_idxs = extract_caption_words(captions[0], vocab_to_idx)
-        print(
-            " matched vocab phrases from first caption:",
-            [vocab_words[i] for i in matched_idxs],
-        )
+    print("\nAll captions for this sample:")
+    for i, cap in enumerate(captions, start=1):
+        matched_idxs = extract_caption_words(cap, vocab_to_idx)
+        matched_words = [vocab_words[j] for j in matched_idxs]
+        print(f" {i}. {cap}")
+        print(f"    matched: {matched_words}")
 
     loader = DataLoader(
         dataset,
