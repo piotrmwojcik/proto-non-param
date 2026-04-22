@@ -1,12 +1,12 @@
-# build_clip_noun_cache.py
-
 import torch
 import open_clip
 from pathlib import Path
 
 
-VOCAB_PATH = "vocab/mscoco_new.txt"
-CACHE_PATH = "vocab/mscoco_new_cache.pt"
+VOCAB_PATH = "vocab/mscoco.txt"
+CACHE_PATH = "/net/tscratch/people/plgpiotrwojcik/vocab/mscoco_new_cache.pt"
+
+CKPT_PATH = "/net/tscratch/people/plgpiotrwojcik/open_clip_train_logs/cub_vitb32_openai_train_v2/checkpoints/epoch_latest.pt"
 
 
 @torch.no_grad()
@@ -14,35 +14,60 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load nouns
+    # -------------------------
+    # Load vocab
+    # -------------------------
     with open(VOCAB_PATH, "r", encoding="utf-8") as f:
         nouns = [line.strip() for line in f if line.strip()]
 
     print(f"Loaded {len(nouns)} nouns")
 
-    # Load CLIP
+    # -------------------------
+    # Build CLIP model (same arch!)
+    # -------------------------
     model, _, _ = open_clip.create_model_and_transforms(
         "ViT-B-32",
-        pretrained="openai",
+        pretrained=None,  # IMPORTANT: do NOT load openai weights
     )
-    tokenizer = open_clip.get_tokenizer("ViT-B-32")
+
+    # -------------------------
+    # Load checkpoint
+    # -------------------------
+    ckpt = torch.load(CKPT_PATH, map_location="cpu")
+
+    state_dict = ckpt.get("state_dict", ckpt)
+
+    # remove possible "module." prefix (DDP training)
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("module.", "")
+        new_state_dict[new_key] = v
+
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+
+    print("Loaded checkpoint")
+    print("Missing keys:", len(missing))
+    print("Unexpected keys:", len(unexpected))
 
     model = model.eval().to(device)
 
+    tokenizer = open_clip.get_tokenizer("ViT-B-32")
+
+    # -------------------------
+    # Encode vocab
+    # -------------------------
     batch_size = 256
     cache = {}
 
     for i in range(0, len(nouns), batch_size):
 
-        batch = nouns[i:i + batch_size]
+        batch = nouns[i : i + batch_size]
         prompts = [f"a photo of a {w}" for w in batch]
 
         tokens = tokenizer(prompts).to(device)
         text_features = model.encode_text(tokens)
 
-        # normalize like CLIP retrieval
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
         text_features = text_features.cpu()
 
         for word, feat in zip(batch, text_features):
@@ -50,9 +75,10 @@ def main():
 
         print(f"Processed {min(i + batch_size, len(nouns))}/{len(nouns)}")
 
-    # Ensure output directory exists
+    # -------------------------
+    # Save cache
+    # -------------------------
     Path(CACHE_PATH).parent.mkdir(parents=True, exist_ok=True)
-
     torch.save(cache, CACHE_PATH)
 
     print(f"\nSaved CLIP cache to: {CACHE_PATH}")

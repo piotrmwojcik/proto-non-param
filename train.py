@@ -23,7 +23,12 @@ from tqdm import tqdm
 import torch.nn.functional as F
 
 from clip_dataset import CocoCLIPDataset, coco_clip_collate_fn
-from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
+from modeling.backbone import (
+    DINOv2Backbone,
+    DINOv2BackboneExpanded,
+    DINOBackboneExpanded,
+    CLIPBackbone,
+)
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
 
@@ -45,7 +50,9 @@ def denorm_to_uint8(
     return x
 
 
-def overlay_heatmap(img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45) -> np.ndarray:
+def overlay_heatmap(
+    img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
+) -> np.ndarray:
     hm = hm.detach().cpu()
     hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
     hm = hm.numpy()
@@ -109,14 +116,14 @@ def wandb_log_top_proto_heatmaps(
       - top-k prototype heatmaps with prototype words / scores
       - rectangle around high-activation region on each heatmap
     """
-    patch_logits = outputs["patch_prototype_logits"]   # [B, N, V]
-    mix_weights = outputs["mixture_weights"]           # [B, V]
+    patch_logits = outputs["patch_prototype_logits"]  # [B, N, V]
+    mix_weights = outputs["mixture_weights"]  # [B, V]
 
     B, N, V = patch_logits.shape
     H = W = int(math.sqrt(N))
     _, _, Hi, Wi = images.shape
 
-    top_vals, top_idx = mix_weights.topk(k=top_k, dim=-1)   # [B, K]
+    top_vals, top_idx = mix_weights.topk(k=top_k, dim=-1)  # [B, K]
 
     sample_grids = []
     B_log = min(B, max_items)
@@ -171,7 +178,7 @@ def wandb_log_top_proto_heatmaps(
             ax.set_title(title, fontsize=10)
             ax.axis("off")
 
-        for ax in axes[len(panel_imgs):]:
+        for ax in axes[len(panel_imgs) :]:
             ax.axis("off")
 
         suptitle = raw_caption
@@ -181,9 +188,7 @@ def wandb_log_top_proto_heatmaps(
         fig.suptitle(suptitle, fontsize=11)
         plt.tight_layout(rect=[0, 0, 1, 0.92])
 
-        sample_grids.append(
-            wandb.Image(fig, caption=f"sample={b}")
-        )
+        sample_grids.append(wandb.Image(fig, caption=f"sample={b}"))
         plt.close(fig)
 
     log_dict = {
@@ -192,6 +197,7 @@ def wandb_log_top_proto_heatmaps(
     }
 
     wandb.log(log_dict)
+
 
 def train(
     model: nn.Module,
@@ -236,7 +242,9 @@ def train(
                 print(f"  {w:15s} {s:.7f}")
 
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices, captions), model)
+        loss_dict = criterion(
+            outputs, (images, words_sim_distribution, indices, captions), model
+        )
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
         if not isinstance(loss, torch.Tensor):
@@ -290,8 +298,8 @@ def test(
         # Caption → noun distribution
         # --------------------------
 
-        #B, D = img_feat.shape
-        #V = noun_embeddings.shape[0]
+        # B, D = img_feat.shape
+        # V = noun_embeddings.shape[0]
 
         images, captions, target_dist, indices = batch
         images = images.to(device, non_blocking=True)
@@ -302,7 +310,9 @@ def test(
         # Model forward
         # --------------------------
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices, captions), model)
+        loss_dict = criterion(
+            outputs, (images, words_sim_distribution, indices, captions), model
+        )
 
         bs = images.size(0)
         num_samples += bs
@@ -315,12 +325,10 @@ def test(
         # --------------------------
         log_batches = set(
             random.sample(
-                range(len(dataloader)),
-                k=max(1, len(dataloader) // log_every)
+                range(len(dataloader)), k=max(1, len(dataloader) // log_every)
             )
         )
 
-        print('!!! ', log_batches)
         # choose random image in the batch
         b = random.randrange(images.shape[0])
 
@@ -338,10 +346,7 @@ def test(
                 if "mixture_weights" in outputs:
                     topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
 
-                    words = [
-                        model.vocab_words[j]
-                        for j in topk_idx[b].tolist()
-                    ]
+                    words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
 
                     log_dict["eval/top_words"] = ", ".join(words)
 
@@ -355,10 +360,18 @@ def test(
                 # --------------------------
                 wandb_log_top_proto_heatmaps(
                     model=model,
-                    images=images[b:b + 1],
-                    outputs={k: v[b:b + 1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
-                        v.shape) > 0 and v.shape[0] == images.shape[0] else v
-                             for k, v in outputs.items()},
+                    images=images[b : b + 1],
+                    outputs={
+                        k: (
+                            v[b : b + 1]
+                            if hasattr(v, "__getitem__")
+                            and getattr(v, "shape", None) is not None
+                            and len(v.shape) > 0
+                            and v.shape[0] == images.shape[0]
+                            else v
+                        )
+                        for k, v in outputs.items()
+                    },
                     step=global_step,
                     captions=[captions[b]],
                     log_tsne=False,
@@ -376,13 +389,16 @@ def test(
             v for k, v in avg_losses.items() if not k.startswith("_")
         )
 
-        wandb.log({
-            "epoch": epoch,
-            "global_step": epoch * train_steps_per_epoch + len(dataloader) - 1,
-            **{f"test/{k}": v for k, v in avg_losses.items()},
-        })
+        wandb.log(
+            {
+                "epoch": epoch,
+                "global_step": epoch * train_steps_per_epoch + len(dataloader) - 1,
+                **{f"test/{k}": v for k, v in avg_losses.items()},
+            }
+        )
 
         return avg_losses
+
 
 def build_backbone(args):
     if "dinov2" in args.backbone:
@@ -415,7 +431,7 @@ def build_backbone(args):
     # ---------------------------------------------------
     # Freeze everything first
     # ---------------------------------------------------
-    #for p in backbone.parameters():
+    # for p in backbone.parameters():
     #    p.requires_grad = False
 
     return backbone, dim
@@ -428,14 +444,17 @@ def main():
     parser.add_argument("--log-dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip"])
-    parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
+    parser.add_argument(
+        "--dataset", type=str, default="coco_clip", choices=["coco_clip"]
+    )
+    parser.add_argument(
+        "--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/"
+    )
     parser.add_argument("--coco-val-ratio", type=float, default=0.1)
     parser.add_argument("--coco-clip-model-name", type=str, default="ViT-B-32")
     parser.add_argument("--coco-clip-pretrained", type=str, default="openai")
     parser.add_argument("--visual-coef", type=float, default=0.0)
     parser.add_argument("--cover-coef", type=float, default=0.0)
-
 
     parser.add_argument(
         "--backbone",
@@ -455,7 +474,9 @@ def main():
         help="Number of last transformer blocks to unfreeze in the backbone",
     )
 
-    parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt")
+    parser.add_argument(
+        "--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt"
+    )
     parser.add_argument("--clip-text-dim", type=int, default=512)
     parser.add_argument("--kl-coef", type=float, default=1.0)
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
@@ -509,7 +530,7 @@ def main():
     vocab_words = list(cache.keys())
     vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
 
-    print('Building datasets')
+    print("Building datasets")
 
     dataset_train = CocoCLIPDataset(
         annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
@@ -525,9 +546,9 @@ def main():
         train=False,
     )
 
-    print('Done with datasets')
-    print('Train: ', len(dataset_train))
-    print('Test: ', len(dataset_test))
+    print("Done with datasets")
+    print("Train: ", len(dataset_train))
+    print("Test: ", len(dataset_test))
 
     dataloader_train = DataLoader(
         dataset=dataset_train,
@@ -569,7 +590,7 @@ def main():
         clip_model=clip_model,  # ← added
     )
     # freeze backbone first
-    #for p in net.backbone.parameters():
+    # for p in net.backbone.parameters():
     #    p.requires_grad = False
 
     bb = net.backbone
@@ -604,14 +625,14 @@ def main():
                 print(name)
             raise AttributeError("Could not find transformer blocks in net.backbone")
 
-        #n_blocks = len(blocks)
-        #start = max(0, n_blocks - args.unfreeze_last_blocks)
+        # n_blocks = len(blocks)
+        # start = max(0, n_blocks - args.unfreeze_last_blocks)
 
-        #for block in blocks[start:]:
+        # for block in blocks[start:]:
         #    for p in block.parameters():
         #        p.requires_grad = True
 
-        #print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
+        # print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
 
         for name, p in bb.named_parameters():
             if p.requires_grad:
@@ -634,11 +655,12 @@ def main():
     # add backbone as separate group
     backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
     if backbone_params:
-        param_groups.append({
-            "params": backbone_params,
-            "lr": args.backbone_lr,
-        })
-
+        param_groups.append(
+            {
+                "params": backbone_params,
+                "lr": args.backbone_lr,
+            }
+        )
 
     optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
@@ -665,7 +687,7 @@ def main():
             clip_model=clip_model,
             noun_embeddings=noun_embeddings,
             target_temperature=0.01,
-            vocab_to_idx=vocab_to_idx
+            vocab_to_idx=vocab_to_idx,
         )
 
         epoch_metrics = test(
@@ -681,12 +703,15 @@ def main():
         )
 
         epoch_metric = -sum(
-            v for k, v in epoch_metrics.items()
+            v
+            for k, v in epoch_metrics.items()
             if k.startswith("test/") and not k.startswith("test/_")
         )
         torch.save(
             {
-                "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+                "state_dict": {
+                    k: v.detach().cpu() for k, v in net.state_dict().items()
+                },
                 "hparams": vars(args),
             },
             log_dir / "ckpt.pth",
@@ -694,7 +719,9 @@ def main():
         logger.info("Model saved as ckpt.pth")
         torch.save(
             {
-                "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+                "state_dict": {
+                    k: v.detach().cpu() for k, v in net.state_dict().items()
+                },
                 "hparams": vars(args),
             },
             log_dir / "ckpt.pth",
@@ -705,7 +732,9 @@ def main():
             best_val_cosine = epoch_metric
             best_epoch = epoch
 
-    logger.info(f"DONE! Best epoch is epoch {best_epoch} with cosine similarity {best_val_cosine:.4f}.")
+    logger.info(
+        f"DONE! Best epoch is epoch {best_epoch} with cosine similarity {best_val_cosine:.4f}."
+    )
 
 
 if __name__ == "__main__":
