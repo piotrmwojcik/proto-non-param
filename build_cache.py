@@ -3,8 +3,8 @@ import open_clip
 from pathlib import Path
 
 
-VOCAB_PATH = "vocab/mscoco.txt"
-CACHE_PATH = "/net/tscratch/people/plgpiotrwojcik/vocab/mscoco_new_cache.pt"
+VOCAB_PATH = "vocab/birds.txt"
+CACHE_PATH = "/net/tscratch/people/plgpiotrwojcik/vocab/birds_cache.pt"
 
 CKPT_PATH = "/net/tscratch/people/plgpiotrwojcik/open_clip_train_logs/cub_vitb32_openai_train_v2/checkpoints/epoch_latest.pt"
 
