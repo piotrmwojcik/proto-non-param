@@ -15,7 +15,7 @@ from sklearn.manifold import TSNE
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 
-from test_cub_dataset_local import CUBCLIPDataset
+from test_cub_dataset_local import CUBCLIPDataset, cub_clip_collate_fn
 import wandb
 import lightning as L
 import torch
@@ -565,7 +565,7 @@ def main():
         dataset=dataset_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=coco_clip_collate_fn,
+        collate_fn=cub_clip_collate_fn,
         shuffle=True,
         pin_memory=True,
     )
@@ -574,7 +574,7 @@ def main():
         dataset=dataset_test,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=coco_clip_collate_fn,
+        collate_fn=cub_clip_collate_fn,
         shuffle=False,
         pin_memory=True,
     )
