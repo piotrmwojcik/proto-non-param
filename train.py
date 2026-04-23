@@ -580,7 +580,7 @@ def main():
     )
     backbone, dim = build_backbone(args)
 
-    model, _, _ = open_clip.create_model_and_transforms(
+    clip_model, _, _ = open_clip.create_model_and_transforms(
         "ViT-B-32",
         pretrained=None,
     )
@@ -596,9 +596,9 @@ def main():
                 new_key = new_key[len(prefix) :]
         cleaned_state_dict[new_key] = v
 
-    missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=False)
+    missing, unexpected = clip_model.load_state_dict(cleaned_state_dict, strict=False)
 
-    model = model.eval().to(device)
+    clip_model = clip_model.eval().to(device)
 
     print("Loaded checkpoint:", args.coco_clip_pretrained)
     print("Missing keys:", len(missing))
@@ -607,7 +607,7 @@ def main():
         print("First missing keys:", missing[:20])
     if unexpected:
         print("First unexpected keys:", unexpected[:20])
-    for p in model.parameters():
+    for p in clip_model.parameters():
         p.requires_grad = False
 
     net = PNP(
@@ -618,7 +618,7 @@ def main():
         text_proj_hidden_dim=args.text_proj_hidden_dim,
         vocab_cache_path=args.vocab_cache_path,
         prototype_init_noise=args.prototype_init_noise,
-        clip_model=model,  # ← added
+        clip_model=clip_model,  # ← added
     )
     # freeze backbone first
     # for p in net.backbone.parameters():
