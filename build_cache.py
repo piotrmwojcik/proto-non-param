@@ -27,27 +27,31 @@ def main():
     # -------------------------
     model, _, _ = open_clip.create_model_and_transforms(
         "ViT-B-32",
-        pretrained=None,  # IMPORTANT: do NOT load openai weights
+        pretrained=None,
     )
 
-    # -------------------------
-    # Load checkpoint
-    # -------------------------
     ckpt = torch.load(CKPT_PATH, map_location="cpu")
-
     state_dict = ckpt.get("state_dict", ckpt)
 
-    # remove possible "module." prefix (DDP training)
-    new_state_dict = {}
+    cleaned_state_dict = {}
     for k, v in state_dict.items():
-        new_key = k.replace("module.", "")
-        new_state_dict[new_key] = v
+        new_key = k
+        for prefix in ("module.", "model.", "_orig_mod."):
+            if new_key.startswith(prefix):
+                new_key = new_key[len(prefix) :]
+        cleaned_state_dict[new_key] = v
 
-    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=False)
 
-    print("Loaded checkpoint")
+    model = model.eval().to(device)
+
+    print("Loaded checkpoint: ", CKPT_PATH, flush=True)
     print("Missing keys:", len(missing))
     print("Unexpected keys:", len(unexpected))
+    if missing:
+        print("First missing keys:", missing[:20])
+    if unexpected:
+        print("First unexpected keys:", unexpected[:20])
 
     model = model.eval().to(device)
 
