@@ -391,19 +391,11 @@ def main():
     print(f"Vocab size: {len(vocab_words)}")
     print(f"Noun embeddings shape: {tuple(noun_embeddings.shape)}")
 
-    dataset_train = CUBCLIPDataset(
-        csv_path="/net/tscratch/people/plgpiotrwojcik/cub_captions_simple_train.csv",
+    dataset = CUBCLIPDataset(
+        csv_path=args.csv_path,
         vocab_to_idx=vocab_to_idx,
-        train=True,
-        device=str(device),
-        seed=args.seed,
-    )
-
-    dataset_test = CUBCLIPDataset(
-        csv_path="/net/tscratch/people/plgpiotrwojcik/cub_captions_simple_test.csv",
-        vocab_to_idx=vocab_to_idx,
-        train=False,
-        device=str(device),
+        train=args.train,
+        device=args.device,
         seed=args.seed,
     )
 
