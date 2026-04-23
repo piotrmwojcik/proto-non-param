@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=download_vg
 #SBATCH --partition=plgrid-gpu-a100
-#SBATCH --account=plgbcfg-gpu-a100
+#SBATCH --account=plgunhype-gpu-a100
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=12:00:00

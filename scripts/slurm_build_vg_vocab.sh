@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=build_vg_vocab
 #SBATCH --partition=plgrid-gpu-a100
-#SBATCH --account=plgbcfg-gpu-a100
+#SBATCH --account=plgunhype-gpu-a100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
