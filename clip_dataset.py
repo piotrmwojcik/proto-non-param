@@ -784,7 +784,7 @@ class VisualGenomeDataset(Dataset):
             torch.save({"samples": self.samples}, cache_path)
             print(f"Saved VG cache to: {cache_path}")
 
-    def _find_image_path(self, image_id: int) -> str | None:
+    def _find_image_path(self, image_id: int) -> "str | None":
         for shard in ("VG_100K", "VG_100K_2"):
             path = os.path.join(self.vg_root, shard, f"{image_id}.jpg")
             if os.path.isfile(path):
