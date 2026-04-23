@@ -82,40 +82,88 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]) -> list[in
     """
     Strict CUB attribute extractor.
 
-    Examples:
-      'black eyes'    -> eye color black
-      'spotted head'  -> head pattern spotted
-      'red throat'    -> throat color red
-      'brown legs'    -> leg color brown
+    Only matches explicit local phrases like:
+      - 'red bill' -> bill color red
+      - 'black eyes' -> eye color black
+      - 'spotted head' -> head pattern spotted
+      - 'grey back' -> back color grey
+
+    Does NOT use noun+adjective fallback, which causes false positives across commas.
     """
-    text = normalize_caption_text(caption)
+    text = caption.lower()
+
+    replacements = {
+        "eyes": "eye",
+        "legs": "leg",
+        "wings": "wing",
+        "bills": "bill",
+        "beak": "bill",
+        "beaks": "bill",
+        "tails": "tail",
+        "breasts": "breast",
+        "throats": "throat",
+        "foreheads": "forehead",
+        "gray": "grey",
+        "multi colored": "multi-colored",
+    }
+
+    for src, dst in replacements.items():
+        text = re.sub(rf"\b{re.escape(src)}\b", dst, text)
+
     tokens = re.findall(r"[a-zA-Z-]+", text)
 
-    matched_phrases: list[str] = []
+    colors = {
+        "blue",
+        "brown",
+        "iridescent",
+        "purple",
+        "rufous",
+        "grey",
+        "yellow",
+        "olive",
+        "green",
+        "pink",
+        "orange",
+        "black",
+        "white",
+        "red",
+        "buff",
+    }
+    patterns = {"solid", "spotted", "striped", "multi-colored"}
+
+    color_parts = {
+        "wing",
+        "upperparts",
+        "underparts",
+        "back",
+        "breast",
+        "throat",
+        "eye",
+        "forehead",
+        "nape",
+        "belly",
+        "leg",
+        "bill",
+        "crown",
+        "primary",
+    }
+    pattern_parts = {"breast", "head", "back", "tail", "belly", "wing"}
+
+    matched_phrases = []
 
     def add_phrase(phrase: str):
         if phrase in vocab_to_idx and phrase not in matched_phrases:
             matched_phrases.append(phrase)
 
-    n = len(tokens)
-
-    for i in range(n - 1):
+    for i in range(len(tokens) - 1):
         a, b = tokens[i], tokens[i + 1]
 
-        # adjective + noun, e.g. "black eye", "red throat"
-        if a in COLORS and b in COLOR_PARTS:
+        # adjective + noun only
+        if a in colors and b in color_parts:
             add_phrase(f"{b} color {a}")
 
-        # adjective + noun, e.g. "spotted head"
-        if a in PATTERNS and b in PATTERN_PARTS:
+        if a in patterns and b in pattern_parts:
             add_phrase(f"{b} pattern {a}")
-
-        # noun + adjective fallback, e.g. "eye black"
-        if a in COLOR_PARTS and b in COLORS:
-            add_phrase(f"{a} color {b}")
-
-        if a in PATTERN_PARTS and b in PATTERNS:
-            add_phrase(f"{a} pattern {b}")
 
     return [vocab_to_idx[p] for p in matched_phrases]
 
