@@ -618,7 +618,7 @@ def main():
         text_proj_hidden_dim=args.text_proj_hidden_dim,
         vocab_cache_path=args.vocab_cache_path,
         prototype_init_noise=args.prototype_init_noise,
-        clip_model=clip_model,  # ← added
+        clip_model=model,  # ← added
     )
     # freeze backbone first
     # for p in net.backbone.parameters():
