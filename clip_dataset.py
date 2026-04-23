@@ -672,3 +672,130 @@ class AwA2CLIPDataset(Dataset):
         img = Image.open(im_path).convert("RGB")
         img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
         return img_tensor, attr_words, prob_dist, index
+
+
+class VisualGenomeDataset(Dataset):
+    """Visual Genome dataset using region description phrases as vocabulary supervision.
+
+    Each image's word-frequency distribution is built from all region phrases
+    attached to that image, using the same NLTK extraction pipeline as COCO.
+
+    Train/val split is a random 90/10 partition of image IDs (reproducible via seed).
+    Images whose region phrases contain no vocabulary words are skipped.
+
+    Expected on-disk layout:
+        vg_root/
+            VG_100K/        <- first image shard (~60 K images)
+            VG_100K_2/      <- second image shard (~48 K images)
+        region_descriptions_json  (region_descriptions.json from VG v1.4)
+    """
+
+    def __init__(
+        self,
+        vg_root: str,
+        region_descriptions_json: str,
+        vocab_to_idx: dict,
+        train: bool = True,
+        val_ratio: float = 0.1,
+        seed: int = 42,
+        cache_dir: str = None,
+        use_cache: bool = True,
+    ):
+        self.vg_root = vg_root
+        self.vocab_to_idx = vocab_to_idx
+        self.vocab_size = len(vocab_to_idx)
+        self.train = train
+
+        self.train_transform = v2.Compose([
+            v2.RandomResizedCrop(size=224, scale=(0.8, 1.0),
+                                 interpolation=v2.InterpolationMode.BICUBIC),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.ToTensor(),
+            v2.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+        self.eval_transform = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+
+        split_tag = "train" if train else "val"
+        # cache key encodes split params so train/val caches never collide
+        cache_key = f"vg_{split_tag}_valratio{val_ratio}_seed{seed}_{region_descriptions_json}"
+        cache_path = _make_cache_path(cache_key, vocab_to_idx, cache_dir)
+
+        if use_cache and os.path.exists(cache_path):
+            print(f"Loading VG dataset cache from: {cache_path}")
+            cached = torch.load(cache_path, map_location="cpu")
+            self.samples = cached["samples"]
+            print(f"Loaded {len(self.samples)} cached samples")
+            return
+
+        print("Building VisualGenomeDataset — may take a few minutes on first run...")
+        with open(region_descriptions_json, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        # raw: list of {id: int, regions: [{region_id, image_id, phrase, x, y, w, h}, ...]}
+        all_samples = []
+        for entry in raw:
+            image_id = entry["id"]
+            phrases = [
+                r["phrase"] for r in entry.get("regions", [])
+                if r.get("phrase", "").strip()
+            ]
+            if not phrases:
+                continue
+
+            im_path = self._find_image_path(image_id)
+            if im_path is None:
+                continue
+
+            counts = Counter()
+            total_valid = 0
+            for phrase in phrases:
+                word_idxs = extract_caption_words(phrase, vocab_to_idx)
+                for wi in word_idxs:
+                    counts[wi] += 1
+                total_valid += len(word_idxs)
+
+            if total_valid == 0:
+                continue
+
+            prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+            for wi, cnt in counts.items():
+                prob_dist[wi] = cnt / total_valid
+
+            all_samples.append((im_path, phrases, prob_dist))
+
+        # Deterministic 90/10 train/val split over shuffled index list
+        rng = random.Random(seed)
+        indices = list(range(len(all_samples)))
+        rng.shuffle(indices)
+        n_val = max(1, int(len(indices) * val_ratio))
+        val_set = set(indices[:n_val])
+        train_set = set(indices[n_val:])
+
+        chosen = train_set if train else val_set
+        self.samples = [all_samples[i] for i in sorted(chosen)]
+
+        print(f"Done. VG {split_tag} samples: {len(self.samples)}")
+
+        if use_cache:
+            torch.save({"samples": self.samples}, cache_path)
+            print(f"Saved VG cache to: {cache_path}")
+
+    def _find_image_path(self, image_id: int) -> str | None:
+        for shard in ("VG_100K", "VG_100K_2"):
+            path = os.path.join(self.vg_root, shard, f"{image_id}.jpg")
+            if os.path.isfile(path):
+                return path
+        return None
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        im_path, phrases, prob_dist = self.samples[index]
+        img = Image.open(im_path).convert("RGB")
+        img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
+        return img_tensor, phrases, prob_dist, index

@@ -22,7 +22,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch.nn.functional as F
 
-from clip_dataset import CocoCLIPDataset, Caltech101CLIPDataset, CUBCLIPDataset, AwA2CLIPDataset, coco_clip_collate_fn
+from clip_dataset import (CocoCLIPDataset, Caltech101CLIPDataset, CUBCLIPDataset,
+                           AwA2CLIPDataset, VisualGenomeDataset, coco_clip_collate_fn)
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -430,7 +431,8 @@ def main():
     parser.add_argument("--log-dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--dataset", type=str, default="coco_clip", choices=["coco_clip", "caltech101", "cub200", "awa2"])
+    parser.add_argument("--dataset", type=str, default="coco_clip",
+                        choices=["coco_clip", "caltech101", "cub200", "awa2", "visual_genome"])
     parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
     parser.add_argument("--caltech-root", type=str, default=None, help="Path to caltech101 directory")
     parser.add_argument("--caltech-descriptions", type=str, default=None, help="Path to caltech101_descriptions.json")
@@ -438,6 +440,12 @@ def main():
     parser.add_argument("--cub-annotations", type=str, default=None, help="Path to CUB annotations dir (contains attributes/)")
     parser.add_argument("--awa-root", type=str, default=None, help="Path to AwA2 organized directory")
     parser.add_argument("--awa-annotations", type=str, default=None, help="Path to AwA2 annotations dir (contains predicates.txt)")
+    parser.add_argument("--vg-root", type=str, default=None,
+                        help="Path to VG image root (contains VG_100K/ and VG_100K_2/)")
+    parser.add_argument("--vg-region-descriptions", type=str, default=None,
+                        help="Path to region_descriptions.json (VG v1.4)")
+    parser.add_argument("--vg-val-ratio", type=float, default=0.1,
+                        help="Fraction of VG images used for validation (default: 0.1)")
     parser.add_argument("--coco-annotations-train", type=str, default="/data/pwojcik/coco_2014/annotations/captions_train2014.json")
     parser.add_argument("--coco-annotations-val", type=str, default="/data/pwojcik/coco_2014/annotations/captions_val2014.json")
     parser.add_argument("--coco-val-ratio", type=float, default=0.1)
@@ -567,6 +575,25 @@ def main():
             annotations_dir=args.awa_annotations,
             vocab_to_idx=vocab_to_idx,
             train=False,
+        )
+    elif args.dataset == "visual_genome":
+        if args.vg_root is None or args.vg_region_descriptions is None:
+            raise ValueError("--vg-root and --vg-region-descriptions are required for visual_genome dataset")
+        dataset_train = VisualGenomeDataset(
+            vg_root=args.vg_root,
+            region_descriptions_json=args.vg_region_descriptions,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+            val_ratio=args.vg_val_ratio,
+            seed=args.seed,
+        )
+        dataset_test = VisualGenomeDataset(
+            vg_root=args.vg_root,
+            region_descriptions_json=args.vg_region_descriptions,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+            val_ratio=args.vg_val_ratio,
+            seed=args.seed,
         )
     else:
         dataset_train = CocoCLIPDataset(
