@@ -53,6 +53,56 @@ COLOR_PARTS = {
 
 PATTERN_PARTS = {"breast", "head", "back", "tail", "belly", "wing"}
 
+TAIL_SHAPES = {
+    "forked": "tail shape forked tail",
+    "rounded": "tail shape rounded tail",
+    "notched": "tail shape notched tail",
+    "fan-shaped": "tail shape fan-shaped tail",
+    "pointed": "tail shape pointed tail",
+    "squared": "tail shape squared tail",
+}
+
+BILL_SHAPES = {
+    "curved": "bill shape curved (up or down)",
+    "dagger": "bill shape dagger",
+    "hooked": "bill shape hooked",
+    "needle": "bill shape needle",
+    "spatulate": "bill shape spatulate",
+    "cone": "bill shape cone",
+    "specialized": "bill shape specialized",
+}
+
+SIZE_PHRASES = {
+    "large": "size large (16 - 32 in)",
+    "small": "size small (5 - 9 in)",
+    "very large": "size very large (32 - 72 in)",
+    "medium": "size medium (9 - 16 in)",
+    "very small": "size very small (3 - 5 in)",
+}
+
+SHAPE_PHRASES = {
+    "upright-perching water-like": "shape upright-perching water-like",
+    "chicken-like-marsh": "shape chicken-like-marsh",
+    "long-legged-like": "shape long-legged-like",
+    "duck-like": "shape duck-like",
+    "owl-like": "shape owl-like",
+    "gull-like": "shape gull-like",
+    "hummingbird-like": "shape hummingbird-like",
+    "pigeon-like": "shape pigeon-like",
+    "tree-clinging-like": "shape tree-clinging-like",
+    "hawk-like": "shape hawk-like",
+    "sandpiper-like": "shape sandpiper-like",
+    "upland-ground-like": "shape upland-ground-like",
+    "swallow-like": "shape swallow-like",
+    "perching-like": "shape perching-like",
+}
+
+BILL_LENGTH_PHRASES = {
+    "about the same as head": "bill length about the same as head",
+    "longer than head": "bill length longer than head",
+    "shorter than head": "bill length shorter than head",
+}
+
 
 def normalize_caption_text(caption: str) -> str:
     text = caption.lower()
@@ -75,6 +125,7 @@ def normalize_caption_text(caption: str) -> str:
     for src, dst in replacements.items():
         text = re.sub(rf"\b{re.escape(src)}\b", dst, text)
 
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -82,88 +133,63 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]) -> list[in
     """
     Strict CUB attribute extractor.
 
-    Only matches explicit local phrases like:
-      - 'red bill' -> bill color red
-      - 'black eyes' -> eye color black
-      - 'spotted head' -> head pattern spotted
-      - 'grey back' -> back color grey
-
-    Does NOT use noun+adjective fallback, which causes false positives across commas.
+    Supports:
+    - color + part: "red bill" -> bill color red
+    - pattern + part: "spotted head" -> head pattern spotted
+    - tail shape: "notched tail" -> tail shape notched tail
+    - size: "small (5 - 9 in) size" -> size small (5 - 9 in)
+    - shape: "perching-like shape" -> shape perching-like
+    - bill shape: "hooked bill" -> bill shape hooked
+    - bill length: "bill longer than head" -> bill length longer than head
     """
-    text = caption.lower()
-
-    replacements = {
-        "eyes": "eye",
-        "legs": "leg",
-        "wings": "wing",
-        "bills": "bill",
-        "beak": "bill",
-        "beaks": "bill",
-        "tails": "tail",
-        "breasts": "breast",
-        "throats": "throat",
-        "foreheads": "forehead",
-        "gray": "grey",
-        "multi colored": "multi-colored",
-    }
-
-    for src, dst in replacements.items():
-        text = re.sub(rf"\b{re.escape(src)}\b", dst, text)
-
+    text = normalize_caption_text(caption)
     tokens = re.findall(r"[a-zA-Z-]+", text)
 
-    colors = {
-        "blue",
-        "brown",
-        "iridescent",
-        "purple",
-        "rufous",
-        "grey",
-        "yellow",
-        "olive",
-        "green",
-        "pink",
-        "orange",
-        "black",
-        "white",
-        "red",
-        "buff",
-    }
-    patterns = {"solid", "spotted", "striped", "multi-colored"}
-
-    color_parts = {
-        "wing",
-        "upperparts",
-        "underparts",
-        "back",
-        "breast",
-        "throat",
-        "eye",
-        "forehead",
-        "nape",
-        "belly",
-        "leg",
-        "bill",
-        "crown",
-        "primary",
-    }
-    pattern_parts = {"breast", "head", "back", "tail", "belly", "wing"}
-
-    matched_phrases = []
+    matched_phrases: list[str] = []
 
     def add_phrase(phrase: str):
         if phrase in vocab_to_idx and phrase not in matched_phrases:
             matched_phrases.append(phrase)
 
+    # 1) local adjective+noun rules only
     for i in range(len(tokens) - 1):
         a, b = tokens[i], tokens[i + 1]
 
-        # adjective + noun only
-        if a in colors and b in color_parts:
+        if a in COLORS and b in COLOR_PARTS:
             add_phrase(f"{b} color {a}")
 
-        if a in patterns and b in pattern_parts:
+        if a in PATTERNS and b in PATTERN_PARTS:
             add_phrase(f"{b} pattern {a}")
+
+        if a in TAIL_SHAPES and b == "tail":
+            add_phrase(TAIL_SHAPES[a])
+
+        if a in BILL_SHAPES and b == "bill":
+            add_phrase(BILL_SHAPES[a])
+
+    # 2) size phrases
+    for key, phrase in SIZE_PHRASES.items():
+        if re.search(rf"\b{re.escape(key)}\b.*\bsize\b", text):
+            add_phrase(phrase)
+
+    # 3) shape phrases
+    for key, phrase in SHAPE_PHRASES.items():
+        if re.search(rf"\b{re.escape(key)}\b.*\bshape\b", text):
+            add_phrase(phrase)
+
+    # 4) bill length phrases
+    for key, phrase in BILL_LENGTH_PHRASES.items():
+        if re.search(rf"\bbill\b.*\b{re.escape(key)}\b", text):
+            add_phrase(phrase)
+
+    # 5) special exact phrases that may appear literally
+    special_literal_phrases = [
+        "bill shape hooked seabird",
+        "bill shape all-purpose",
+    ]
+    for phrase in special_literal_phrases:
+        if phrase in text:
+            add_phrase(phrase)
 
     return [vocab_to_idx[p] for p in matched_phrases]
 
