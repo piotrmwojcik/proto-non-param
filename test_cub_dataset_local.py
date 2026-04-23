@@ -322,9 +322,13 @@ class CUBCLIPDataset(Dataset):
 
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
 
-            if total_valid_words > 0:
-                for idx, cnt in counts.items():
-                    prob_dist[idx] = cnt / total_valid_words
+            if total_valid_words == 0:
+                print(f"Skipping no-attribute sample: {im_path}")
+                continue
+
+            prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+            for idx, cnt in counts.items():
+                prob_dist[idx] = cnt / total_valid_words
 
             samples.append((im_path, captions, prob_dist))
 
@@ -387,11 +391,19 @@ def main():
     print(f"Vocab size: {len(vocab_words)}")
     print(f"Noun embeddings shape: {tuple(noun_embeddings.shape)}")
 
-    dataset = CUBCLIPDataset(
-        csv_path=args.csv_path,
+    dataset_train = CUBCLIPDataset(
+        csv_path="/net/tscratch/people/plgpiotrwojcik/cub_captions_simple_train.csv",
         vocab_to_idx=vocab_to_idx,
-        train=args.train,
-        device=args.device,
+        train=True,
+        device=str(device),
+        seed=args.seed,
+    )
+
+    dataset_test = CUBCLIPDataset(
+        csv_path="/net/tscratch/people/plgpiotrwojcik/cub_captions_simple_test.csv",
+        vocab_to_idx=vocab_to_idx,
+        train=False,
+        device=str(device),
         seed=args.seed,
     )
 

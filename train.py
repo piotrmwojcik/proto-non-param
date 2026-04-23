@@ -14,6 +14,7 @@ from sklearn.manifold import TSNE
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 
+from test_cub_dataset_local import CUBCLIPDataset
 import wandb
 import lightning as L
 import torch
@@ -532,19 +533,25 @@ def main():
 
     print("Building datasets")
 
-    dataset_train = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
-        coco_root="/data/pwojcik/coco_2014",
+    dataset_train = CUBCLIPDataset(
+        csv_path="/net/tscratch/people/plgpiotrwojcik/cub_captions_simple_train.csv",
         vocab_to_idx=vocab_to_idx,
         train=True,
+        device=str(device),
+        seed=args.seed,
     )
 
-    dataset_test = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_val2014.json",
-        coco_root="/data/pwojcik/coco_2014",
+    dataset_test = CUBCLIPDataset(
+        csv_path="/net/tscratch/people/plgpiotrwojcik/cub_captions_simple_test.csv",
         vocab_to_idx=vocab_to_idx,
         train=False,
+        device=str(device),
+        seed=args.seed,
     )
+
+    print("Done with datasets")
+    print("Train: ", len(dataset_train))
+    print("Test: ", len(dataset_test))
 
     print("Done with datasets")
     print("Train: ", len(dataset_train))
@@ -567,7 +574,6 @@ def main():
         shuffle=False,
         pin_memory=True,
     )
-
     backbone, dim = build_backbone(args)
 
     clip_model, _, _ = open_clip.create_model_and_transforms(
