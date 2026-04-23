@@ -580,13 +580,34 @@ def main():
     )
     backbone, dim = build_backbone(args)
 
-    clip_model, _, _ = open_clip.create_model_and_transforms(
-        args.coco_clip_model_name,
-        pretrained=args.coco_clip_pretrained,
+    model, _, _ = open_clip.create_model_and_transforms(
+        "ViT-B-32",
+        pretrained=None,
     )
-    clip_model = clip_model.eval().to(device)
 
-    for p in clip_model.parameters():
+    ckpt = torch.load(args.coco_clip_pretrained, map_location="cpu")
+    state_dict = ckpt.get("state_dict", ckpt)
+
+    cleaned_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k
+        for prefix in ("module.", "model.", "_orig_mod."):
+            if new_key.startswith(prefix):
+                new_key = new_key[len(prefix) :]
+        cleaned_state_dict[new_key] = v
+
+    missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=False)
+
+    model = model.eval().to(device)
+
+    print("Loaded checkpoint:", args.coco_clip_pretrained)
+    print("Missing keys:", len(missing))
+    print("Unexpected keys:", len(unexpected))
+    if missing:
+        print("First missing keys:", missing[:20])
+    if unexpected:
+        print("First unexpected keys:", unexpected[:20])
+    for p in model.parameters():
         p.requires_grad = False
 
     net = PNP(
