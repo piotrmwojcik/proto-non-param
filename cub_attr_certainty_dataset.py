@@ -92,26 +92,32 @@ def load_bounding_boxes(bboxes_txt_path: str):
 
 def load_image_attribute_labels(attr_labels_path: str):
     """
-    image_attribute_labels.txt format:
-      image_id attribute_id is_present certainty_id time
+    image_attribute_labels.txt usually starts with:
+      image_id attribute_id is_present certainty_id ...
 
-    Returns:
-      image_id_to_attr_rows: dict[int, list[tuple[attr_id, is_present, certainty_id]]]
+    We only need the first 4 fields and ignore any extras.
     """
     image_id_to_attr_rows = defaultdict(list)
+
     with open(attr_labels_path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_num, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            image_id_str, attr_id_str, is_present_str, certainty_id_str, _time_str = (
-                line.split()
-            )
-            image_id = int(image_id_str)
-            attr_id = int(attr_id_str)
-            is_present = int(is_present_str)
-            certainty_id = int(certainty_id_str)
+
+            parts = line.split()
+            if len(parts) < 4:
+                raise ValueError(
+                    f"Expected at least 4 columns in {attr_labels_path} at line {line_num}, got: {parts}"
+                )
+
+            image_id = int(parts[0])
+            attr_id = int(parts[1])
+            is_present = int(parts[2])
+            certainty_id = int(parts[3])
+
             image_id_to_attr_rows[image_id].append((attr_id, is_present, certainty_id))
+
     return image_id_to_attr_rows
 
 
