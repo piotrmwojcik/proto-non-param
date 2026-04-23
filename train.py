@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from html import parser
 import sys
 import logging
 from collections import defaultdict
@@ -446,7 +447,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
-        "--dataset", type=str, default="coco_clip", choices=["coco_clip"]
+        "--dataset",
+        type=str,
+        default="coco_clip",
+        choices=["coco_clip", "cub_clip"],  # ← ADD THIS
     )
     parser.add_argument(
         "--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/"
