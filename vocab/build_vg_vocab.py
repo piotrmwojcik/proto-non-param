@@ -81,7 +81,7 @@ def main() -> None:
                         help="Output path for plain-text word list")
     parser.add_argument("--cache-out",  type=str, default="vocab/vg_cache.pt",
                         help="Output path for CLIP embedding cache (.pt)")
-    parser.add_argument("--clip-model-name",  type=str, default="ViT-L-14")
+    parser.add_argument("--clip-model-name",  type=str, default="ViT-B-32")
     parser.add_argument("--clip-pretrained",  type=str, default="openai")
     parser.add_argument("--min-count",    type=int,   default=5,
                         help="Minimum total occurrences across the dataset")
