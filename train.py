@@ -220,8 +220,9 @@ def train(
     running_losses = defaultdict(float)
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, target_dist, indices = batch
+        images, captions, target_dist, class_idxs, indices = batch
         images = images.to(device, non_blocking=True)
+        class_idxs = class_idxs.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
 
         # avoid exact zeros for KL / log-based losses
@@ -303,8 +304,9 @@ def test(
         # B, D = img_feat.shape
         # V = noun_embeddings.shape[0]
 
-        images, captions, target_dist, indices = batch
+        images, captions, target_dist, class_idxs, indices = batch
         images = images.to(device, non_blocking=True)
+        class_idxs = class_idxs.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
         words_sim_distribution = target_dist.clamp_min(1e-8)
 
