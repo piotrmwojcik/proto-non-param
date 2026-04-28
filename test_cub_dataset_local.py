@@ -234,6 +234,47 @@ def load_vocab_cache(vocab_cache_path: str, device: str = "cpu"):
     return vocab_words, vocab_to_idx, noun_embeddings
 
 
+import os
+import random
+import csv
+from collections import defaultdict, Counter
+
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+
+from torchvision import transforms
+from torchvision.transforms import v2
+
+
+def class_idx_from_path(im_path: str) -> int:
+    """
+    Example:
+    /.../images/001.Black_footed_Albatross/img.jpg -> 0
+    /.../cub_part_crops_clip/002.Laysan_Albatross/img.jpg -> 1
+    """
+    class_dir = os.path.basename(os.path.dirname(im_path))
+    class_id = int(class_dir.split(".")[0])
+    return class_id - 1
+
+
+def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]) -> list[int]:
+    """
+    Simple word extractor.
+    Replace this with your existing implementation if you already have one.
+    """
+    caption = caption.lower()
+    tokens = (
+        caption.replace(",", " ")
+        .replace(".", " ")
+        .replace("-", " ")
+        .replace("_", " ")
+        .split()
+    )
+
+    return [vocab_to_idx[t] for t in tokens if t in vocab_to_idx]
+
+
 class CUBCLIPDataset(Dataset):
     def __init__(
         self,
@@ -270,7 +311,8 @@ class CUBCLIPDataset(Dataset):
         self.eval_transform = transforms.Compose(
             [
                 transforms.Resize(
-                    (224, 224), interpolation=transforms.InterpolationMode.BICUBIC
+                    (224, 224),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
                 ),
                 transforms.ToTensor(),
                 transforms.Normalize(
@@ -283,15 +325,19 @@ class CUBCLIPDataset(Dataset):
         captions_per_image = defaultdict(list)
 
         print(f"Reading CSV: {csv_path}")
+
         with open(csv_path, "r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
+
             expected = {"filepath", "caption"}
             if reader.fieldnames is None:
                 raise ValueError(f"CSV has no header: {csv_path}")
+
             missing = expected - set(reader.fieldnames)
             if missing:
                 raise ValueError(
-                    f"CSV must contain columns {sorted(expected)}, missing: {sorted(missing)}"
+                    f"CSV must contain columns {sorted(expected)}, "
+                    f"missing: {sorted(missing)}"
                 )
 
             for row in reader:
@@ -304,6 +350,7 @@ class CUBCLIPDataset(Dataset):
                 captions_per_image[im_path].append(caption)
 
         print("Building samples")
+
         samples = []
 
         for im_path, captions in captions_per_image.items():
@@ -316,46 +363,71 @@ class CUBCLIPDataset(Dataset):
 
             for caption in captions:
                 attr_idxs = extract_caption_words(caption, self.vocab_to_idx)
+
                 for idx in attr_idxs:
                     counts[idx] += 1
-                total_valid_words += len(attr_idxs)
 
-            prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+                total_valid_words += len(attr_idxs)
 
             if total_valid_words == 0:
                 print(f"Skipping no-attribute sample: {im_path}")
                 continue
 
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+
             for idx, cnt in counts.items():
                 prob_dist[idx] = cnt / total_valid_words
 
-            samples.append((im_path, captions, prob_dist))
+            try:
+                class_idx = class_idx_from_path(im_path)
+            except Exception as e:
+                print(f"Skipping bad class path: {im_path} ({e})")
+                continue
+
+            samples.append(
+                {
+                    "filepath": im_path,
+                    "captions": captions,
+                    "prob_dist": prob_dist,
+                    "class_idx": class_idx,
+                }
+            )
 
         self.samples = samples
-        print(f"Done computing frequency. Total samples: {len(self.samples)}")
+
+        print(f"Done computing frequency.")
+        print(f"Total samples: {len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index: int):
-        im_path, captions, prob_dist = self.samples[index]
+        sample = self.samples[index]
+
+        im_path = sample["filepath"]
+        captions = sample["captions"]
+        prob_dist = sample["prob_dist"]
+        class_idx = sample["class_idx"]
 
         img = Image.open(im_path).convert("RGB")
+
         if self.train:
             img_tensor = self.train_transform(img)
         else:
             img_tensor = self.eval_transform(img)
 
-        return img_tensor, captions, prob_dist, index
+        return img_tensor, captions, prob_dist, class_idx, index
 
 
 def cub_clip_collate_fn(batch):
-    images, captions, prob_dists, indices = zip(*batch)
+    images, captions, prob_dists, class_idxs, indices = zip(*batch)
+
     images = torch.stack(images, dim=0)
     prob_dists = torch.stack(prob_dists, dim=0)
+    class_idxs = torch.tensor(class_idxs, dtype=torch.long)
     indices = torch.tensor(indices, dtype=torch.long)
-    return images, list(captions), prob_dists, indices
+
+    return images, list(captions), prob_dists, class_idxs, indices
 
 
 def main():
