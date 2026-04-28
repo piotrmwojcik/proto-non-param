@@ -432,7 +432,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--dataset", type=str, default="coco_clip",
-                        choices=["coco_clip", "caltech101", "cub200", "awa2", "visual_genome"])
+                        choices=["coco_clip", "caltech101", "cub200", "awa2", "visual_genome", "coco_vg"])
     parser.add_argument("--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/")
     parser.add_argument("--caltech-root", type=str, default=None, help="Path to caltech101 directory")
     parser.add_argument("--caltech-descriptions", type=str, default=None, help="Path to caltech101_descriptions.json")
@@ -595,6 +595,42 @@ def main():
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
         )
+    elif args.dataset == "coco_vg":
+        if args.vg_root is None or args.vg_region_descriptions is None:
+            raise ValueError("--vg-root and --vg-region-descriptions are required for coco_vg dataset")
+        from torch.utils.data import ConcatDataset
+        dataset_train = ConcatDataset([
+            VisualGenomeDataset(
+                vg_root=args.vg_root,
+                region_descriptions_json=args.vg_region_descriptions,
+                vocab_to_idx=vocab_to_idx,
+                train=True,
+                val_ratio=args.vg_val_ratio,
+                seed=args.seed,
+            ),
+            CocoCLIPDataset(
+                annotations_json=args.coco_annotations_train,
+                coco_root=args.coco_root,
+                vocab_to_idx=vocab_to_idx,
+                train=True,
+            ),
+        ])
+        dataset_test = ConcatDataset([
+            VisualGenomeDataset(
+                vg_root=args.vg_root,
+                region_descriptions_json=args.vg_region_descriptions,
+                vocab_to_idx=vocab_to_idx,
+                train=False,
+                val_ratio=args.vg_val_ratio,
+                seed=args.seed,
+            ),
+            CocoCLIPDataset(
+                annotations_json=args.coco_annotations_val,
+                coco_root=args.coco_root,
+                vocab_to_idx=vocab_to_idx,
+                train=False,
+            ),
+        ])
     else:
         dataset_train = CocoCLIPDataset(
             annotations_json=args.coco_annotations_train,
