@@ -23,9 +23,9 @@ python train.py \
   --dataset coco_vg \
   --vg-root /net/tscratch/people/plgabedychaj/vg \
   --vg-region-descriptions /net/tscratch/people/plgabedychaj/vg/region_descriptions.json \
-  --coco-root /net/tscratch/people/plgabedychaj/coco_dataset \
-  --coco-annotations-train /net/tscratch/people/plgabedychaj/coco_dataset/annotations/captions_train2014.json \
-  --coco-annotations-val /net/tscratch/people/plgabedychaj/coco_dataset/annotations/captions_val2014.json \
+  --coco-root /net/tscratch/people/plgabedychaj/coco_dataset/raw \
+  --coco-annotations-train /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_train2017.json \
+  --coco-annotations-val /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_val2017.json \
   --vocab-cache-path /net/tscratch/people/plgabedychaj/vocab/vg_cache.pt \
   --log-dir /net/tscratch/people/plgabedychaj/train_logs/coco_vg_baseline \
   --backbone dinov2_vitb14 \

@@ -191,6 +191,9 @@ class CocoCLIPDataset(Dataset):
         candidates = [
             os.path.join(self.coco_root, "train2014", file_name),
             os.path.join(self.coco_root, "val2014", file_name),
+            os.path.join(self.coco_root, "train2017", file_name),
+            os.path.join(self.coco_root, "val2017", file_name),
+            os.path.join(self.coco_root, file_name),
         ]
         for path in candidates:
             if os.path.isfile(path):
