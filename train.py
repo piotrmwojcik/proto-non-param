@@ -119,18 +119,29 @@ def wandb_log_top_proto_heatmaps(
 
     top_vals, top_idx = mix_weights.topk(k=top_k, dim=-1)   # [B, K]
 
-    sample_grids = []
     B_log = min(B, max_items)
+    ncols = 1 + top_k  # raw + one column per prototype
+
+    fig, axes = plt.subplots(
+        nrows=B_log,
+        ncols=ncols,
+        figsize=(3 * ncols, 3 * B_log),
+        dpi=100,
+        squeeze=False,
+    )
 
     for b in range(B_log):
         img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
         raw_caption = str(captions[b]) if captions is not None else ""
 
-        words = [model.vocab_words[j] for j in top_idx[b].tolist()]
+        # Column 0: raw image
+        ax = axes[b][0]
+        ax.imshow(img_uint8)
+        ax.set_ylabel(raw_caption, fontsize=7, rotation=0, labelpad=60, va="center")
+        ax.set_title("raw" if b == 0 else "", fontsize=9)
+        ax.axis("off")
 
-        panel_imgs = [img_uint8]
-        panel_titles = ["raw"]
-
+        # Columns 1..top_k: prototype heatmaps
         for rank, proto_idx in enumerate(top_idx[b].tolist()):
             hm = patch_logits[b, :, proto_idx].view(1, 1, H, W)
             hm_up = F.interpolate(
@@ -138,61 +149,25 @@ def wandb_log_top_proto_heatmaps(
             )[0, 0]
 
             hm_np = hm_up.detach().cpu().numpy()
-
-            # find bounding box on the upsampled heatmap
             bbox = find_high_activation_crop(hm_np, percentile=crop_percentile)
-
-            # draw rectangle on overlay
             overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
             overlay_box = draw_rect_on_image(overlay, bbox, color=(255, 0, 0), width=3)
 
             word = model.vocab_words[proto_idx]
             score = float(top_vals[b, rank].item())
 
-            panel_imgs.append(overlay_box)
-            panel_titles.append(f"top{rank+1}: {word}\n{score:.3f}")
-
-        n_panels = len(panel_imgs)
-        ncols = min(3, n_panels)
-        nrows = int(math.ceil(n_panels / ncols))
-
-        fig, axes = plt.subplots(
-            nrows=nrows,
-            ncols=ncols,
-            figsize=(4 * ncols, 4 * nrows),
-            dpi=120,
-        )
-
-        if not isinstance(axes, np.ndarray):
-            axes = np.array([axes])
-        axes = axes.flatten()
-
-        for ax, im, title in zip(axes, panel_imgs, panel_titles):
-            ax.imshow(im)
-            ax.set_title(title, fontsize=10)
+            ax = axes[b][rank + 1]
+            ax.imshow(overlay_box)
+            ax.set_title(f"top{rank+1}: {word}\n{score:.3f}" if b == 0 else f"{word}\n{score:.3f}", fontsize=8)
             ax.axis("off")
 
-        for ax in axes[len(panel_imgs):]:
-            ax.axis("off")
+    plt.tight_layout()
 
-        suptitle = raw_caption
-        if words:
-            suptitle += f"\nTop words: {', '.join(words)}"
-
-        fig.suptitle(suptitle, fontsize=11)
-        plt.tight_layout(rect=[0, 0, 1, 0.92])
-
-        sample_grids.append(
-            wandb.Image(fig, caption=f"sample={b}")
-        )
-        plt.close(fig)
-
-    log_dict = {
+    wandb.log({
         "global_step": step,
-        log_key: sample_grids,
-    }
-
-    wandb.log(log_dict)
+        log_key: wandb.Image(fig),
+    })
+    plt.close(fig)
 
 def train(
     model: nn.Module,
@@ -355,15 +330,15 @@ def test(
                 # --------------------------
                 # Visualization logging
                 # --------------------------
+                n_log = min(wandb_log_images, images.shape[0])
                 wandb_log_top_proto_heatmaps(
                     model=model,
-                    images=images[:1],
-                    outputs={k: v[:1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
+                    images=images[:n_log],
+                    outputs={k: v[:n_log] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
                         v.shape) > 0 and v.shape[0] == images.shape[0] else v
                              for k, v in outputs.items()},
                     step=global_step,
-                    captions=captions[:1],
-                    max_items=1,
+                    captions=captions[:n_log],
                     log_tsne=False,
                 )
         # --------------------------
