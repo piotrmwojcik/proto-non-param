@@ -30,9 +30,10 @@ python train.py \
   --log-dir /net/tscratch/people/plgabedychaj/train_logs/coco_vg_baseline \
   --backbone dinov2_vitb14 \
   --batch-size 64 \
-  --epochs 20 \
+  --epochs 100 \
   --num-workers 8 \
   --backbone-lr 1e-5 \
   --text-proj-lr 1e-4 \
   --kl-coef 1.0 \
+  --wandb-entity gmum \
   --wandb-log-images 16

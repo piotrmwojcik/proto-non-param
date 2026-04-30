@@ -26,4 +26,5 @@ python train.py \
   --batch-size 64 \
   --epochs 50 \
   --num-workers 8 \
+  --wandb-entity gmum \
   --wandb-log-images 16

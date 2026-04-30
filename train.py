@@ -355,15 +355,15 @@ def test(
                 # --------------------------
                 # Visualization logging
                 # --------------------------
-                n_log = min(wandb_log_images, images.shape[0])
                 wandb_log_top_proto_heatmaps(
                     model=model,
-                    images=images[:n_log],
-                    outputs={k: v[:n_log] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
+                    images=images[:1],
+                    outputs={k: v[:1] if hasattr(v, "__getitem__") and getattr(v, "shape", None) is not None and len(
                         v.shape) > 0 and v.shape[0] == images.shape[0] else v
                              for k, v in outputs.items()},
                     step=global_step,
-                    captions=captions[:n_log],
+                    captions=captions[:1],
+                    max_items=1,
                     log_tsne=False,
                 )
         # --------------------------
@@ -490,12 +490,15 @@ def main():
 
     parser.add_argument("--cosine-coef", type=float, default=1.0)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--wandb-entity", type=str, default=None,
+                        help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
                         help="Number of images to visualize per W&B log step (default: 8)")
 
     args = parser.parse_args()
 
     wandb.init(
+        entity=args.wandb_entity,
         project="proto-non-param",
         config=vars(args),
         dir=args.log_dir,

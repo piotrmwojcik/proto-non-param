@@ -32,4 +32,5 @@ python train.py \
   --backbone-lr 1e-5 \
   --text-proj-lr 1e-4 \
   --kl-coef 1.0 \
+  --wandb-entity gmum \
   --wandb-log-images 16
