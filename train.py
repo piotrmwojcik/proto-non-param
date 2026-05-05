@@ -23,7 +23,8 @@ from tqdm import tqdm
 import torch.nn.functional as F
 
 from clip_dataset import (CocoCLIPDataset, Caltech101CLIPDataset, CUBCLIPDataset,
-                           AwA2CLIPDataset, VisualGenomeDataset, coco_clip_collate_fn)
+                           AwA2CLIPDataset, VisualGenomeDataset, coco_clip_collate_fn,
+                           CLIPScoreDataset)
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -429,6 +430,15 @@ def main():
     parser.add_argument("--visual-coef", type=float, default=0.0)
     parser.add_argument("--cover-coef", type=float, default=0.0)
 
+    parser.add_argument("--clip-scores-coco-train", type=str, default=None,
+                        help="Path to CLIP vocab scores .pt for COCO train split "
+                             "(built by build_clip_vocab_scores.py). Replaces caption-derived targets.")
+    parser.add_argument("--clip-scores-coco-val", type=str, default=None,
+                        help="Path to CLIP vocab scores .pt for COCO val split.")
+    parser.add_argument("--clip-scores-vg", type=str, default=None,
+                        help="Path to CLIP vocab scores .pt for Visual Genome "
+                             "(covers all images; works for both train and val splits).")
+
 
     parser.add_argument(
         "--backbone",
@@ -573,42 +583,53 @@ def main():
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
         )
+        if args.clip_scores_vg:
+            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg)
+            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_vg)
     elif args.dataset == "coco_vg":
         if args.vg_root is None or args.vg_region_descriptions is None:
             raise ValueError("--vg-root and --vg-region-descriptions are required for coco_vg dataset")
         from torch.utils.data import ConcatDataset
-        dataset_train = ConcatDataset([
-            VisualGenomeDataset(
-                vg_root=args.vg_root,
-                region_descriptions_json=args.vg_region_descriptions,
-                vocab_to_idx=vocab_to_idx,
-                train=True,
-                val_ratio=args.vg_val_ratio,
-                seed=args.seed,
-            ),
-            CocoCLIPDataset(
-                annotations_json=args.coco_annotations_train,
-                coco_root=args.coco_root,
-                vocab_to_idx=vocab_to_idx,
-                train=True,
-            ),
-        ])
-        dataset_test = ConcatDataset([
-            VisualGenomeDataset(
-                vg_root=args.vg_root,
-                region_descriptions_json=args.vg_region_descriptions,
-                vocab_to_idx=vocab_to_idx,
-                train=False,
-                val_ratio=args.vg_val_ratio,
-                seed=args.seed,
-            ),
-            CocoCLIPDataset(
-                annotations_json=args.coco_annotations_val,
-                coco_root=args.coco_root,
-                vocab_to_idx=vocab_to_idx,
-                train=False,
-            ),
-        ])
+
+        _vg_train = VisualGenomeDataset(
+            vg_root=args.vg_root,
+            region_descriptions_json=args.vg_region_descriptions,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+            val_ratio=args.vg_val_ratio,
+            seed=args.seed,
+        )
+        _coco_train = CocoCLIPDataset(
+            annotations_json=args.coco_annotations_train,
+            coco_root=args.coco_root,
+            vocab_to_idx=vocab_to_idx,
+            train=True,
+        )
+        if args.clip_scores_vg:
+            _vg_train = CLIPScoreDataset(_vg_train, args.clip_scores_vg)
+        if args.clip_scores_coco_train:
+            _coco_train = CLIPScoreDataset(_coco_train, args.clip_scores_coco_train)
+        dataset_train = ConcatDataset([_vg_train, _coco_train])
+
+        _vg_val = VisualGenomeDataset(
+            vg_root=args.vg_root,
+            region_descriptions_json=args.vg_region_descriptions,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+            val_ratio=args.vg_val_ratio,
+            seed=args.seed,
+        )
+        _coco_val = CocoCLIPDataset(
+            annotations_json=args.coco_annotations_val,
+            coco_root=args.coco_root,
+            vocab_to_idx=vocab_to_idx,
+            train=False,
+        )
+        if args.clip_scores_vg:
+            _vg_val = CLIPScoreDataset(_vg_val, args.clip_scores_vg)
+        if args.clip_scores_coco_val:
+            _coco_val = CLIPScoreDataset(_coco_val, args.clip_scores_coco_val)
+        dataset_test = ConcatDataset([_vg_val, _coco_val])
     else:
         dataset_train = CocoCLIPDataset(
             annotations_json=args.coco_annotations_train,
@@ -622,6 +643,10 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=False,
         )
+        if args.clip_scores_coco_train:
+            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_coco_train)
+        if args.clip_scores_coco_val:
+            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_coco_val)
 
     print('Done with datasets')
     print('Train: ', len(dataset_train))

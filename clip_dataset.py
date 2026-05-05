@@ -3,6 +3,7 @@ import json
 import random
 import hashlib
 from collections import Counter
+from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
@@ -802,3 +803,58 @@ class VisualGenomeDataset(Dataset):
         img = Image.open(im_path).convert("RGB")
         img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
         return img_tensor, phrases, prob_dist, index
+
+
+class CLIPScoreDataset(Dataset):
+    """Wraps any *CLIPDataset and replaces its caption-derived prob_dist with
+    CLIP vision-text dot-product soft labels produced by build_clip_vocab_scores.py.
+
+    The base dataset must store samples as a list of (im_path, ..., prob_dist)
+    tuples in self.samples (all built-in dataset classes satisfy this).
+
+    Lookup is keyed by the integer file stem of the image path
+    (COCO: 000000123456.jpg → 123456, VG: 12345.jpg → 12345).
+    Images not found in the CLIP scores file fall back to the original prob_dist.
+    """
+
+    def __init__(self, base_dataset: Dataset, clip_scores_path: str):
+        self.base = base_dataset
+
+        data = torch.load(clip_scores_path, map_location="cpu")
+        image_ids: list = data["image_ids"]
+        # Use clip_soft_labels if available; fall back to mixed_labels
+        if "mixed_labels" in data:
+            soft_labels = data["mixed_labels"].float()
+        else:
+            soft_labels = data["clip_soft_labels"].float()
+
+        id_to_label = {img_id: soft_labels[i] for i, img_id in enumerate(image_ids)}
+
+        # Pre-build per-index label list so __getitem__ is O(1)
+        self._labels: list = []
+        missed = 0
+        for sample in base_dataset.samples:
+            im_path = sample[0]
+            try:
+                label = id_to_label.get(int(Path(im_path).stem))
+            except ValueError:
+                label = None
+            self._labels.append(label)
+            if label is None:
+                missed += 1
+
+        matched = len(self._labels) - missed
+        print(
+            f"CLIPScoreDataset: matched {matched}/{len(self._labels)} images "
+            f"from {clip_scores_path}"
+        )
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, index: int):
+        img, captions, prob_dist, idx = self.base[index]
+        label = self._labels[index]
+        if label is not None:
+            prob_dist = label
+        return img, captions, prob_dist, idx
