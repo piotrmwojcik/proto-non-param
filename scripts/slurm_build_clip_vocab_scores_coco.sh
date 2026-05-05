@@ -29,8 +29,8 @@ python build_clip_vocab_scores.py \
   --vocab-cache /net/tscratch/people/plgabedychaj/vocab/vg_cache.pt \
   --clip-model ViT-B-32 \
   --clip-pretrained openai \
-  --temperature 0.07 \
-  --alpha 0.5 \
+  --temperature 1.0 \
+  --alpha 1.0 \
   --output /net/tscratch/people/plgabedychaj/vocab/coco_train_clip_scores.pt \
   --batch-size 512 \
   --num-workers 8
