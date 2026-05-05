@@ -36,15 +36,15 @@ python build_clip_vocab_scores.py \
   --num-workers 8
 
 # Uncomment below to also build val scores:
- python build_clip_vocab_scores.py \
-   --dataset coco \
-   --data-root /net/tscratch/people/plgabedychaj/coco_dataset/raw \
-   --annotations /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_val2017.json \
-   --vocab-cache /net/tscratch/people/plgabedychaj/vocab/vg_cache.pt \
-   --clip-model ViT-B-32 \
-   --clip-pretrained openai \
-   --temperature 1.0 \
-   --alpha 1.0 \
-   --output /net/tscratch/people/plgabedychaj/vocab/coco_val_clip_scores.pt \
-   --batch-size 512 \
-   --num-workers 8
+python build_clip_vocab_scores.py \
+  --dataset coco \
+  --data-root /net/tscratch/people/plgabedychaj/coco_dataset/raw \
+  --annotations /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_val2017.json \
+  --vocab-cache /net/tscratch/people/plgabedychaj/vocab/vg_cache.pt \
+  --clip-model ViT-B-32 \
+  --clip-pretrained openai \
+  --temperature 1.0 \
+  --alpha 1.0 \
+  --output /net/tscratch/people/plgabedychaj/vocab/coco_val_clip_scores.pt \
+  --batch-size 512 \
+  --num-workers 8
