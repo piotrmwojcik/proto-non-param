@@ -815,18 +815,23 @@ class CLIPScoreDataset(Dataset):
     Lookup is keyed by the integer file stem of the image path
     (COCO: 000000123456.jpg → 123456, VG: 12345.jpg → 12345).
     Images not found in the CLIP scores file fall back to the original prob_dist.
+
+    temperature controls the softmax sharpness applied to the raw cosine similarities.
+    The raw clip_scores are always reused from disk, so changing temperature never
+    requires rebuilding the score files.  Default 0.07 matches CLIP's own training
+    temperature and produces useful peaked distributions over the vocabulary.
     """
 
-    def __init__(self, base_dataset: Dataset, clip_scores_path: str):
+    def __init__(self, base_dataset: Dataset, clip_scores_path: str, temperature: float = 0.07):
         self.base = base_dataset
 
         data = torch.load(clip_scores_path, map_location="cpu")
         image_ids: list = data["image_ids"]
-        # Use clip_soft_labels if available; fall back to mixed_labels
-        if "mixed_labels" in data:
-            soft_labels = data["mixed_labels"].float()
-        else:
-            soft_labels = data["clip_soft_labels"].float()
+
+        # Always recompute from raw scores so temperature is fully controllable.
+        # clip_scores are stored as float16; upcast before softmax to avoid overflow.
+        raw_scores = data["clip_scores"].float()          # [N, V]
+        soft_labels = torch.softmax(raw_scores / temperature, dim=-1)
 
         id_to_label = {img_id: soft_labels[i] for i, img_id in enumerate(image_ids)}
 
@@ -846,7 +851,7 @@ class CLIPScoreDataset(Dataset):
         matched = len(self._labels) - missed
         print(
             f"CLIPScoreDataset: matched {matched}/{len(self._labels)} images "
-            f"from {clip_scores_path}"
+            f"from {clip_scores_path}  (temperature={temperature})"
         )
 
     def __len__(self) -> int:

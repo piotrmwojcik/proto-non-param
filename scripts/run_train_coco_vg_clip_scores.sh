@@ -19,8 +19,9 @@ export PYTHONPATH="/net/tscratch/people/plgabedychaj/dinov2:$PYTHONPATH"
 source /net/tscratch/people/plgabedychaj/venv/bin/activate
 cd ~/proto-VLM/proto-non-param
 
-# Train with CLIP scalar-product vocabulary targets (alpha=1.0, temperature=1.0).
-# Replaces caption-derived word-frequency distributions with per-image CLIP soft labels.
+# Train with CLIP scalar-product vocabulary targets.
+# Raw clip_scores (cosine similarities) are stored in the .pt files; softmax is
+# applied at load time at --clip-scores-temperature=0.07 (CLIP's own training temp).
 # Scores built by: sbatch scripts/slurm_build_clip_vocab_scores_{coco,vg}.sh
 
 python train.py \
@@ -34,6 +35,7 @@ python train.py \
   --clip-scores-vg /net/tscratch/people/plgabedychaj/vocab/vg_clip_scores.pt \
   --clip-scores-coco-train /net/tscratch/people/plgabedychaj/vocab/coco_train_clip_scores.pt \
   --clip-scores-coco-val /net/tscratch/people/plgabedychaj/vocab/coco_val_clip_scores.pt \
+  --clip-scores-temperature 0.07 \
   --log-dir /net/tscratch/people/plgabedychaj/train_logs/coco_vg_clip_scores \
   --backbone dinov2_vitb14 \
   --batch-size 64 \

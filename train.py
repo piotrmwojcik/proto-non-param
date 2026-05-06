@@ -438,6 +438,11 @@ def main():
     parser.add_argument("--clip-scores-vg", type=str, default=None,
                         help="Path to CLIP vocab scores .pt for Visual Genome "
                              "(covers all images; works for both train and val splits).")
+    parser.add_argument("--clip-scores-temperature", type=float, default=0.07,
+                        help="Softmax temperature applied to raw CLIP cosine similarities "
+                             "when loading score files. 0.07 matches CLIP's own training "
+                             "temperature and gives well-peaked distributions. "
+                             "Higher values (e.g. 1.0) approach uniform — avoid.")
 
 
     parser.add_argument(
@@ -584,8 +589,8 @@ def main():
             seed=args.seed,
         )
         if args.clip_scores_vg:
-            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg)
-            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_vg)
+            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg, args.clip_scores_temperature)
+            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_vg, args.clip_scores_temperature)
     elif args.dataset == "coco_vg":
         if args.vg_root is None or args.vg_region_descriptions is None:
             raise ValueError("--vg-root and --vg-region-descriptions are required for coco_vg dataset")
@@ -606,9 +611,9 @@ def main():
             train=True,
         )
         if args.clip_scores_vg:
-            _vg_train = CLIPScoreDataset(_vg_train, args.clip_scores_vg)
+            _vg_train = CLIPScoreDataset(_vg_train, args.clip_scores_vg, args.clip_scores_temperature)
         if args.clip_scores_coco_train:
-            _coco_train = CLIPScoreDataset(_coco_train, args.clip_scores_coco_train)
+            _coco_train = CLIPScoreDataset(_coco_train, args.clip_scores_coco_train, args.clip_scores_temperature)
         dataset_train = ConcatDataset([_vg_train, _coco_train])
 
         _vg_val = VisualGenomeDataset(
@@ -626,9 +631,9 @@ def main():
             train=False,
         )
         if args.clip_scores_vg:
-            _vg_val = CLIPScoreDataset(_vg_val, args.clip_scores_vg)
+            _vg_val = CLIPScoreDataset(_vg_val, args.clip_scores_vg, args.clip_scores_temperature)
         if args.clip_scores_coco_val:
-            _coco_val = CLIPScoreDataset(_coco_val, args.clip_scores_coco_val)
+            _coco_val = CLIPScoreDataset(_coco_val, args.clip_scores_coco_val, args.clip_scores_temperature)
         dataset_test = ConcatDataset([_vg_val, _coco_val])
     else:
         dataset_train = CocoCLIPDataset(
@@ -644,9 +649,9 @@ def main():
             train=False,
         )
         if args.clip_scores_coco_train:
-            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_coco_train)
+            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_coco_train, args.clip_scores_temperature)
         if args.clip_scores_coco_val:
-            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_coco_val)
+            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_coco_val, args.clip_scores_temperature)
 
     print('Done with datasets')
     print('Train: ', len(dataset_train))
