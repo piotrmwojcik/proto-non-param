@@ -816,22 +816,39 @@ class CLIPScoreDataset(Dataset):
     (COCO: 000000123456.jpg → 123456, VG: 12345.jpg → 12345).
     Images not found in the CLIP scores file fall back to the original prob_dist.
 
-    temperature controls the softmax sharpness applied to the raw cosine similarities.
-    The raw clip_scores are always reused from disk, so changing temperature never
-    requires rebuilding the score files.  Default 0.07 matches CLIP's own training
-    temperature and produces useful peaked distributions over the vocabulary.
+    temperature controls softmax sharpness; top_k restricts the distribution to only
+    the k highest-scoring words before softmax.  With 12K+ vocab words the raw CLIP
+    similarities are too close together for any temperature to produce a peaked
+    distribution — top_k masking is essential to get a useful training signal.
+
+    Example: top_k=50, T=0.07 → max entropy = log2(50) ≈ 5.6 bits (well concentrated).
     """
 
-    def __init__(self, base_dataset: Dataset, clip_scores_path: str, temperature: float = 0.07):
+    def __init__(
+        self,
+        base_dataset: Dataset,
+        clip_scores_path: str,
+        temperature: float = 0.07,
+        top_k: int = 50,
+    ):
         self.base = base_dataset
 
         data = torch.load(clip_scores_path, map_location="cpu")
         image_ids: list = data["image_ids"]
 
-        # Always recompute from raw scores so temperature is fully controllable.
-        # clip_scores are stored as float16; upcast before softmax to avoid overflow.
+        # Upcast from float16 before softmax to avoid overflow.
         raw_scores = data["clip_scores"].float()          # [N, V]
-        soft_labels = torch.softmax(raw_scores / temperature, dim=-1)
+
+        # Zero out all but top-k scores per image so softmax concentrates on
+        # the most relevant words instead of spreading over the full vocabulary.
+        if top_k < raw_scores.shape[1]:
+            topk_vals, topk_idx = raw_scores.topk(top_k, dim=-1)
+            masked = torch.full_like(raw_scores, float("-inf"))
+            masked.scatter_(-1, topk_idx, topk_vals)
+        else:
+            masked = raw_scores
+
+        soft_labels = torch.softmax(masked / temperature, dim=-1)
 
         id_to_label = {img_id: soft_labels[i] for i, img_id in enumerate(image_ids)}
 
@@ -851,7 +868,7 @@ class CLIPScoreDataset(Dataset):
         matched = len(self._labels) - missed
         print(
             f"CLIPScoreDataset: matched {matched}/{len(self._labels)} images "
-            f"from {clip_scores_path}  (temperature={temperature})"
+            f"from {clip_scores_path}  (top_k={top_k}, temperature={temperature})"
         )
 
     def __len__(self) -> int:

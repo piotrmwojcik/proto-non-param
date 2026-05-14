@@ -48,6 +48,23 @@ def analyse_at_temperature(raw_scores: torch.Tensor, temperature: float, label: 
           f"(higher = sharper = more signal)")
 
 
+def analyse_top_k(raw_scores: torch.Tensor, top_k: int, temperature: float):
+    V = raw_scores.shape[1]
+    topk_vals, topk_idx = raw_scores.topk(top_k, dim=-1)
+    masked = torch.full_like(raw_scores, float("-inf"))
+    masked.scatter_(-1, topk_idx, topk_vals)
+    soft = F.softmax(masked / temperature, dim=-1)
+
+    ent = entropy_bits(soft)
+    max_ent = math.log2(top_k)
+    max_ent_full = math.log2(V)
+    print(f"\n  [top_k={top_k}, T={temperature}]")
+    print(f"    entropy   : mean={ent.mean():.2f} bits  "
+          f"(max for k={top_k}: {max_ent:.2f} bits, max for full vocab: {max_ent_full:.2f} bits)")
+    print(f"    entropy%  : {100*ent.mean()/max_ent:.1f}% of top-k maximum")
+    print(f"    top-1 prob: mean={soft.max(dim=-1).values.mean()*100:.2f}%")
+
+
 def show_top_words(raw_scores: torch.Tensor, vocab: list, n_images: int = 5,
                    top_k: int = 10, temperature: float = 0.07, seed: int = 42):
     random.seed(seed)
@@ -102,18 +119,13 @@ def main():
 
     show_top_words(raw_scores, vocab, n_images=args.n_images, seed=args.seed)
 
-    print("\n=== Recommendation ===")
-    # Find T where mean entropy is ~40-60% of max
-    max_ent = math.log2(V)
-    for T in [0.02, 0.05, 0.07, 0.1, 0.2]:
-        soft = F.softmax(raw_scores / T, dim=-1)
-        ent_pct = 100 * entropy_bits(soft).mean().item() / max_ent
-        eff = effective_vocab_size(soft).mean().item()
-        if 30 <= ent_pct <= 70:
-            print(f"  T={T} gives {ent_pct:.0f}% entropy ({eff:.0f} words active) — good range")
-            break
-    else:
-        print(f"  Try T=0.07 (CLIP default). Avoid T=1.0 (near-uniform, no signal).")
+    print(f"\n=== Top-k masking analysis (recommended fix) ===")
+    for k in [10, 20, 50, 100, 200]:
+        analyse_top_k(raw_scores, k, temperature=0.07)
+
+    print(f"\n=== Recommendation ===")
+    print(f"  Use --clip-scores-top-k 50 --clip-scores-temperature 0.07")
+    print(f"  This gives max entropy log2(50)≈5.6 bits — well concentrated signal.")
 
 
 if __name__ == "__main__":

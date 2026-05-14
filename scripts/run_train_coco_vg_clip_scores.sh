@@ -36,6 +36,7 @@ python train.py \
   --clip-scores-coco-train /net/tscratch/people/plgabedychaj/vocab/coco_train_clip_scores.pt \
   --clip-scores-coco-val /net/tscratch/people/plgabedychaj/vocab/coco_val_clip_scores.pt \
   --clip-scores-temperature 0.07 \
+  --clip-scores-top-k 50 \
   --log-dir /net/tscratch/people/plgabedychaj/train_logs/coco_vg_clip_scores \
   --backbone dinov2_vitb14 \
   --batch-size 64 \
