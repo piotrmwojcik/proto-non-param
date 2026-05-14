@@ -31,7 +31,7 @@ python train.py \
   --coco-root /net/tscratch/people/plgabedychaj/coco_dataset/raw \
   --coco-annotations-train /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_train2017.json \
   --coco-annotations-val /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_val2017.json \
-  --vocab-cache-path /net/tscratch/people/plgabedychaj/vocab/vg_cache.pt \
+  --vocab-cache-path vocab/mscoco_new_cache.pt \
   --clip-scores-vg /net/tscratch/people/plgabedychaj/vocab/vg_clip_scores.pt \
   --clip-scores-coco-train /net/tscratch/people/plgabedychaj/vocab/coco_train_clip_scores.pt \
   --clip-scores-coco-val /net/tscratch/people/plgabedychaj/vocab/coco_val_clip_scores.pt \
