@@ -830,6 +830,7 @@ class CLIPScoreDataset(Dataset):
         clip_scores_path: str,
         temperature: float = 0.07,
         top_k: int = 50,
+        caption_filter: bool = False,
     ):
         self.base = base_dataset
 
@@ -838,6 +839,39 @@ class CLIPScoreDataset(Dataset):
 
         # Upcast from float16 before softmax to avoid overflow.
         raw_scores = data["clip_scores"].float()          # [N, V]
+
+        # Optional: restrict each image's candidate concepts to words that
+        # literally appear in its captions.  This prevents synonyms from
+        # filling the top-k slots — e.g. "feline" is suppressed when the
+        # caption says "cat", because annotators don't use "feline".
+        # Fallback: if an image has fewer than top_k caption words in the
+        # vocabulary, its scores are left unmasked.
+        if caption_filter and hasattr(base_dataset, "vocab_to_idx"):
+            vocab_to_idx = base_dataset.vocab_to_idx
+            # Build image_id → set of vocab indices from captions
+            id_to_word_idxs: dict[int, set] = {}
+            for sample in base_dataset.samples:
+                im_path, captions = sample[0], sample[1]
+                try:
+                    img_id = int(Path(im_path).stem)
+                except ValueError:
+                    continue
+                word_set: set = set()
+                caps = captions if isinstance(captions, list) else [captions]
+                for cap in caps:
+                    word_set.update(extract_caption_words(cap, vocab_to_idx))
+                id_to_word_idxs[img_id] = word_set
+
+            V = raw_scores.shape[1]
+            n_filtered = 0
+            for i, img_id in enumerate(image_ids):
+                word_idxs = id_to_word_idxs.get(img_id)
+                if word_idxs is not None and len(word_idxs) >= top_k:
+                    mask = torch.zeros(V, dtype=torch.bool)
+                    mask[list(word_idxs)] = True
+                    raw_scores[i] = raw_scores[i].masked_fill(~mask, float("-inf"))
+                    n_filtered += 1
+            print(f"CLIPScoreDataset: caption filter applied to {n_filtered}/{len(image_ids)} images")
 
         # Zero out all but top-k scores per image so softmax concentrates on
         # the most relevant words instead of spreading over the full vocabulary.
@@ -868,7 +902,8 @@ class CLIPScoreDataset(Dataset):
         matched = len(self._labels) - missed
         print(
             f"CLIPScoreDataset: matched {matched}/{len(self._labels)} images "
-            f"from {clip_scores_path}  (top_k={top_k}, temperature={temperature})"
+            f"from {clip_scores_path}  (top_k={top_k}, temperature={temperature}, "
+            f"caption_filter={caption_filter})"
         )
 
     def __len__(self) -> int:
