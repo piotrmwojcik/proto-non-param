@@ -192,9 +192,7 @@ def train(
         images, captions, target_dist, indices = batch
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
-
-        # avoid exact zeros for KL / log-based losses
-        words_sim_distribution = target_dist.clamp_min(1e-8)
+        words_sim_distribution = target_dist
 
         # ---- DEBUG PRINT ----
         if i % 200 == 0:
@@ -274,7 +272,7 @@ def test(
         images, captions, target_dist, indices = batch
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
-        words_sim_distribution = target_dist.clamp_min(1e-8)
+        words_sim_distribution = target_dist
 
         # --------------------------
         # Model forward
@@ -477,6 +475,12 @@ def main():
     parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt")
     parser.add_argument("--clip-text-dim", type=int, default=512)
     parser.add_argument("--kl-coef", type=float, default=1.0)
+    parser.add_argument("--target-mode", type=str, default="prob", choices=["prob", "binary"],
+                        help="prob=frequency-weighted KL loss; binary=0/1 BCE loss")
+    parser.add_argument("--bce-coef", type=float, default=1.0,
+                        help="Weight for BCE loss (used when --target-mode=binary)")
+    parser.add_argument("--bce-pos-weight", type=float, default=100.0,
+                        help="pos_weight for BCE to counter class imbalance (used when --target-mode=binary)")
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
     parser.add_argument("--prototype-init-noise", type=float, default=0.01)
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -543,12 +547,14 @@ def main():
             caltech_root=args.caltech_root,
             vocab_to_idx=vocab_to_idx,
             train=True,
+            target_type=args.target_mode,
         )
         dataset_test = Caltech101CLIPDataset(
             descriptions_json=args.caltech_descriptions,
             caltech_root=args.caltech_root,
             vocab_to_idx=vocab_to_idx,
             train=False,
+            target_type=args.target_mode,
         )
     elif args.dataset == "cub200":
         if args.cub_root is None or args.cub_annotations is None:
@@ -590,6 +596,7 @@ def main():
             train=True,
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
+            target_type=args.target_mode,
         )
         dataset_test = VisualGenomeDataset(
             vg_root=args.vg_root,
@@ -598,6 +605,7 @@ def main():
             train=False,
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
+            target_type=args.target_mode,
         )
         if args.clip_scores_vg:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -614,12 +622,14 @@ def main():
             train=True,
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
+            target_type=args.target_mode,
         )
         _coco_train = CocoCLIPDataset(
             annotations_json=args.coco_annotations_train,
             coco_root=args.coco_root,
             vocab_to_idx=vocab_to_idx,
             train=True,
+            target_type=args.target_mode,
         )
         if args.clip_scores_vg:
             _vg_train = CLIPScoreDataset(_vg_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -634,12 +644,14 @@ def main():
             train=False,
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
+            target_type=args.target_mode,
         )
         _coco_val = CocoCLIPDataset(
             annotations_json=args.coco_annotations_val,
             coco_root=args.coco_root,
             vocab_to_idx=vocab_to_idx,
             train=False,
+            target_type=args.target_mode,
         )
         if args.clip_scores_vg:
             _vg_val = CLIPScoreDataset(_vg_val, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -652,12 +664,14 @@ def main():
             coco_root=args.coco_root,
             vocab_to_idx=vocab_to_idx,
             train=True,
+            target_type=args.target_mode,
         )
         dataset_test = CocoCLIPDataset(
             annotations_json=args.coco_annotations_val,
             coco_root=args.coco_root,
             vocab_to_idx=vocab_to_idx,
             train=False,
+            target_type=args.target_mode,
         )
         if args.clip_scores_coco_train:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_coco_train, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -763,6 +777,9 @@ def main():
         bin_coef=args.bin_coef,
         cover_coef=args.cover_coef,
         temperature=args.temperature,
+        use_binary=(args.target_mode == "binary"),
+        bce_coef=args.bce_coef,
+        pos_weight_val=args.bce_pos_weight,
     )
 
     net.to(device)

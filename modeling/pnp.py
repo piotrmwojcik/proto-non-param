@@ -257,6 +257,9 @@ class PNPCriterion(nn.Module):
         visual_coef: float = 0.0,
         cover_coef: float = 0.0,
         temperature: float = 0.07,
+        use_binary: bool = False,
+        bce_coef: float = 1.0,
+        pos_weight_val: float = 100.0,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -265,6 +268,9 @@ class PNPCriterion(nn.Module):
         self.visual_coef = visual_coef
         self.cover_coef = cover_coef
         self.temperature = temperature
+        self.use_binary = use_binary
+        self.bce_coef = bce_coef
+        self.pos_weight_val = pos_weight_val
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -275,69 +281,33 @@ class PNPCriterion(nn.Module):
 
         loss_dict = {}
 
-        # 1) distribution matching: target noun distribution vs predicted noun distribution
-        target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
-        pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
-
-        # b = 0
-        #
-        # target = target_dist[b]
-        # pred = pred_log_probs[b].exp()  # convert log-prob → prob
-        #
-        # # top tokens in target distribution
-        # topk_vals, topk_idx = target.topk(10)
-        #
-        # print("\n========== SAMPLE DEBUG ==========")
-        #
-        # print("\nAll captions:")
-        # for c in captions[b]:
-        #     print(" ", c)
-        #
-        # print("\nTop target tokens vs prediction:")
-        # print(f"{'token':15s} {'target':>10s} {'pred':>10s} {'diff':>10s}")
-        #
-        # for idx in topk_idx.tolist():
-        #     token = model.vocab_words[idx]
-        #     t = target[idx].item()
-        #     p = pred[idx].item()
-        #     diff = p - t
-        #
-        #     print(f"{token:15s} {t:10.6f} {p:10.6f} {diff:10.6f}")
-        #
-        # # also show model's top predictions
-        # pred_vals, pred_idx = pred.topk(10)
-        #
-        # print("\nTop predicted tokens:")
-        # print(f"{'token':15s} {'pred':>10s} {'target':>10s}")
-        #
-        # for idx in pred_idx.tolist():
-        #     token = model.vocab_words[idx]
-        #     p = pred[idx].item()
-        #     t = target[idx].item()
-        #
-        #     print(f"{token:15s} {p:10.6f} {t:10.6f}")
-        #
-        # print("==================================\n")
-
-        l_kl = F.kl_div(
-            pred_log_probs,
-            target_dist,
-            reduction="batchmean",
-        )
-        loss_dict["l_dist"] = self.kl_coef * l_kl
-
-        # -----------------------------------
-        # binary supervision from target_dist
-        # -----------------------------------
-        #target_binary = (target_dist > 1e-6).float()
-
-        #l_bin = F.binary_cross_entropy_with_logits(
-        #    gate_logits,
-        #    target_binary,
-        #    reduction="mean",
-        #)
-
-        #loss_dict["l_bin"] = self.bin_coef * l_bin
+        # 1) distribution matching: binary BCE or soft KL
+        if self.use_binary:
+            # target_dist contains 0/1 presence labels; vocab_logits are raw pre-softmax
+            pos_weight = torch.full(
+                (vocab_logits.shape[-1],),
+                fill_value=self.pos_weight_val,
+                device=vocab_logits.device,
+                dtype=vocab_logits.dtype,
+            )
+            l_bce = F.binary_cross_entropy_with_logits(
+                vocab_logits,
+                target_dist,
+                pos_weight=pos_weight,
+                reduction="mean",
+            )
+            loss_dict["l_bce"] = self.bce_coef * l_bce
+        else:
+            # clamp before normalization so log(target) doesn't produce NaN for zero entries
+            target_dist = target_dist.clamp_min(1e-8)
+            target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
+            pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
+            l_kl = F.kl_div(
+                pred_log_probs,
+                target_dist,
+                reduction="batchmean",
+            )
+            loss_dict["l_dist"] = self.kl_coef * l_kl
 
         # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:

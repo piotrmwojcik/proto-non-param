@@ -52,7 +52,8 @@ def extract_caption_words(caption: str, vocab_to_idx: dict[str, int]):
     return word_idxs
 
 
-def _make_cache_path(annotation_file: str, vocab_to_idx: dict, cache_dir: str = None):
+def _make_cache_path(annotation_file: str, vocab_to_idx: dict, cache_dir: str = None,
+                     target_type: str = "prob"):
     if cache_dir is None:
         cache_dir = os.path.join(os.path.dirname(annotation_file), ".cache")
     os.makedirs(cache_dir, exist_ok=True)
@@ -62,7 +63,7 @@ def _make_cache_path(annotation_file: str, vocab_to_idx: dict, cache_dir: str = 
     ).hexdigest()[:12]
 
     ann_base = os.path.splitext(os.path.basename(annotation_file))[0]
-    return os.path.join(cache_dir, f"{ann_base}_samples_{vocab_hash}.pt")
+    return os.path.join(cache_dir, f"{ann_base}_samples_{vocab_hash}_{target_type}.pt")
 
 
 def coco_clip_collate_fn(batch):
@@ -88,7 +89,8 @@ class CocoCLIPDataset(Dataset):
         device: str = "cuda",
         cache_dir: str = None,
         use_cache: bool = True,
-        train: bool = True
+        train: bool = True,
+        target_type: str = "prob",
     ):
         self.annotations_json = annotations_json
         self.coco_root = coco_root
@@ -97,6 +99,7 @@ class CocoCLIPDataset(Dataset):
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
         self.train = train
+        self.target_type = target_type
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(
@@ -122,7 +125,7 @@ class CocoCLIPDataset(Dataset):
             ),
         ])
 
-        cache_path = _make_cache_path(annotations_json, vocab_to_idx, cache_dir)
+        cache_path = _make_cache_path(annotations_json, vocab_to_idx, cache_dir, target_type)
 
         # Try loading from cache first
         if use_cache and os.path.exists(cache_path):
@@ -163,25 +166,30 @@ class CocoCLIPDataset(Dataset):
             if im_path is None or len(captions) == 0:
                 continue
 
-            counts = Counter()
-            total_valid_words = 0
-
-            for caption in captions:
-                word_idxs = extract_caption_words(caption, self.vocab_to_idx)
-                for idx in word_idxs:
-                    counts[idx] += 1
-                total_valid_words += len(word_idxs)
-
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
 
-            if total_valid_words > 0:
-                for idx, cnt in counts.items():
-                    prob_dist[idx] = cnt / total_valid_words
+            if self.target_type == "binary":
+                present_idxs: set = set()
+                for caption in captions:
+                    present_idxs.update(extract_caption_words(caption, self.vocab_to_idx))
+                for idx in present_idxs:
+                    prob_dist[idx] = 1.0
+            else:
+                counts = Counter()
+                total_valid_words = 0
+                for caption in captions:
+                    word_idxs = extract_caption_words(caption, self.vocab_to_idx)
+                    for idx in word_idxs:
+                        counts[idx] += 1
+                    total_valid_words += len(word_idxs)
+                if total_valid_words > 0:
+                    for idx, cnt in counts.items():
+                        prob_dist[idx] = cnt / total_valid_words
 
             samples.append((im_path, captions, prob_dist))
 
         self.samples = samples
-        print(f"Done computing frequency. Total samples: {len(self.samples)}")
+        print(f"Done building samples (target_type={self.target_type}). Total: {len(self.samples)}")
 
         # Save cache
         if use_cache:
@@ -234,11 +242,13 @@ class Caltech101CLIPDataset(Dataset):
         train: bool = True,
         cache_dir: str = None,
         use_cache: bool = True,
+        target_type: str = "prob",
     ):
         self.caltech_root = caltech_root
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
         self.train = train
+        self.target_type = target_type
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(
@@ -257,7 +267,7 @@ class Caltech101CLIPDataset(Dataset):
             transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ])
 
-        cache_path = _make_cache_path(descriptions_json, vocab_to_idx, cache_dir)
+        cache_path = _make_cache_path(descriptions_json, vocab_to_idx, cache_dir, target_type)
 
         if use_cache and os.path.exists(cache_path):
             print(f"Loading dataset cache from: {cache_path}")
@@ -293,18 +303,24 @@ class Caltech101CLIPDataset(Dataset):
             if not descriptions:
                 continue
 
-            counts = Counter()
-            total_valid = 0
-            for desc in descriptions:
-                word_idxs = extract_caption_words(desc, vocab_to_idx)
-                for wi in word_idxs:
-                    counts[wi] += 1
-                total_valid += len(word_idxs)
-
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
-            if total_valid > 0:
-                for wi, cnt in counts.items():
-                    prob_dist[wi] = cnt / total_valid
+            if self.target_type == "binary":
+                present_idxs: set = set()
+                for desc in descriptions:
+                    present_idxs.update(extract_caption_words(desc, vocab_to_idx))
+                for wi in present_idxs:
+                    prob_dist[wi] = 1.0
+            else:
+                counts = Counter()
+                total_valid = 0
+                for desc in descriptions:
+                    word_idxs = extract_caption_words(desc, vocab_to_idx)
+                    for wi in word_idxs:
+                        counts[wi] += 1
+                    total_valid += len(word_idxs)
+                if total_valid > 0:
+                    for wi, cnt in counts.items():
+                        prob_dist[wi] = cnt / total_valid
 
             samples.append((im_path, descriptions, prob_dist))
 
@@ -704,11 +720,13 @@ class VisualGenomeDataset(Dataset):
         seed: int = 42,
         cache_dir: str = None,
         use_cache: bool = True,
+        target_type: str = "prob",
     ):
         self.vg_root = vg_root
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
         self.train = train
+        self.target_type = target_type
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(size=224, scale=(0.8, 1.0),
@@ -726,7 +744,7 @@ class VisualGenomeDataset(Dataset):
         split_tag = "train" if train else "val"
         # cache key encodes split params so train/val caches never collide
         cache_key = f"vg_{split_tag}_valratio{val_ratio}_seed{seed}_{region_descriptions_json}"
-        cache_path = _make_cache_path(cache_key, vocab_to_idx, cache_dir)
+        cache_path = _make_cache_path(cache_key, vocab_to_idx, cache_dir, target_type)
 
         if use_cache and os.path.exists(cache_path):
             print(f"Loading VG dataset cache from: {cache_path}")
@@ -754,20 +772,27 @@ class VisualGenomeDataset(Dataset):
             if im_path is None:
                 continue
 
-            counts = Counter()
-            total_valid = 0
-            for phrase in phrases:
-                word_idxs = extract_caption_words(phrase, vocab_to_idx)
-                for wi in word_idxs:
-                    counts[wi] += 1
-                total_valid += len(word_idxs)
-
-            if total_valid == 0:
-                continue
-
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
-            for wi, cnt in counts.items():
-                prob_dist[wi] = cnt / total_valid
+            if self.target_type == "binary":
+                present_idxs: set = set()
+                for phrase in phrases:
+                    present_idxs.update(extract_caption_words(phrase, vocab_to_idx))
+                if not present_idxs:
+                    continue
+                for wi in present_idxs:
+                    prob_dist[wi] = 1.0
+            else:
+                counts = Counter()
+                total_valid = 0
+                for phrase in phrases:
+                    word_idxs = extract_caption_words(phrase, vocab_to_idx)
+                    for wi in word_idxs:
+                        counts[wi] += 1
+                    total_valid += len(word_idxs)
+                if total_valid == 0:
+                    continue
+                for wi, cnt in counts.items():
+                    prob_dist[wi] = cnt / total_valid
 
             all_samples.append((im_path, phrases, prob_dist))
 
