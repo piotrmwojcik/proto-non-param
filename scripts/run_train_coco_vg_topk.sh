@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=train_coco_vg_binary
+#SBATCH --job-name=train_coco_vg_topk
 #SBATCH --partition=plgrid-gpu-a100
 #SBATCH --account=plgunhype-gpu-a100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --output=/net/tscratch/people/plgabedychaj/logs/train_coco_vg_binary_%j.out
-#SBATCH --error=/net/tscratch/people/plgabedychaj/logs/train_coco_vg_binary_%j.err
+#SBATCH --output=/net/tscratch/people/plgabedychaj/logs/train_coco_vg_topk_%j.out
+#SBATCH --error=/net/tscratch/people/plgabedychaj/logs/train_coco_vg_topk_%j.err
 
 set -e
 mkdir -p /net/tscratch/people/plgabedychaj/logs
@@ -19,9 +19,9 @@ export PYTHONPATH="/net/tscratch/people/plgabedychaj/dinov2:$PYTHONPATH"
 source /net/tscratch/people/plgabedychaj/venv/bin/activate
 cd ~/proto-VLM/proto-non-param
 
-# Binary concept targets: each vocab word present in captions/regions gets label=1, absent=0.
-# BCE loss with pos_weight=100 compensates for ~800:1 negative:positive ratio.
-# If mixture weights collapse to zero in the first epoch, increase --bce-pos-weight.
+# Top-K binarized targets with KL divergence.
+# Per image: keep the K most frequent vocabulary concepts, assign uniform 1/K weight.
+# All other concepts get 0. KL loss trains against this peaked uniform distribution.
 
 python train.py \
   --dataset coco_vg \
@@ -31,16 +31,15 @@ python train.py \
   --coco-annotations-train /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_train2017.json \
   --coco-annotations-val /net/tscratch/people/plgabedychaj/coco_dataset/raw/annotations/captions_val2017.json \
   --vocab-cache-path /net/tscratch/people/plgabedychaj/vocab/vg_cache.pt \
-  --log-dir /net/tscratch/people/plgabedychaj/train_logs/coco_vg_binary \
-  --target-mode binary \
-  --bce-coef 1.0 \
-  --bce-pos-weight 100.0 \
-  --entropy-coef 0.1 \
+  --log-dir /net/tscratch/people/plgabedychaj/train_logs/coco_vg_topk10 \
+  --target-mode topk \
+  --top-k-concepts 10 \
   --backbone dinov2_vitb14 \
   --batch-size 64 \
   --epochs 100 \
   --num-workers 8 \
   --backbone-lr 1e-5 \
   --text-proj-lr 1e-4 \
+  --kl-coef 1.0 \
   --wandb-entity gmum \
   --wandb-log-images 16

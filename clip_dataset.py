@@ -91,6 +91,7 @@ class CocoCLIPDataset(Dataset):
         use_cache: bool = True,
         train: bool = True,
         target_type: str = "prob",
+        top_k_concepts: int = 10,
     ):
         self.annotations_json = annotations_json
         self.coco_root = coco_root
@@ -99,7 +100,8 @@ class CocoCLIPDataset(Dataset):
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
         self.train = train
-        self.target_type = target_type
+        self.target_type = target_type if target_type != "topk" else f"topk{top_k_concepts}"
+        self.top_k_concepts = top_k_concepts
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(
@@ -167,24 +169,25 @@ class CocoCLIPDataset(Dataset):
                 continue
 
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+            counts = Counter()
+            for caption in captions:
+                for idx in extract_caption_words(caption, self.vocab_to_idx):
+                    counts[idx] += 1
 
             if self.target_type == "binary":
-                present_idxs: set = set()
-                for caption in captions:
-                    present_idxs.update(extract_caption_words(caption, self.vocab_to_idx))
-                for idx in present_idxs:
+                for idx in counts:
                     prob_dist[idx] = 1.0
+            elif self.target_type.startswith("topk"):
+                top_items = counts.most_common(self.top_k_concepts)
+                if top_items:
+                    w = 1.0 / len(top_items)
+                    for idx, _ in top_items:
+                        prob_dist[idx] = w
             else:
-                counts = Counter()
-                total_valid_words = 0
-                for caption in captions:
-                    word_idxs = extract_caption_words(caption, self.vocab_to_idx)
-                    for idx in word_idxs:
-                        counts[idx] += 1
-                    total_valid_words += len(word_idxs)
-                if total_valid_words > 0:
+                total = sum(counts.values())
+                if total > 0:
                     for idx, cnt in counts.items():
-                        prob_dist[idx] = cnt / total_valid_words
+                        prob_dist[idx] = cnt / total
 
             samples.append((im_path, captions, prob_dist))
 
@@ -243,12 +246,14 @@ class Caltech101CLIPDataset(Dataset):
         cache_dir: str = None,
         use_cache: bool = True,
         target_type: str = "prob",
+        top_k_concepts: int = 10,
     ):
         self.caltech_root = caltech_root
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
         self.train = train
-        self.target_type = target_type
+        self.target_type = target_type if target_type != "topk" else f"topk{top_k_concepts}"
+        self.top_k_concepts = top_k_concepts
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(
@@ -304,23 +309,25 @@ class Caltech101CLIPDataset(Dataset):
                 continue
 
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+            counts = Counter()
+            for desc in descriptions:
+                for wi in extract_caption_words(desc, vocab_to_idx):
+                    counts[wi] += 1
+
             if self.target_type == "binary":
-                present_idxs: set = set()
-                for desc in descriptions:
-                    present_idxs.update(extract_caption_words(desc, vocab_to_idx))
-                for wi in present_idxs:
+                for wi in counts:
                     prob_dist[wi] = 1.0
+            elif self.target_type.startswith("topk"):
+                top_items = counts.most_common(self.top_k_concepts)
+                if top_items:
+                    w = 1.0 / len(top_items)
+                    for wi, _ in top_items:
+                        prob_dist[wi] = w
             else:
-                counts = Counter()
-                total_valid = 0
-                for desc in descriptions:
-                    word_idxs = extract_caption_words(desc, vocab_to_idx)
-                    for wi in word_idxs:
-                        counts[wi] += 1
-                    total_valid += len(word_idxs)
-                if total_valid > 0:
+                total = sum(counts.values())
+                if total > 0:
                     for wi, cnt in counts.items():
-                        prob_dist[wi] = cnt / total_valid
+                        prob_dist[wi] = cnt / total
 
             samples.append((im_path, descriptions, prob_dist))
 
@@ -721,12 +728,14 @@ class VisualGenomeDataset(Dataset):
         cache_dir: str = None,
         use_cache: bool = True,
         target_type: str = "prob",
+        top_k_concepts: int = 10,
     ):
         self.vg_root = vg_root
         self.vocab_to_idx = vocab_to_idx
         self.vocab_size = len(vocab_to_idx)
         self.train = train
-        self.target_type = target_type
+        self.target_type = target_type if target_type != "topk" else f"topk{top_k_concepts}"
+        self.top_k_concepts = top_k_concepts
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(size=224, scale=(0.8, 1.0),
@@ -772,27 +781,28 @@ class VisualGenomeDataset(Dataset):
             if im_path is None:
                 continue
 
+            counts = Counter()
+            for phrase in phrases:
+                for wi in extract_caption_words(phrase, vocab_to_idx):
+                    counts[wi] += 1
+
+            if not counts:
+                continue
+
             prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
+
             if self.target_type == "binary":
-                present_idxs: set = set()
-                for phrase in phrases:
-                    present_idxs.update(extract_caption_words(phrase, vocab_to_idx))
-                if not present_idxs:
-                    continue
-                for wi in present_idxs:
+                for wi in counts:
                     prob_dist[wi] = 1.0
+            elif self.target_type.startswith("topk"):
+                top_items = counts.most_common(self.top_k_concepts)
+                w = 1.0 / len(top_items)
+                for wi, _ in top_items:
+                    prob_dist[wi] = w
             else:
-                counts = Counter()
-                total_valid = 0
-                for phrase in phrases:
-                    word_idxs = extract_caption_words(phrase, vocab_to_idx)
-                    for wi in word_idxs:
-                        counts[wi] += 1
-                    total_valid += len(word_idxs)
-                if total_valid == 0:
-                    continue
+                total = sum(counts.values())
                 for wi, cnt in counts.items():
-                    prob_dist[wi] = cnt / total_valid
+                    prob_dist[wi] = cnt / total
 
             all_samples.append((im_path, phrases, prob_dist))
 

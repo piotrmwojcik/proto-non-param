@@ -296,7 +296,6 @@ def test(
             )
         )
 
-        print('!!! ', log_batches)
         # choose random image in the batch
         b = random.randrange(images.shape[0])
 
@@ -475,8 +474,10 @@ def main():
     parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt")
     parser.add_argument("--clip-text-dim", type=int, default=512)
     parser.add_argument("--kl-coef", type=float, default=1.0)
-    parser.add_argument("--target-mode", type=str, default="prob", choices=["prob", "binary"],
-                        help="prob=frequency-weighted KL loss; binary=0/1 BCE loss")
+    parser.add_argument("--target-mode", type=str, default="prob", choices=["prob", "binary", "topk"],
+                        help="prob=frequency-weighted KL; binary=0/1 BCE; topk=top-K uniform KL")
+    parser.add_argument("--top-k-concepts", type=int, default=10,
+                        help="K for --target-mode=topk: keep only top-K concepts per image, uniform 1/K weight")
     parser.add_argument("--bce-coef", type=float, default=1.0,
                         help="Weight for BCE loss (used when --target-mode=binary)")
     parser.add_argument("--bce-pos-weight", type=float, default=100.0,
@@ -548,6 +549,7 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=True,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         dataset_test = Caltech101CLIPDataset(
             descriptions_json=args.caltech_descriptions,
@@ -555,6 +557,7 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=False,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
     elif args.dataset == "cub200":
         if args.cub_root is None or args.cub_annotations is None:
@@ -597,6 +600,7 @@ def main():
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         dataset_test = VisualGenomeDataset(
             vg_root=args.vg_root,
@@ -606,6 +610,7 @@ def main():
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         if args.clip_scores_vg:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -623,6 +628,7 @@ def main():
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         _coco_train = CocoCLIPDataset(
             annotations_json=args.coco_annotations_train,
@@ -630,6 +636,7 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=True,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         if args.clip_scores_vg:
             _vg_train = CLIPScoreDataset(_vg_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -645,6 +652,7 @@ def main():
             val_ratio=args.vg_val_ratio,
             seed=args.seed,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         _coco_val = CocoCLIPDataset(
             annotations_json=args.coco_annotations_val,
@@ -652,6 +660,7 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=False,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         if args.clip_scores_vg:
             _vg_val = CLIPScoreDataset(_vg_val, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -665,6 +674,7 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=True,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         dataset_test = CocoCLIPDataset(
             annotations_json=args.coco_annotations_val,
@@ -672,6 +682,7 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=False,
             target_type=args.target_mode,
+            top_k_concepts=args.top_k_concepts,
         )
         if args.clip_scores_coco_train:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_coco_train, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
