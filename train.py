@@ -493,6 +493,10 @@ def main():
     parser.add_argument("--backbone-lr", type=float, default=1.0e-5)
     parser.add_argument("--text-proj-lr", type=float, default=1.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--lr-schedule", type=str, default="cosine", choices=["none", "cosine"],
+                        help="LR schedule: cosine decay to 0 over all epochs, or none (fixed LR)")
+    parser.add_argument("--lr-warmup-epochs", type=int, default=0,
+                        help="Linear warmup epochs before cosine decay (0 = no warmup)")
 
     parser.add_argument("--cosine-coef", type=float, default=1.0)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
@@ -809,6 +813,25 @@ def main():
 
     optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
+    if args.lr_schedule == "cosine":
+        if args.lr_warmup_epochs > 0:
+            warmup_sched = optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1e-3, total_iters=args.lr_warmup_epochs
+            )
+            cosine_sched = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs - args.lr_warmup_epochs, eta_min=0
+            )
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup_sched, cosine_sched],
+                milestones=[args.lr_warmup_epochs]
+            )
+        else:
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs, eta_min=0
+            )
+    else:
+        scheduler = None
+
     print_parameters(net=net, logger=logger)
 
     best_epoch = 0
@@ -847,6 +870,9 @@ def main():
             vocab_to_idx=vocab_to_idx,
             wandb_log_images=args.wandb_log_images,
         )
+
+        if scheduler is not None:
+            scheduler.step()
 
         epoch_metric = -sum(
             v for k, v in epoch_metrics.items()
