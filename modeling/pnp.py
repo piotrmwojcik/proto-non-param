@@ -140,6 +140,35 @@ class PNP(nn.Module):
         proto = F.normalize(proto, dim=-1)
         return proto
 
+    def get_prototypes_augmented(
+        self,
+        extra_clip_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Word prototypes (with trained residuals) optionally concatenated with
+        caption prototypes (no residuals) for inference-time vocabulary augmentation.
+
+        Args:
+            extra_clip_embeds: [C, clip_text_dim] CLIP text embeddings of captions/
+                phrases to append to the prototype pool. These are projected through
+                the same text_projection_head but have no trained residual, since
+                they were not part of training. Caller must ensure the model is in
+                eval() mode so BatchNorm1d uses its running statistics.
+
+        Returns:
+            [V + C, D] or [V, D] (when extra_clip_embeds is None) unit-normalised
+            visual prototypes.
+        """
+        clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
+        clip_proto = F.normalize(clip_proto, dim=-1)
+
+        if extra_clip_embeds is not None:
+            extra = F.normalize(extra_clip_embeds.to(clip_proto.device), dim=-1)  # [C, 512]
+            clip_proto = torch.cat([clip_proto, extra], dim=0)  # [V+C, 512]
+
+        proto = self.text_projection_head(clip_proto)  # [V+C, D]
+        proto = F.normalize(proto, dim=-1)
+        return proto
+
     def forward(self, x: torch.Tensor):
         """
         Args:
