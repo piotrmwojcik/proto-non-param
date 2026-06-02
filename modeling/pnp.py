@@ -1,4 +1,5 @@
 from math import sqrt
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -142,7 +143,7 @@ class PNP(nn.Module):
 
     def get_prototypes_augmented(
         self,
-        extra_clip_embeds: torch.Tensor | None = None,
+        extra_clip_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Word prototypes (with trained residuals) optionally concatenated with
         caption prototypes (no residuals) for inference-time vocabulary augmentation.

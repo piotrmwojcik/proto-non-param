@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import math
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -241,7 +242,7 @@ def log_mode_results(
     all_images: list,
     all_captions: list,
     vocab_words: list[str],
-    caption_words: list[str] | None,
+    caption_words: Optional[list],
     topk: int,
     model: PNP,
     prototypes: torch.Tensor,
@@ -358,8 +359,8 @@ def main():
     vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
 
     # Load caption prototypes (augmented mode only)
-    caption_embeds: torch.Tensor | None = None
-    caption_words:  list[str]  | None = None
+    caption_embeds: Optional[torch.Tensor] = None
+    caption_words:  Optional[list] = None
     if args.mode in ("augmented", "both"):
         if args.caption_prototypes_path is None:
             raise ValueError("--caption-prototypes-path is required for augmented mode")
