@@ -296,6 +296,88 @@ def compute_heatmap_for_image(
 
 
 # ---------------------------------------------------------------------------
+# Second pass: top-N images per concept (lightweight — only K prototype vecs)
+# ---------------------------------------------------------------------------
+
+@torch.inference_mode()
+def collect_topk_images_per_concept(
+    model: PNP,
+    dataloader: DataLoader,
+    device: torch.device,
+    concept_vecs: torch.Tensor,   # [K, D] — the K prototype vectors to score
+    n_images: int = 5,
+    top_patches: int = 5,
+) -> list:
+    """For each of the K concept vectors, return the top-N images by activation.
+
+    Returns a list of K lists, each with up to n_images (score, img_cpu, caption) tuples.
+    Memory: K * n_images * (1 image tensor) — at most a few hundred MB for K=10.
+    """
+    K = concept_vecs.shape[0]
+    concept_vecs = F.normalize(concept_vecs.to(device), dim=-1)  # [K, D]
+    top_images = [[] for _ in range(K)]
+
+    for batch in tqdm(dataloader, desc="Concept retrieval pass", leave=False):
+        images, captions, _, _ = batch
+        images = images.to(device, non_blocking=True)
+
+        patch_tokens, _, _ = model.backbone(images)
+        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)      # [B, N, D]
+
+        sims = torch.einsum("bnd,kd->bnk", patch_tokens, concept_vecs)  # [B, N, K]
+        scores = sims.topk(top_patches, dim=1).values.mean(dim=1)        # [B, K]
+
+        for b in range(images.shape[0]):
+            cap = captions[b] if isinstance(captions[b], str) \
+                else (captions[b][0] if captions[b] else "")
+            for k in range(K):
+                top_images[k].append((scores[b, k].item(), images[b].cpu(), cap))
+                top_images[k].sort(key=lambda x: x[0], reverse=True)
+                top_images[k] = top_images[k][:n_images]
+
+    return top_images
+
+
+# ---------------------------------------------------------------------------
+# Concept panel helper
+# ---------------------------------------------------------------------------
+
+def _concept_panel(
+    concept_label: str,
+    top_images: list,
+    proto_vec: torch.Tensor,
+    model: PNP,
+    device: torch.device,
+    mode_label: str,
+) -> "wandb.Image":
+    """Render a row of images with heatmap overlays for one concept."""
+    n_show = len(top_images)
+    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4), dpi=120)
+    if n_show == 1:
+        axes = [axes]
+
+    for ax, (score, img_tensor, cap_str) in zip(axes, top_images):
+        img_uint8 = denorm_to_uint8(img_tensor)
+        hm = compute_heatmap_for_image(model, img_tensor, proto_vec, device)
+        H = W = int(math.sqrt(hm.shape[0]))
+        hm_up = F.interpolate(
+            hm.view(1, 1, H, W), size=img_uint8.shape[:2],
+            mode="bilinear", align_corners=False,
+        )[0, 0]
+        bbox = find_high_activation_crop(hm_up.numpy())
+        overlay = draw_rect(overlay_heatmap(img_uint8, hm_up), bbox)
+        ax.imshow(overlay)
+        ax.axis("off")
+        ax.set_title(f"score={score:.3f}\n{str(cap_str)[:45]}", fontsize=7)
+
+    fig.suptitle(f"[{mode_label}] {concept_label}", fontsize=9)
+    plt.tight_layout()
+    img = wandb.Image(fig)
+    plt.close(fig)
+    return img
+
+
+# ---------------------------------------------------------------------------
 # Analysis & W&B logging
 # ---------------------------------------------------------------------------
 
@@ -304,62 +386,82 @@ def log_mode_results(
     frac_caption: torch.Tensor,
     word_scores_all: torch.Tensor,
     caption_mean: torch.Tensor,
-    top5: list,
     vocab_words: list,
     caption_words: Optional[list],
     topk: int,
     model: PNP,
     prototypes: torch.Tensor,
+    dataloader: DataLoader,
     device: torch.device,
+    n_top_concepts: int = 5,
+    n_top_images: int = 5,
 ):
     n_word_proto = len(vocab_words)
-    mean_frac = frac_caption.mean().item()
-    print(f"[{mode_label}] Mean fraction of top-{topk} from caption prototypes: {mean_frac:.4f}")
-
     n_caption = len(caption_words) if caption_words else 0
+    mean_frac = frac_caption.mean().item()
+    pct_any_caption = (frac_caption > 0).float().mean().item()
+
+    print(f"[{mode_label}] mean frac caption in top-{topk}: {mean_frac:.4f} | "
+          f"images with ≥1 caption: {pct_any_caption:.4f}")
+
+    # ---- Scalar metrics ----
     wandb.log({
-        f"{mode_label}/mean_frac_caption_in_topk": mean_frac,
-        f"{mode_label}/frac_caption_histogram": wandb.Histogram(frac_caption.numpy()),
-        f"{mode_label}/n_word_prototypes": n_word_proto,
-        f"{mode_label}/n_caption_prototypes": n_caption,
+        f"{mode_label}/mean_frac_caption_in_topk":   mean_frac,
+        f"{mode_label}/pct_images_with_caption_topk": pct_any_caption,
+        f"{mode_label}/frac_caption_histogram":       wandb.Histogram(frac_caption.numpy()),
+        f"{mode_label}/n_word_prototypes":            n_word_proto,
+        f"{mode_label}/n_caption_prototypes":         n_caption,
     })
 
-    # Top-5 images for the most-activated caption concept (augmented mode only)
-    if caption_words and caption_mean.numel() > 0 and top5:
-        top_concept_col = int(caption_mean.argmax().item())
-        top_concept_text = caption_words[top_concept_col]
-        top_proto_vec = prototypes[n_word_proto + top_concept_col].cpu()  # [D]
+    # ---- Top-N word concepts table + panels ----
+    mean_word_scores = word_scores_all.mean(dim=0)                 # [V]
+    top_word_vals, top_word_idx = mean_word_scores.topk(min(20, n_word_proto))
+    word_table = wandb.Table(columns=["rank", "word", "mean_score"])
+    for rank, (idx, val) in enumerate(zip(top_word_idx.tolist(), top_word_vals.tolist())):
+        word_table.add_data(rank + 1, vocab_words[idx], round(val, 5))
+    wandb.log({f"{mode_label}/top_word_concepts_table": word_table})
 
-        n_show = len(top5)
-        fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4), dpi=120)
-        if n_show == 1:
-            axes = [axes]
+    top_word_vecs = prototypes[:n_word_proto][top_word_idx[:n_top_concepts]].cpu()  # [K, D]
+    word_top_images = collect_topk_images_per_concept(
+        model, dataloader, device, top_word_vecs,
+        n_images=n_top_images,
+    )
+    panels = {}
+    for rank, (col, images_for_concept) in enumerate(
+        zip(top_word_idx[:n_top_concepts].tolist(), word_top_images)
+    ):
+        label = f"word #{rank+1}: {vocab_words[col]}"
+        panels[f"{mode_label}/word_concept_{rank+1:02d}_{vocab_words[col]}"] = _concept_panel(
+            label, images_for_concept, top_word_vecs[rank], model, device, mode_label
+        )
+    wandb.log(panels)
 
-        for ax, (score, img_tensor, cap_str) in zip(axes, top5):
-            img_uint8 = denorm_to_uint8(img_tensor)
-            hm = compute_heatmap_for_image(model, img_tensor, top_proto_vec, device)
-            H = W = int(math.sqrt(hm.shape[0]))
-            hm_up = F.interpolate(
-                hm.view(1, 1, H, W), size=img_uint8.shape[:2], mode="bilinear", align_corners=False
-            )[0, 0]
-            bbox = find_high_activation_crop(hm_up.numpy())
-            overlay = overlay_heatmap(img_uint8, hm_up)
-            overlay = draw_rect(overlay, bbox)
-            ax.imshow(overlay)
-            ax.axis("off")
-            ax.set_title(f"score={score:.3f}\n{str(cap_str)[:50]}", fontsize=8)
+    # ---- Top-N caption concepts table + panels (augmented mode only) ----
+    if caption_words and caption_mean.numel() > 0:
+        top_cap_vals, top_cap_idx = caption_mean.topk(min(20, n_caption))
+        cap_table = wandb.Table(columns=["rank", "caption", "mean_score"])
+        for rank, (idx, val) in enumerate(zip(top_cap_idx.tolist(), top_cap_vals.tolist())):
+            cap_table.add_data(rank + 1, caption_words[idx][:120], round(val, 5))
+        wandb.log({f"{mode_label}/top_caption_concepts_table": cap_table})
 
-        fig.suptitle(f"[{mode_label}] Top caption concept: '{top_concept_text[:70]}'", fontsize=9)
-        plt.tight_layout()
-        wandb.log({f"{mode_label}/top_caption_concept": wandb.Image(fig)})
-        plt.close(fig)
+        top_cap_vecs = prototypes[n_word_proto:][top_cap_idx[:n_top_concepts]].cpu()  # [K, D]
+        cap_top_images = collect_topk_images_per_concept(
+            model, dataloader, device, top_cap_vecs,
+            n_images=n_top_images,
+        )
+        panels = {}
+        for rank, (col, images_for_concept) in enumerate(
+            zip(top_cap_idx[:n_top_concepts].tolist(), cap_top_images)
+        ):
+            label = f"caption #{rank+1}: {caption_words[col][:60]}"
+            panels[f"{mode_label}/caption_concept_{rank+1:02d}"] = _concept_panel(
+                label, images_for_concept, top_cap_vecs[rank], model, device, mode_label
+            )
+        wandb.log(panels)
 
-    # Top-5 most-activated word prototypes by mean score
-    mean_word_scores = word_scores_all.mean(dim=0)
-    top5_word_vals, top5_word_idx = mean_word_scores.topk(5)
-    top5_words = [(vocab_words[i], round(v.item(), 4)) for i, v in zip(top5_word_idx.tolist(), top5_word_vals)]
-    print(f"[{mode_label}] Top-5 word prototypes by mean activation: {top5_words}")
-    wandb.log({f"{mode_label}/top5_word_concepts": str(top5_words)})
+    top5_words = [(vocab_words[i], round(v, 4))
+                  for i, v in zip(top_word_idx[:5].tolist(), top_word_vals[:5].tolist())]
+    print(f"[{mode_label}] Top-5 word concepts: {top5_words}")
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +554,7 @@ def main():
                 prototypes = model.get_prototypes()
             prototypes = F.normalize(prototypes, p=2, dim=-1)  # [V(+C), D]
 
-        frac_caption, word_scores_all, caption_mean, top5 = run_score_pass(
+        frac_caption, word_scores_all, caption_mean, _ = run_score_pass(
             model, dataloader, device, prototypes, mode_label,
             n_vocab=model.vocab_size, topk=args.topk,
         )
@@ -461,12 +563,12 @@ def main():
             frac_caption=frac_caption,
             word_scores_all=word_scores_all,
             caption_mean=caption_mean,
-            top5=top5,
             vocab_words=vocab_words,
             caption_words=caption_words if mode_label == "augmented" else None,
             topk=args.topk,
             model=model,
             prototypes=prototypes,
+            dataloader=dataloader,
             device=device,
         )
 
