@@ -214,53 +214,85 @@ def run_score_pass(
     device: torch.device,
     prototypes: torch.Tensor,
     mode_label: str,
+    n_vocab: int,
+    topk: int,
     proto_chunk_size: int = 8192,
-) -> tuple[torch.Tensor, list, list, torch.Tensor]:
-    """One pass accumulating [M, V+C] mixture scores, images (cpu), captions, dataset indices."""
-    all_scores:   list[torch.Tensor] = []
-    all_images:   list[torch.Tensor] = []
-    all_captions: list = []
-    all_indices:  list[torch.Tensor] = []
+):
+    """Memory-efficient inference pass — never stores [M, V+C] scores.
+
+    Accumulates only what is needed for analysis:
+      - frac_caption per image  [M]       (~40 KB for 10K images)
+      - topk prototype indices  [M, topk] (~200 KB)
+      - caption mean scores     [C]       (~1.5 MB for 392K captions)
+      - top-5 images by max caption activation (5 image tensors + captions)
+    """
+    n_total = prototypes.shape[0]
+    n_caption = n_total - n_vocab
+
+    all_frac_caption: list[torch.Tensor] = []
+    all_topk_word_scores: list[torch.Tensor] = []   # [M, topk] clipped to word range
+    caption_score_sum = torch.zeros(max(n_caption, 1))  # [C]
+    n_images_seen = 0
+
+    # Running top-5 images by their highest caption prototype score
+    top5: list = []  # list of [score, img_cpu, caption_str]
 
     for batch in tqdm(dataloader, desc=f"Score pass [{mode_label}]"):
-        images, captions, _, indices = batch
+        images, captions, _, _ = batch
         images = images.to(device, non_blocking=True)
 
         patch_tokens, _, _ = model.backbone(images)
-        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)          # [B, N, D]
+        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)   # [B, N, D]
 
         vocab_logits = _vocab_logits_chunked(
             patch_tokens, prototypes, chunk_size=proto_chunk_size
-        )                                                               # [B, V+C]
-        scores = F.softmax(vocab_logits / model.temperature, dim=-1)   # [B, V+C]
+        )                                                        # [B, V+C]
+        scores = F.softmax(vocab_logits / model.temperature, dim=-1)  # [B, V+C]
 
-        all_scores.append(scores.cpu())
-        all_images.extend([im.cpu() for im in images])
-        all_captions.extend(list(captions))
-        all_indices.append(indices.cpu())
+        # Top-K indices per image (used for frac_caption)
+        topk_idx = scores.topk(topk, dim=1).indices             # [B, topk]
+        is_cap = (topk_idx >= n_vocab).float().mean(dim=1)      # [B]
+        all_frac_caption.append(is_cap.cpu())
 
-    return (
-        torch.cat(all_scores, dim=0),       # [M, V+C]
-        all_images,
-        all_captions,
-        torch.cat(all_indices, dim=0),      # [M]
-    )
+        # Top-5 word activations (for reporting top word concepts)
+        word_scores = scores[:, :n_vocab]                        # [B, V]
+        all_topk_word_scores.append(word_scores.cpu())
+
+        if n_caption > 0:
+            cap_scores = scores[:, n_vocab:].cpu()              # [B, C]
+            caption_score_sum += cap_scores.sum(dim=0)
+            n_images_seen += images.shape[0]
+
+            # Track top-5 images by max caption activation
+            max_cap = cap_scores.max(dim=1).values              # [B]
+            for i in range(images.shape[0]):
+                cap_str = captions[i] if isinstance(captions[i], str) \
+                    else (captions[i][0] if captions[i] else "")
+                top5.append((max_cap[i].item(), images[i].cpu(), cap_str))
+                top5.sort(key=lambda x: x[0], reverse=True)
+                top5 = top5[:5]
+
+    frac_caption = torch.cat(all_frac_caption, dim=0)            # [M]
+    word_scores_all = torch.cat(all_topk_word_scores, dim=0)     # [M, V]
+    caption_mean = (caption_score_sum / max(n_images_seen, 1)) if n_caption > 0 \
+        else torch.zeros(0)
+
+    return frac_caption, word_scores_all, caption_mean, top5
 
 
 @torch.inference_mode()
 def compute_heatmap_for_image(
     model: PNP,
     img_tensor: torch.Tensor,
-    prototypes: torch.Tensor,
-    proto_col: int,
+    proto_vec: torch.Tensor,
     device: torch.device,
 ) -> torch.Tensor:
-    """Return patch-level logit vector for a single prototype column on one image."""
+    """Patch-level similarity between one image and one prototype vector [D]."""
     img = img_tensor.unsqueeze(0).to(device)
     patch_tokens, _, _ = model.backbone(img)
-    patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)  # [1, N, D]
-    patch_logits = torch.einsum("bnd,vd->bnv", patch_tokens, prototypes)  # [1, N, V+C]
-    return patch_logits[0, :, proto_col].cpu()  # [N]
+    patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)       # [1, N, D]
+    proto = F.normalize(proto_vec.to(device), dim=-1)            # [D]
+    return torch.einsum("bnd,d->bn", patch_tokens, proto)[0].cpu()  # [N]
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +301,11 @@ def compute_heatmap_for_image(
 
 def log_mode_results(
     mode_label: str,
-    all_scores: torch.Tensor,
-    all_images: list,
-    all_captions: list,
-    vocab_words: list[str],
+    frac_caption: torch.Tensor,
+    word_scores_all: torch.Tensor,
+    caption_mean: torch.Tensor,
+    top5: list,
+    vocab_words: list,
     caption_words: Optional[list],
     topk: int,
     model: PNP,
@@ -280,44 +313,31 @@ def log_mode_results(
     device: torch.device,
 ):
     n_word_proto = len(vocab_words)
-    n_total = all_scores.shape[1]
-
-    # Per-image top-K prototype indices
-    topk_per_image = all_scores.topk(topk, dim=1).indices  # [M, topk]
-    is_caption = (topk_per_image >= n_word_proto)           # [M, topk] bool
-
-    frac_caption = is_caption.float().mean(dim=1)           # [M]
     mean_frac = frac_caption.mean().item()
     print(f"[{mode_label}] Mean fraction of top-{topk} from caption prototypes: {mean_frac:.4f}")
 
+    n_caption = len(caption_words) if caption_words else 0
     wandb.log({
         f"{mode_label}/mean_frac_caption_in_topk": mean_frac,
         f"{mode_label}/frac_caption_histogram": wandb.Histogram(frac_caption.numpy()),
         f"{mode_label}/n_word_prototypes": n_word_proto,
-        f"{mode_label}/n_caption_prototypes": n_total - n_word_proto,
+        f"{mode_label}/n_caption_prototypes": n_caption,
     })
 
     # Top-5 images for the most-activated caption concept (augmented mode only)
-    if caption_words and n_total > n_word_proto:
-        caption_scores = all_scores[:, n_word_proto:]       # [M, C]
-        mean_caption_scores = caption_scores.mean(dim=0)    # [C]
-        top_concept_col = int(mean_caption_scores.argmax().item())
+    if caption_words and caption_mean.numel() > 0 and top5:
+        top_concept_col = int(caption_mean.argmax().item())
         top_concept_text = caption_words[top_concept_col]
-        global_proto_col = n_word_proto + top_concept_col
+        top_proto_vec = prototypes[n_word_proto + top_concept_col].cpu()  # [D]
 
-        top5_vals, top5_img_idx = caption_scores[:, top_concept_col].topk(min(5, len(all_images)))
-        n_show = len(top5_img_idx)
-
+        n_show = len(top5)
         fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4), dpi=120)
         if n_show == 1:
             axes = [axes]
 
-        for ax, score, img_idx in zip(axes, top5_vals.tolist(), top5_img_idx.tolist()):
-            img_tensor = all_images[img_idx]
+        for ax, (score, img_tensor, cap_str) in zip(axes, top5):
             img_uint8 = denorm_to_uint8(img_tensor)
-
-            # Targeted second pass: one image, one prototype column
-            hm = compute_heatmap_for_image(model, img_tensor, prototypes, global_proto_col, device)
+            hm = compute_heatmap_for_image(model, img_tensor, top_proto_vec, device)
             H = W = int(math.sqrt(hm.shape[0]))
             hm_up = F.interpolate(
                 hm.view(1, 1, H, W), size=img_uint8.shape[:2], mode="bilinear", align_corners=False
@@ -325,13 +345,9 @@ def log_mode_results(
             bbox = find_high_activation_crop(hm_up.numpy())
             overlay = overlay_heatmap(img_uint8, hm_up)
             overlay = draw_rect(overlay, bbox)
-
             ax.imshow(overlay)
             ax.axis("off")
-            caption = all_captions[img_idx]
-            if isinstance(caption, list):
-                caption = caption[0] if caption else ""
-            ax.set_title(f"score={score:.3f}\n{str(caption)[:50]}", fontsize=8)
+            ax.set_title(f"score={score:.3f}\n{str(cap_str)[:50]}", fontsize=8)
 
         fig.suptitle(f"[{mode_label}] Top caption concept: '{top_concept_text[:70]}'", fontsize=9)
         plt.tight_layout()
@@ -339,8 +355,7 @@ def log_mode_results(
         plt.close(fig)
 
     # Top-5 most-activated word prototypes by mean score
-    word_scores = all_scores[:, :n_word_proto]
-    mean_word_scores = word_scores.mean(dim=0)
+    mean_word_scores = word_scores_all.mean(dim=0)
     top5_word_vals, top5_word_idx = mean_word_scores.topk(5)
     top5_words = [(vocab_words[i], round(v.item(), 4)) for i, v in zip(top5_word_idx.tolist(), top5_word_vals)]
     print(f"[{mode_label}] Top-5 word prototypes by mean activation: {top5_words}")
@@ -437,14 +452,16 @@ def main():
                 prototypes = model.get_prototypes()
             prototypes = F.normalize(prototypes, p=2, dim=-1)  # [V(+C), D]
 
-        scores, images, captions, indices = run_score_pass(
-            model, dataloader, device, prototypes, mode_label
+        frac_caption, word_scores_all, caption_mean, top5 = run_score_pass(
+            model, dataloader, device, prototypes, mode_label,
+            n_vocab=model.vocab_size, topk=args.topk,
         )
         log_mode_results(
             mode_label=mode_label,
-            all_scores=scores,
-            all_images=images,
-            all_captions=captions,
+            frac_caption=frac_caption,
+            word_scores_all=word_scores_all,
+            caption_mean=caption_mean,
+            top5=top5,
             vocab_words=vocab_words,
             caption_words=caption_words if mode_label == "augmented" else None,
             topk=args.topk,
