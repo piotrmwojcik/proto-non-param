@@ -139,7 +139,10 @@ def build_model(ckpt_path: str, device: torch.device) -> tuple[PNP, argparse.Nam
         prototype_init_noise=getattr(hparams, "prototype_init_noise", 0.01),
         clip_model=clip_model,
     )
-    model.load_state_dict(state_dict, strict=True)
+    # clip_model is always frozen — drop its keys from the checkpoint so mismatches
+    # in model size (e.g. ViT-B-32 vs ViT-L-14) don't block loading the trainable parts.
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith("clip_model.")}
+    model.load_state_dict(state_dict, strict=False)
     model = model.eval().to(device)
     print(f"Model loaded — vocab size: {model.vocab_size}")
     return model, hparams
