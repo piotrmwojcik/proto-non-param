@@ -49,12 +49,17 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-def _load_unique_coco_captions(annotations_path: str, max_captions: int) -> list[str]:
+def _load_unique_coco_captions(annotations_path: str, max_captions: int, min_words: int = 0) -> list[str]:
     print(f"Loading COCO annotations from {annotations_path} ...")
     with open(annotations_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     captions = sorted({ann["caption"].strip() for ann in data["annotations"] if ann["caption"].strip()})
-    print(f"  {len(captions)} unique captions found")
+    if min_words:
+        before = len(captions)
+        captions = [c for c in captions if len(c.split()) >= min_words]
+        print(f"  {before} unique captions → {len(captions)} after min_words≥{min_words} filter")
+    else:
+        print(f"  {len(captions)} unique captions found")
     if max_captions and len(captions) > max_captions:
         captions = captions[:max_captions]
         print(f"  capped to {max_captions} captions")
@@ -68,6 +73,7 @@ def _load_vg_test_phrases(
     seed: int,
     val_ratio: float,
     max_captions: int,
+    min_words: int = 0,
 ) -> list[str]:
     """Extract unique phrases from the VG validation split.
 
@@ -99,11 +105,11 @@ def _load_vg_test_phrases(
     for im_path, img_phrases, _ in dataset.samples:
         for p in img_phrases:
             p = p.strip()
-            if p:
+            if p and (not min_words or len(p.split()) >= min_words):
                 phrases.add(p)
 
     phrases_list = sorted(phrases)
-    print(f"  {len(phrases_list)} unique phrases from val split")
+    print(f"  {len(phrases_list)} unique phrases from val split (min_words≥{min_words})")
     if max_captions and len(phrases_list) > max_captions:
         phrases_list = phrases_list[:max_captions]
         print(f"  capped to {max_captions} phrases")
@@ -169,6 +175,9 @@ def main() -> None:
     parser.add_argument("--clip-pretrained", type=str, default="openai")
     parser.add_argument("--max-captions", type=int, default=0,
                         help="Cap on number of phrases (0 = no cap)")
+    parser.add_argument("--min-words", type=int, default=5,
+                        help="Minimum number of words in a phrase (default: 5, removes "
+                             "short single-object labels like 'a desk' or 'sky')")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
@@ -184,11 +193,12 @@ def main() -> None:
             seed=args.seed,
             val_ratio=args.val_ratio,
             max_captions=args.max_captions,
+            min_words=args.min_words,
         )
     else:
         if args.coco_annotations is None:
             parser.error("--coco-annotations is required for --source coco")
-        texts = _load_unique_coco_captions(args.coco_annotations, args.max_captions)
+        texts = _load_unique_coco_captions(args.coco_annotations, args.max_captions, args.min_words)
 
     cache = _encode_texts(texts, args.clip_model_name, args.clip_pretrained, args.batch_size, args.device)
 
