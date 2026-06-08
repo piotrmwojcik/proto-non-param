@@ -182,12 +182,39 @@ def build_dataset(args, vocab_to_idx: dict):
 # ---------------------------------------------------------------------------
 
 @torch.inference_mode()
+def _vocab_logits_chunked(
+    patch_tokens: torch.Tensor,
+    prototypes: torch.Tensor,
+    top_patches: int = 5,
+    chunk_size: int = 8192,
+) -> torch.Tensor:
+    """Compute per-prototype top-patch scores without materialising [B, N, V] at once.
+
+    Processes prototypes in chunks of `chunk_size` to keep GPU memory bounded.
+    Peak memory per chunk: B * N * chunk_size * 4 bytes.
+    With B=64, N=256, chunk=8192: ~512 MB — safe on a 40 GB A100.
+    """
+    B, N, D = patch_tokens.shape
+    V = prototypes.shape[0]
+    vocab_logits = torch.zeros(B, V, device=patch_tokens.device)
+
+    for start in range(0, V, chunk_size):
+        end = min(start + chunk_size, V)
+        chunk = prototypes[start:end]                                        # [C, D]
+        sim = torch.einsum("bnd,cd->bnc", patch_tokens, chunk)              # [B, N, C]
+        vocab_logits[:, start:end] = sim.topk(top_patches, dim=1).values.mean(dim=1)
+
+    return vocab_logits                                                      # [B, V]
+
+
+@torch.inference_mode()
 def run_score_pass(
     model: PNP,
     dataloader: DataLoader,
     device: torch.device,
     prototypes: torch.Tensor,
     mode_label: str,
+    proto_chunk_size: int = 8192,
 ) -> tuple[torch.Tensor, list, list, torch.Tensor]:
     """One pass accumulating [M, V+C] mixture scores, images (cpu), captions, dataset indices."""
     all_scores:   list[torch.Tensor] = []
@@ -202,9 +229,10 @@ def run_score_pass(
         patch_tokens, _, _ = model.backbone(images)
         patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)          # [B, N, D]
 
-        patch_logits = torch.einsum("bnd,vd->bnv", patch_tokens, prototypes)  # [B, N, V+C]
-        vocab_logits = patch_logits.topk(5, dim=1).values.mean(dim=1)          # [B, V+C]
-        scores = F.softmax(vocab_logits / model.temperature, dim=-1)            # [B, V+C]
+        vocab_logits = _vocab_logits_chunked(
+            patch_tokens, prototypes, chunk_size=proto_chunk_size
+        )                                                               # [B, V+C]
+        scores = F.softmax(vocab_logits / model.temperature, dim=-1)   # [B, V+C]
 
         all_scores.append(scores.cpu())
         all_images.extend([im.cpu() for im in images])
