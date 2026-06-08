@@ -310,28 +310,28 @@ def collect_topk_images_per_concept(
 ) -> list:
     """For each of the K concept vectors, return the top-N images by activation.
 
-    Returns a list of K lists, each with up to n_images (score, img_cpu, caption) tuples.
-    Memory: K * n_images * (1 image tensor) — at most a few hundred MB for K=10.
+    Each entry is (score_for_this_concept, img_cpu, all_k_scores_tensor).
+    all_k_scores_tensor [K] holds the score against every concept — used by caption
+    panels to label secondary matching concepts per image.
     """
     K = concept_vecs.shape[0]
-    concept_vecs = F.normalize(concept_vecs.to(device), dim=-1)  # [K, D]
+    concept_vecs_d = F.normalize(concept_vecs.to(device), dim=-1)  # [K, D]
     top_images = [[] for _ in range(K)]
 
     for batch in tqdm(dataloader, desc="Concept retrieval pass", leave=False):
-        images, captions, _, _ = batch
+        images, _, _, _ = batch
         images = images.to(device, non_blocking=True)
 
         patch_tokens, _, _ = model.backbone(images)
-        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)      # [B, N, D]
+        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)           # [B, N, D]
 
-        sims = torch.einsum("bnd,kd->bnk", patch_tokens, concept_vecs)  # [B, N, K]
-        scores = sims.topk(top_patches, dim=1).values.mean(dim=1)        # [B, K]
+        sims = torch.einsum("bnd,kd->bnk", patch_tokens, concept_vecs_d)  # [B, N, K]
+        scores = sims.topk(top_patches, dim=1).values.mean(dim=1)          # [B, K]
 
         for b in range(images.shape[0]):
-            cap = captions[b] if isinstance(captions[b], str) \
-                else (captions[b][0] if captions[b] else "")
+            all_k = scores[b].cpu()                                        # [K]
             for k in range(K):
-                top_images[k].append((scores[b, k].item(), images[b].cpu(), cap))
+                top_images[k].append((all_k[k].item(), images[b].cpu(), all_k))
                 top_images[k].sort(key=lambda x: x[0], reverse=True)
                 top_images[k] = top_images[k][:n_images]
 
@@ -339,10 +339,10 @@ def collect_topk_images_per_concept(
 
 
 # ---------------------------------------------------------------------------
-# Concept panel helper
+# Concept panel helpers — words and captions are rendered separately
 # ---------------------------------------------------------------------------
 
-def _concept_panel(
+def _word_concept_panel(
     concept_label: str,
     top_images: list,
     proto_vec: torch.Tensor,
@@ -350,13 +350,14 @@ def _concept_panel(
     device: torch.device,
     mode_label: str,
 ) -> "wandb.Image":
-    """Render a row of images with heatmap overlays for one concept."""
+    """Row of images with activation heatmap for one *word* concept.
+    Subtitles show only the activation score — no caption text."""
     n_show = len(top_images)
-    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4), dpi=120)
+    fig, axes = plt.subplots(1, n_show, figsize=(3.5 * n_show, 3.5), dpi=120)
     if n_show == 1:
         axes = [axes]
 
-    for ax, (score, img_tensor, cap_str) in zip(axes, top_images):
+    for ax, (score, img_tensor, _) in zip(axes, top_images):
         img_uint8 = denorm_to_uint8(img_tensor)
         hm = compute_heatmap_for_image(model, img_tensor, proto_vec, device)
         H = W = int(math.sqrt(hm.shape[0]))
@@ -368,9 +369,59 @@ def _concept_panel(
         overlay = draw_rect(overlay_heatmap(img_uint8, hm_up), bbox)
         ax.imshow(overlay)
         ax.axis("off")
-        ax.set_title(f"score={score:.3f}\n{str(cap_str)[:45]}", fontsize=7)
+        ax.set_title(f"{score:.3f}", fontsize=9)
 
-    fig.suptitle(f"[{mode_label}] {concept_label}", fontsize=9)
+    fig.suptitle(f"[{mode_label}] {concept_label}", fontsize=9, fontweight="bold")
+    plt.tight_layout()
+    img = wandb.Image(fig)
+    plt.close(fig)
+    return img
+
+
+def _caption_concept_panel(
+    concept_label: str,
+    top_images: list,
+    proto_vec: torch.Tensor,
+    all_concept_labels: list,
+    model: PNP,
+    device: torch.device,
+    mode_label: str,
+    n_secondary: int = 2,
+) -> "wandb.Image":
+    """Row of images for one *caption* concept.
+
+    Each image subtitle shows the activation score plus the top-N secondary caption
+    prototypes that also scored well on that image (from all_concept_labels).
+    top_images tuples: (score, img_cpu, all_k_scores_tensor [K]).
+    """
+    n_show = len(top_images)
+    fig, axes = plt.subplots(1, n_show, figsize=(4.5 * n_show, 5.5), dpi=100)
+    if n_show == 1:
+        axes = [axes]
+
+    for ax, (score, img_tensor, all_k_scores) in zip(axes, top_images):
+        img_uint8 = denorm_to_uint8(img_tensor)
+        hm = compute_heatmap_for_image(model, img_tensor, proto_vec, device)
+        H = W = int(math.sqrt(hm.shape[0]))
+        hm_up = F.interpolate(
+            hm.view(1, 1, H, W), size=img_uint8.shape[:2],
+            mode="bilinear", align_corners=False,
+        )[0, 0]
+        overlay = overlay_heatmap(img_uint8, hm_up)
+        ax.imshow(overlay)
+        ax.axis("off")
+
+        top_k_idx = all_k_scores.topk(min(n_secondary, len(all_k_scores))).indices.tolist()
+        secondary = "\n".join(
+            f"• {all_concept_labels[i][:40]} ({all_k_scores[i]:.3f})"
+            for i in top_k_idx
+        )
+        ax.set_title(f"{score:.3f}\n{secondary}", fontsize=6)
+
+    fig.suptitle(
+        f"[{mode_label}] {concept_label[:80]}",
+        fontsize=8, fontweight="bold",
+    )
     plt.tight_layout()
     img = wandb.Image(fig)
     plt.close(fig)
@@ -413,7 +464,7 @@ def log_mode_results(
         f"{mode_label}/n_caption_prototypes":         n_caption,
     })
 
-    # ---- Top-N word concepts table + panels ----
+    # ---- Top word concepts table + panels (words only — no caption text) ----
     mean_word_scores = word_scores_all.mean(dim=0)                 # [V]
     top_word_vals, top_word_idx = mean_word_scores.topk(min(20, n_word_proto))
     word_table = wandb.Table(columns=["rank", "word", "mean_score"])
@@ -423,20 +474,19 @@ def log_mode_results(
 
     top_word_vecs = prototypes[:n_word_proto][top_word_idx[:n_top_concepts]].cpu()  # [K, D]
     word_top_images = collect_topk_images_per_concept(
-        model, dataloader, device, top_word_vecs,
-        n_images=n_top_images,
+        model, dataloader, device, top_word_vecs, n_images=n_top_images,
     )
     panels = {}
     for rank, (col, images_for_concept) in enumerate(
         zip(top_word_idx[:n_top_concepts].tolist(), word_top_images)
     ):
         label = f"word #{rank+1}: {vocab_words[col]}"
-        panels[f"{mode_label}/word_concept_{rank+1:02d}_{vocab_words[col]}"] = _concept_panel(
+        panels[f"{mode_label}/word_concept_{rank+1:02d}_{vocab_words[col]}"] = _word_concept_panel(
             label, images_for_concept, top_word_vecs[rank], model, device, mode_label
         )
     wandb.log(panels)
 
-    # ---- Top-N caption concepts table + panels (augmented mode only) ----
+    # ---- Top caption concepts table + panels (captions only — secondary matches per image) ----
     if caption_words and caption_mean.numel() > 0:
         top_cap_vals, top_cap_idx = caption_mean.topk(min(20, n_caption))
         cap_table = wandb.Table(columns=["rank", "caption", "mean_score"])
@@ -444,18 +494,20 @@ def log_mode_results(
             cap_table.add_data(rank + 1, caption_words[idx][:120], round(val, 5))
         wandb.log({f"{mode_label}/top_caption_concepts_table": cap_table})
 
-        top_cap_vecs = prototypes[n_word_proto:][top_cap_idx[:n_top_concepts]].cpu()  # [K, D]
+        top_cap_labels = [caption_words[i] for i in top_cap_idx[:n_top_concepts].tolist()]
+        top_cap_vecs = prototypes[n_word_proto:][top_cap_idx[:n_top_concepts]].cpu()
         cap_top_images = collect_topk_images_per_concept(
-            model, dataloader, device, top_cap_vecs,
-            n_images=n_top_images,
+            model, dataloader, device, top_cap_vecs, n_images=n_top_images,
         )
         panels = {}
         for rank, (col, images_for_concept) in enumerate(
             zip(top_cap_idx[:n_top_concepts].tolist(), cap_top_images)
         ):
             label = f"caption #{rank+1}: {caption_words[col][:60]}"
-            panels[f"{mode_label}/caption_concept_{rank+1:02d}"] = _concept_panel(
-                label, images_for_concept, top_cap_vecs[rank], model, device, mode_label
+            panels[f"{mode_label}/caption_concept_{rank+1:02d}"] = _caption_concept_panel(
+                label, images_for_concept, top_cap_vecs[rank],
+                all_concept_labels=top_cap_labels,
+                model=model, device=device, mode_label=mode_label,
             )
         wandb.log(panels)
 
