@@ -290,6 +290,7 @@ class PNPCriterion(nn.Module):
         use_binary: bool = False,
         bce_coef: float = 1.0,
         pos_weight_val: float = 100.0,
+        caption_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -301,6 +302,7 @@ class PNPCriterion(nn.Module):
         self.use_binary = use_binary
         self.bce_coef = bce_coef
         self.pos_weight_val = pos_weight_val
+        self.caption_coef = caption_coef
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -363,5 +365,13 @@ class PNPCriterion(nn.Module):
             patch_scores = torch.einsum("bnv,bv->bn", patch_logits, mixture_weights)  # [B, N]
             l_cover = -patch_scores.max(dim=1).values.mean()
             loss_dict["l_cover"] = self.cover_coef * l_cover
+
+        # 5) optional caption-level alignment: pred_text_embedding vs per-image CLIP caption emb
+        if self.caption_coef != 0:
+            caption_emb = batch[4].to(vocab_logits.device)        # [B, 512]
+            pred_emb = outputs["pred_text_embedding"]              # [B, 512], already normalised
+            caption_emb = F.normalize(caption_emb, dim=-1)
+            l_caption = 1.0 - (pred_emb * caption_emb).sum(dim=-1).mean()
+            loss_dict["l_caption"] = self.caption_coef * l_caption
 
         return loss_dict

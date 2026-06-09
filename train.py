@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 from clip_dataset import (CocoCLIPDataset, Caltech101CLIPDataset, CUBCLIPDataset,
                            AwA2CLIPDataset, VisualGenomeDataset, coco_clip_collate_fn,
-                           CLIPScoreDataset)
+                           vg_collate_fn, CLIPScoreDataset)
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -189,10 +189,11 @@ def train(
     running_losses = defaultdict(float)
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, target_dist, indices = batch
+        images, captions, target_dist, indices, *rest = batch
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
         words_sim_distribution = target_dist
+        caption_embs = rest[0].to(device, non_blocking=True) if rest else None
 
         # ---- DEBUG PRINT ----
         if i % 200 == 0:
@@ -211,7 +212,10 @@ def train(
                 print(f"  {w:15s} {s:.7f}")
 
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices, captions), model)
+        criterion_batch = (images, words_sim_distribution, indices, captions)
+        if caption_embs is not None:
+            criterion_batch = criterion_batch + (caption_embs,)
+        loss_dict = criterion(outputs, criterion_batch, model)
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
         if not isinstance(loss, torch.Tensor):
@@ -258,27 +262,23 @@ def test(
     num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, indices, _ = batch
+        images, captions, target_dist, indices, *rest = batch
 
         global_step = epoch * train_steps_per_epoch + i
 
-        # --------------------------
-        # Caption → noun distribution
-        # --------------------------
-
-        #B, D = img_feat.shape
-        #V = noun_embeddings.shape[0]
-
-        images, captions, target_dist, indices = batch
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
         words_sim_distribution = target_dist
+        caption_embs = rest[0].to(device, non_blocking=True) if rest else None
 
         # --------------------------
         # Model forward
         # --------------------------
         outputs = model(images)
-        loss_dict = criterion(outputs, (images, words_sim_distribution, indices, captions), model)
+        criterion_batch = (images, words_sim_distribution, indices, captions)
+        if caption_embs is not None:
+            criterion_batch = criterion_batch + (caption_embs,)
+        loss_dict = criterion(outputs, criterion_batch, model)
 
         bs = images.size(0)
         num_samples += bs
@@ -426,6 +426,15 @@ def main():
     parser.add_argument("--coco-clip-pretrained", type=str, default="openai")
     parser.add_argument("--visual-coef", type=float, default=0.0)
     parser.add_argument("--cover-coef", type=float, default=0.0)
+    parser.add_argument("--caption-coef", type=float, default=0.0,
+                        help="Weight for caption-level cosine alignment loss (VG only; default: 0.0)")
+    parser.add_argument("--caption-embeds-path", type=str, default=None,
+                        help="Path to per-image CLIP phrase embedding pool "
+                             "built by vocab/build_vg_caption_embeddings.py")
+    parser.add_argument("--caption-sample-k", type=int, default=5,
+                        help="Phrases randomly sampled per image at training time (default: 5)")
+    parser.add_argument("--caption-pool-size", type=int, default=50,
+                        help="Max phrases per image in the offline pool (informational; default: 50)")
 
     parser.add_argument("--clip-scores-coco-train", type=str, default=None,
                         help="Path to CLIP vocab scores .pt for COCO train split "
@@ -506,6 +515,10 @@ def main():
                         help="Number of images to visualize per W&B log step (default: 8)")
 
     args = parser.parse_args()
+
+    if args.caption_coef != 0 and not args.caption_embeds_path:
+        parser.error("--caption-coef requires --caption-embeds-path (build with "
+                     "vocab/build_vg_caption_embeddings.py --split both)")
 
     wandb.init(
         entity=args.wandb_entity,
@@ -605,6 +618,8 @@ def main():
             seed=args.seed,
             target_type=args.target_mode,
             top_k_concepts=args.top_k_concepts,
+            caption_embeds_path=args.caption_embeds_path,
+            caption_sample_k=args.caption_sample_k,
         )
         dataset_test = VisualGenomeDataset(
             vg_root=args.vg_root,
@@ -615,6 +630,8 @@ def main():
             seed=args.seed,
             target_type=args.target_mode,
             top_k_concepts=args.top_k_concepts,
+            caption_embeds_path=args.caption_embeds_path,
+            caption_sample_k=args.caption_sample_k,
         )
         if args.clip_scores_vg:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -697,11 +714,17 @@ def main():
     print('Train: ', len(dataset_train))
     print('Test: ', len(dataset_test))
 
+    _collate = (
+        vg_collate_fn
+        if (args.dataset == "visual_genome" and args.caption_embeds_path is not None)
+        else coco_clip_collate_fn
+    )
+
     dataloader_train = DataLoader(
         dataset=dataset_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=coco_clip_collate_fn,
+        collate_fn=_collate,
         shuffle=True,
         pin_memory=True,
     )
@@ -710,7 +733,7 @@ def main():
         dataset=dataset_test,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=coco_clip_collate_fn,
+        collate_fn=_collate,
         shuffle=False,
         pin_memory=True,
     )
@@ -795,6 +818,7 @@ def main():
         use_binary=(args.target_mode == "binary"),
         bce_coef=args.bce_coef,
         pos_weight_val=args.bce_pos_weight,
+        caption_coef=args.caption_coef,
     )
 
     net.to(device)

@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
@@ -701,6 +702,16 @@ class AwA2CLIPDataset(Dataset):
         return img_tensor, attr_words, prob_dist, index
 
 
+def vg_collate_fn(batch):
+    """Collate for VisualGenomeDataset when caption_embeds_path is set (5-tuple items)."""
+    images = torch.stack([b[0] for b in batch])
+    phrases = [b[1] for b in batch]
+    prob_dists = torch.stack([b[2] for b in batch])
+    indices = torch.tensor([b[3] for b in batch], dtype=torch.long)
+    caption_embs = torch.stack([b[4] for b in batch])
+    return images, phrases, prob_dists, indices, caption_embs
+
+
 class VisualGenomeDataset(Dataset):
     """Visual Genome dataset using region description phrases as vocabulary supervision.
 
@@ -715,6 +726,10 @@ class VisualGenomeDataset(Dataset):
             VG_100K/        <- first image shard (~60 K images)
             VG_100K_2/      <- second image shard (~48 K images)
         region_descriptions_json  (region_descriptions.json from VG v1.4)
+
+    Optional: pass caption_embeds_path (built by vocab/build_vg_caption_embeddings.py)
+    to enable caption-level supervision.  __getitem__ then returns a 5-tuple with a
+    per-image CLIP caption embedding (randomly sampled from a pool of up to 50 phrases).
     """
 
     def __init__(
@@ -729,6 +744,8 @@ class VisualGenomeDataset(Dataset):
         use_cache: bool = True,
         target_type: str = "prob",
         top_k_concepts: int = 10,
+        caption_embeds_path: str = None,
+        caption_sample_k: int = 5,
     ):
         self.vg_root = vg_root
         self.vocab_to_idx = vocab_to_idx
@@ -736,6 +753,14 @@ class VisualGenomeDataset(Dataset):
         self.train = train
         self.target_type = target_type if target_type != "topk" else f"topk{top_k_concepts}"
         self.top_k_concepts = top_k_concepts
+        self.caption_sample_k = caption_sample_k
+
+        if caption_embeds_path is not None:
+            print(f"Loading caption embedding pool from {caption_embeds_path} ...")
+            self.caption_embeds: dict = torch.load(caption_embeds_path, map_location="cpu")
+            print(f"  loaded {len(self.caption_embeds)} per-image embedding pools")
+        else:
+            self.caption_embeds = None
 
         self.train_transform = v2.Compose([
             v2.RandomResizedCrop(size=224, scale=(0.8, 1.0),
@@ -837,6 +862,21 @@ class VisualGenomeDataset(Dataset):
         im_path, phrases, prob_dist = self.samples[index]
         img = Image.open(im_path).convert("RGB")
         img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
+
+        if self.caption_embeds is not None:
+            pool = self.caption_embeds.get(im_path)
+            if pool is not None and pool.shape[0] > 0:
+                N = pool.shape[0]
+                if self.train and N > self.caption_sample_k:
+                    idx = torch.randperm(N)[:self.caption_sample_k]
+                    sampled = pool[idx]
+                else:
+                    sampled = pool
+                caption_emb = F.normalize(sampled.mean(0), dim=-1)
+            else:
+                caption_emb = torch.zeros(512)
+            return img_tensor, phrases, prob_dist, index, caption_emb
+
         return img_tensor, phrases, prob_dist, index
 
 
