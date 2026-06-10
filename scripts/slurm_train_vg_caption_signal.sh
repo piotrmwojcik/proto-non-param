@@ -115,8 +115,7 @@ echo "Submitted job 2 (build-caption-embs): ${JOB2}"
 # -----------------------------------------------------------------------
 # Shared training args
 # -----------------------------------------------------------------------
-TRAIN_COMMON="
-  --dataset visual_genome \\
+TRAIN_COMMON="--dataset visual_genome \\
   --vg-root ${VG_ROOT} \\
   --vg-region-descriptions ${VG_DESC} \\
   --vocab-cache-path ${VG_CACHE} \\
