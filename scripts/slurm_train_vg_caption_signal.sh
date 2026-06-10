@@ -125,7 +125,7 @@ TRAIN_COMMON="--dataset visual_genome \\
   --num-workers 8 \\
   --backbone-lr 1e-5 \\
   --text-proj-lr 1e-4 \\
-  --target-type topk \\
+  --target-mode topk \\
   --top-k-concepts 5 \\
   --wandb-entity ${WANDB_ENTITY} \\
   --wandb-log-images 16"
