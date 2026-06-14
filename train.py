@@ -183,6 +183,7 @@ def train(
     target_temperature: float = 0.01,
     *,
     vocab_to_idx=None,
+    residual_eps: float = 0.0,
 ):
     model.train()
 
@@ -224,6 +225,13 @@ def train(
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+
+        # ℓ₂-ball projection for prototype_residual (PDF Eq. 5): δ ← δ · min(1, ε/‖δ‖)
+        # Only runs when residual is being trained (residual_eps > 0 signals it's active)
+        if residual_eps > 0 and model.prototype_residual.requires_grad:
+            with torch.no_grad():
+                norms = model.prototype_residual.norm(dim=-1, keepdim=True)  # [V, 1]
+                model.prototype_residual.data.mul_((residual_eps / norms).clamp_(max=1.0))
 
         log_dict = {}
         for k, v in loss_dict.items():
@@ -493,6 +501,15 @@ def main():
                         help="pos_weight for BCE to counter class imbalance (used when --target-mode=binary)")
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
     parser.add_argument("--prototype-init-noise", type=float, default=0.01)
+    parser.add_argument("--residual-lr", type=float, default=0.0,
+                        help="LR for prototype_residual; 0 = keep frozen (current default)")
+    parser.add_argument("--residual-eps", type=float, default=0.1,
+                        help="ℓ₂-ball radius for residual projection (PDF Eq. 5); only active when --residual-lr > 0")
+    parser.add_argument("--residual-reg-coef", type=float, default=0.0,
+                        help="Weight for soft residual regularization Lreg = (1/V)Σ‖δ_v‖² (PDF Eq. 14)")
+    parser.add_argument("--loss-type", type=str, default="kl", choices=["kl", "jsd"],
+                        help="Distribution alignment loss: 'kl' (default) or 'jsd' (Jensen-Shannon; "
+                             "pairs best with --target-mode topk for clean zero entries)")
     parser.add_argument("--temperature", type=float, default=0.2)
 
     parser.add_argument("--batch-size", type=int, default=64)
@@ -819,6 +836,8 @@ def main():
         bce_coef=args.bce_coef,
         pos_weight_val=args.bce_pos_weight,
         caption_coef=args.caption_coef,
+        loss_type=args.loss_type,
+        residual_reg_coef=args.residual_reg_coef,
     )
 
     net.to(device)
@@ -833,7 +852,12 @@ def main():
             "params": backbone_params,
             "lr": args.backbone_lr,
         })
-
+    # add prototype_residual if requested (default residual_lr=0 keeps old frozen behavior)
+    if args.residual_lr > 0:
+        param_groups.append({
+            "params": [net.prototype_residual],
+            "lr": args.residual_lr,
+        })
 
     optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
@@ -879,7 +903,8 @@ def main():
             clip_model=clip_model,
             noun_embeddings=noun_embeddings,
             target_temperature=0.01,
-            vocab_to_idx=vocab_to_idx
+            vocab_to_idx=vocab_to_idx,
+            residual_eps=args.residual_eps if args.residual_lr > 0 else 0.0,
         )
 
         epoch_metrics = test(

@@ -129,12 +129,20 @@ class PNP(nn.Module):
         #    bias=True
         #)
 
-    def get_prototypes(self) -> torch.Tensor:
+    def get_prototypes(self, use_residual: bool = True) -> torch.Tensor:
         """
         Compute visual prototypes from frozen CLIP text embeddings plus
         a trainable residual, then project to visual space.
+
+        Args:
+            use_residual: if False, ignore prototype_residual and use only the
+                frozen CLIP embeddings. Useful for inference ablations comparing
+                with vs. without the learned residual.
         """
-        clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
+        if use_residual:
+            clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
+        else:
+            clip_proto = self.vocab_clip_embeddings.clone()  # [V, 512]
         clip_proto = F.normalize(clip_proto, dim=-1)
 
         proto = self.text_projection_head(clip_proto)  # [V, D]
@@ -144,6 +152,7 @@ class PNP(nn.Module):
     def get_prototypes_augmented(
         self,
         extra_clip_embeds: Optional[torch.Tensor] = None,
+        use_residual: bool = True,
     ) -> torch.Tensor:
         """Word prototypes (with trained residuals) optionally concatenated with
         caption prototypes (no residuals) for inference-time vocabulary augmentation.
@@ -154,12 +163,17 @@ class PNP(nn.Module):
                 the same text_projection_head but have no trained residual, since
                 they were not part of training. Caller must ensure the model is in
                 eval() mode so BatchNorm1d uses its running statistics.
+            use_residual: if False, ignore prototype_residual for the word prototypes.
+                Caption prototypes (extra_clip_embeds) never use a residual regardless.
 
         Returns:
             [V + C, D] or [V, D] (when extra_clip_embeds is None) unit-normalised
             visual prototypes.
         """
-        clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
+        if use_residual:
+            clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
+        else:
+            clip_proto = self.vocab_clip_embeddings.clone()  # [V, 512]
         clip_proto = F.normalize(clip_proto, dim=-1)
 
         if extra_clip_embeds is not None:
@@ -291,6 +305,8 @@ class PNPCriterion(nn.Module):
         bce_coef: float = 1.0,
         pos_weight_val: float = 100.0,
         caption_coef: float = 0.0,
+        loss_type: str = "kl",
+        residual_reg_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -303,6 +319,10 @@ class PNPCriterion(nn.Module):
         self.bce_coef = bce_coef
         self.pos_weight_val = pos_weight_val
         self.caption_coef = caption_coef
+        if loss_type not in ("kl", "jsd"):
+            raise ValueError(f"loss_type must be 'kl' or 'jsd', got {loss_type!r}")
+        self.loss_type = loss_type
+        self.residual_reg_coef = residual_reg_coef
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -313,7 +333,7 @@ class PNPCriterion(nn.Module):
 
         loss_dict = {}
 
-        # 1) distribution matching: binary BCE or soft KL
+        # 1) distribution matching: binary BCE, soft KL, or JSD
         if self.use_binary:
             # target_dist contains 0/1 presence labels; vocab_logits are raw pre-softmax
             pos_weight = torch.full(
@@ -329,7 +349,7 @@ class PNPCriterion(nn.Module):
                 reduction="mean",
             )
             loss_dict["l_bce"] = self.bce_coef * l_bce
-        else:
+        elif self.loss_type == "kl":
             # clamp before normalization so log(target) doesn't produce NaN for zero entries
             target_dist = target_dist.clamp_min(1e-8)
             target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
@@ -340,6 +360,26 @@ class PNPCriterion(nn.Module):
                 reduction="batchmean",
             )
             loss_dict["l_dist"] = self.kl_coef * l_kl
+        else:
+            # JSD: L_JSD = 0.5 * KL(target || m) + 0.5 * KL(q_hat || m), m = (target + q_hat) / 2
+            # Pairs best with --target-mode topk so target has genuine zeros (the negative signal).
+            # Do NOT clamp target to eps — zeros are the negative signal JSD is designed to exploit.
+            target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
+            q_hat = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V], always > 0
+            m = 0.5 * (target_dist + q_hat)                             # [B, V], always > 0
+
+            # KL(target || m): zero entries contribute 0 by convention (0 log 0 = 0)
+            kl_target_m = torch.where(
+                target_dist > 0,
+                target_dist * (target_dist.clamp(min=1e-8).log() - m.log()),
+                torch.zeros_like(target_dist),
+            ).sum(dim=-1).mean()
+
+            # KL(q_hat || m): always well-defined since q_hat > 0 and m > 0
+            kl_pred_m = (q_hat * (q_hat.log() - m.log())).sum(dim=-1).mean()
+
+            l_jsd = 0.5 * (kl_target_m + kl_pred_m)
+            loss_dict["l_dist"] = self.kl_coef * l_jsd
 
         # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:
@@ -373,5 +413,10 @@ class PNPCriterion(nn.Module):
             caption_emb = F.normalize(caption_emb, dim=-1)
             l_caption = 1.0 - (pred_emb * caption_emb).sum(dim=-1).mean()
             loss_dict["l_caption"] = self.caption_coef * l_caption
+
+        # 6) optional residual regularization: (1/V) Σ ‖δ_v‖² (PDF Eq. 14)
+        if self.residual_reg_coef != 0:
+            l_residual_reg = model.prototype_residual.pow(2).sum(dim=-1).mean()
+            loss_dict["l_residual_reg"] = self.residual_reg_coef * l_residual_reg
 
         return loss_dict
