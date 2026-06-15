@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import math
+import random
 from pathlib import Path
 from typing import List, Optional
 
@@ -165,6 +166,25 @@ def patch_heatmap(
     return hm_up
 
 
+@torch.inference_mode()
+def encode_phrases_to_prototypes(
+    phrases: List[str],
+    model: "PNP",
+    device: torch.device,
+) -> torch.Tensor:
+    """Encode text phrases → visual-space prototype vectors [N, D].
+
+    Follows the same path as augmented prototypes:
+      CLIP text encoder → text_projection_head → L2-normalise.
+    No residual is added (caption prototypes never have one).
+    """
+    tokens = open_clip.tokenize(phrases).to(device)
+    text_embeds = model.clip_model.encode_text(tokens).float()  # [N, 512]
+    text_embeds = F.normalize(text_embeds, dim=-1)
+    vecs = model.text_projection_head(text_embeds)              # [N, D]
+    return F.normalize(vecs, dim=-1).cpu()
+
+
 # ---------------------------------------------------------------------------
 # Figure rendering
 # ---------------------------------------------------------------------------
@@ -224,7 +244,9 @@ def main():
     ap = argparse.ArgumentParser(description="Visualise per-image caption activations")
     ap.add_argument("--ckpt",                  required=True)
     ap.add_argument("--vocab-cache-path",       default="vocab/vg_cache.pt")
-    ap.add_argument("--caption-prototypes-path", required=True)
+    ap.add_argument("--caption-prototypes-path", default=None,
+                    help="Global caption prototype cache (.pt). When set, also logs "
+                         "top-K global caption panels per image (caption_activation/).")
     ap.add_argument("--source-dataset",         default="vg_test",
                     choices=["vg_test", "coco_val"])
     ap.add_argument("--vg-root",                default=None)
@@ -238,7 +260,12 @@ def main():
     ap.add_argument("--n-random",  type=int, default=20,
                     help="Random images to visualise (ignored if --indices given)")
     ap.add_argument("--n-captions", type=int, default=4,
-                    help="Top-K caption prototypes shown per image")
+                    help="Top-K global caption prototypes shown per image "
+                         "(only used when --caption-prototypes-path is set)")
+    ap.add_argument("--n-own-captions", type=int, default=5,
+                    help="Number of per-image VG region captions to encode and "
+                         "visualise as augmented prototypes (vg_test only). "
+                         "Set to 0 to disable.")
     ap.add_argument("--top-patches", type=int, default=5)
 
     ap.add_argument("--seed",          type=int, default=42)
@@ -253,22 +280,26 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # --- Vocab + caption prototypes ---
-    vocab_cache   = torch.load(args.vocab_cache_path, map_location="cpu")
-    vocab_to_idx  = {w: i for i, w in enumerate(vocab_cache.keys())}
+    # --- Vocab cache ---
+    vocab_cache  = torch.load(args.vocab_cache_path, map_location="cpu")
+    vocab_to_idx = {w: i for i, w in enumerate(vocab_cache.keys())}
 
-    cap_cache     = torch.load(args.caption_prototypes_path, map_location="cpu")
-    caption_words = list(cap_cache.keys())
-    cap_embeds    = torch.stack([cap_cache[w] for w in caption_words])  # [C, 512]
-    print(f"Caption prototypes: {len(caption_words)}")
+    # --- Optional: global caption prototype pool ---
+    cap_vecs: Optional[torch.Tensor] = None
+    caption_words: Optional[List[str]] = None
+    if args.caption_prototypes_path is not None:
+        cap_cache     = torch.load(args.caption_prototypes_path, map_location="cpu")
+        caption_words = list(cap_cache.keys())
+        cap_embeds    = torch.stack([cap_cache[w] for w in caption_words])  # [C, 512]
+        print(f"Caption prototypes: {len(caption_words)}")
 
-    # --- Model + project captions to visual space ---
-    model = build_model(args.ckpt, device)
-    with torch.no_grad():
-        # get_prototypes_augmented returns [V+C, D]; slice off word part
-        all_protos  = model.get_prototypes_augmented(cap_embeds.to(device))
-        cap_vecs    = all_protos[model.vocab_size:].cpu()   # [C, D]
-    print(f"Caption prototype shape in visual space: {tuple(cap_vecs.shape)}")
+        model = build_model(args.ckpt, device)
+        with torch.no_grad():
+            all_protos = model.get_prototypes_augmented(cap_embeds.to(device))
+            cap_vecs   = all_protos[model.vocab_size:].cpu()   # [C, D]
+        print(f"Caption prototype shape in visual space: {tuple(cap_vecs.shape)}")
+    else:
+        model = build_model(args.ckpt, device)
 
     # --- Dataset ---
     if args.source_dataset == "vg_test":
@@ -294,6 +325,15 @@ def main():
         )
     print(f"Test set size: {len(dataset)}")
 
+    # Whether to render per-image own-caption panels (VG only — needs .samples phrases)
+    do_own_captions = (
+        args.n_own_captions > 0
+        and args.source_dataset == "vg_test"
+        and hasattr(dataset, "samples")
+    )
+    if args.n_own_captions > 0 and not do_own_captions:
+        print("Warning: --n-own-captions ignored (only supported for vg_test dataset)")
+
     # --- Select indices ---
     if args.indices:
         indices = args.indices
@@ -318,26 +358,57 @@ def main():
         img_tensor = sample[0]              # [3, H, W] normalised
 
         pt = patch_tokens_for(model, img_tensor, device)   # [N, D]
-        scores = score_image_vs_captions(
-            pt, cap_vecs, device, top_patches=args.top_patches,
-        )
-        top_idx = scores.topk(args.n_captions).indices.tolist()
 
-        fig = render_panel(
-            img_tensor, pt, cap_vecs, caption_words,
-            top_idx, scores, img_idx, device,
-        )
-        key = f"caption_activation/img_{img_idx:05d}"
-        panels[key] = wandb.Image(fig)
-        if args.out_dir:
-            fig.savefig(
-                Path(args.out_dir) / f"img_{img_idx:05d}.png",
-                bbox_inches="tight",
+        # ---- Panel A: top-K from global caption pool (optional) ----
+        if cap_vecs is not None and caption_words is not None:
+            scores = score_image_vs_captions(
+                pt, cap_vecs, device, top_patches=args.top_patches,
             )
-        plt.close(fig)
+            top_idx = scores.topk(args.n_captions).indices.tolist()
+            fig = render_panel(
+                img_tensor, pt, cap_vecs, caption_words,
+                top_idx, scores, img_idx, device,
+            )
+            key = f"caption_activation/img_{img_idx:05d}"
+            panels[key] = wandb.Image(fig)
+            if args.out_dir:
+                fig.savefig(
+                    Path(args.out_dir) / f"img_{img_idx:05d}_global.png",
+                    bbox_inches="tight",
+                )
+            plt.close(fig)
+
+        # ---- Panel B: per-image own VG captions ----
+        if do_own_captions:
+            _, phrases, _ = dataset.samples[img_idx]
+            # sample n_own_captions phrases; use seed+img_idx for reproducibility
+            rng_img = random.Random(args.seed + img_idx)
+            k = min(args.n_own_captions, len(phrases))
+            sampled = rng_img.sample(phrases, k)
+
+            with torch.no_grad():
+                own_vecs = encode_phrases_to_prototypes(sampled, model, device)  # [k, D]
+
+            own_scores = score_image_vs_captions(
+                pt, own_vecs, device, top_patches=args.top_patches,
+            )
+            fig = render_panel(
+                img_tensor, pt, own_vecs, sampled,
+                list(range(k)), own_scores, img_idx, device,
+            )
+            key = f"own_captions/img_{img_idx:05d}"
+            panels[key] = wandb.Image(fig)
+            if args.out_dir:
+                fig.savefig(
+                    Path(args.out_dir) / f"img_{img_idx:05d}_own.png",
+                    bbox_inches="tight",
+                )
+            plt.close(fig)
 
     wandb.log(panels)
-    print(f"Logged {len(panels)} panels to W&B.")
+    n_global = sum(1 for k in panels if k.startswith("caption_activation"))
+    n_own    = sum(1 for k in panels if k.startswith("own_captions"))
+    print(f"Logged {n_global} global-pool panels and {n_own} own-caption panels to W&B.")
     wandb.finish()
 
 

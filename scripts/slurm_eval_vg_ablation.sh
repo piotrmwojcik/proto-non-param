@@ -145,6 +145,18 @@ python eval_augmented_prototypes.py \\
   --num-workers 8 \\
   --wandb-entity ${WANDB_ENTITY} \\
   --wandb-run-name ${RUN_NAME}
+
+python visualize_caption_activation.py \\
+  --ckpt ${CKPT} \\
+  --vocab-cache-path ${VG_CACHE} \\
+  --source-dataset vg_test \\
+  --vg-root ${VG_ROOT} \\
+  --vg-region-descriptions ${VG_DESC} \\
+  --n-random 30 \\
+  --n-own-captions 5 \\
+  --top-patches 5 \\
+  --wandb-entity ${WANDB_ENTITY} \\
+  --wandb-run-name ${RUN_NAME}-own-caps
 ")
   echo "Submitted eval-abl-${LABEL}: ${JOB}"
 }
