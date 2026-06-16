@@ -69,13 +69,13 @@ TRAIN_COMMON="--dataset visual_genome \
   --wandb-entity ${WANDB_ENTITY} \
   --wandb-log-images 16"
 
-# PLGrid A100 partition hard limit is 3 days; request the maximum.
+# PLGrid A100 partition hard limit is 2 days; request the maximum.
 SLURM_COMMON="--partition=${PARTITION} \
   --account=${ACCOUNT} \
   --gres=gpu:1 \
   --cpus-per-task=8 \
   --mem=64G \
-  --time=3-00:00:00"
+  --time=2-00:00:00"
 
 WRAP_HEADER="
 set -e
