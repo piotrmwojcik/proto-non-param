@@ -69,14 +69,13 @@ TRAIN_COMMON="--dataset visual_genome \
   --wandb-entity ${WANDB_ENTITY} \
   --wandb-log-images 16"
 
-# 80 epochs ≈ 4x the 20-epoch ablation; wall time scaled from 2d → 8d.
-# Adjust --time if your cluster enforces a lower limit.
+# PLGrid A100 partition hard limit is 3 days; request the maximum.
 SLURM_COMMON="--partition=${PARTITION} \
   --account=${ACCOUNT} \
   --gres=gpu:1 \
   --cpus-per-task=8 \
   --mem=64G \
-  --time=8-00:00:00"
+  --time=3-00:00:00"
 
 WRAP_HEADER="
 set -e
