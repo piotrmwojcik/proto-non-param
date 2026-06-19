@@ -95,6 +95,7 @@ python train.py \\
   --top-k-concepts 5 \\
   --kl-coef 1.0 \\
   --loss-type kl \\
+  --save-every 10 \\
   --wandb-entity ${WANDB_ENTITY} \\
   --wandb-log-images 16 \\
   --log-dir ${LOG_DIR}/run_A_kl_frozen_dedup_t${THRESHOLD_STR}_80ep

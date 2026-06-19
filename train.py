@@ -501,6 +501,10 @@ def main():
                         help="pos_weight for BCE to counter class imbalance (used when --target-mode=binary)")
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
     parser.add_argument("--prototype-init-noise", type=float, default=0.01)
+    parser.add_argument("--save-every", type=int, default=0,
+                        help="Save a milestone checkpoint ckpt_ep{N:03d}.pth every N epochs "
+                             "(0 = disabled). Useful for collapse detection and post-hoc "
+                             "per-epoch evaluation. Does not replace the rolling ckpt.pth.")
     parser.add_argument("--residual-lr", type=float, default=0.0,
                         help="LR for prototype_residual; 0 = keep frozen (current default)")
     parser.add_argument("--residual-eps", type=float, default=0.1,
@@ -773,7 +777,7 @@ def main():
         clip_text_dim=args.clip_text_dim,
         text_proj_hidden_dim=args.text_proj_hidden_dim,
         vocab_cache_path=args.vocab_cache_path,
-        prototype_init_noise=args.prototype_init_noise,
+        prototype_init_noise=0.0 if args.residual_lr == 0 else args.prototype_init_noise,
         clip_model=clip_model,  # ← added
     )
     # freeze backbone first
@@ -927,22 +931,17 @@ def main():
             v for k, v in epoch_metrics.items()
             if k.startswith("test/") and not k.startswith("test/_")
         )
-        torch.save(
-            {
-                "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
-                "hparams": vars(args),
-            },
-            log_dir / "ckpt.pth",
-        )
+        ckpt_payload = {
+            "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+            "hparams": vars(args),
+        }
+        torch.save(ckpt_payload, log_dir / "ckpt.pth")
         logger.info("Model saved as ckpt.pth")
-        torch.save(
-            {
-                "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
-                "hparams": vars(args),
-            },
-            log_dir / "ckpt.pth",
-        )
-        logger.info("Model saved as ckpt.pth")
+
+        if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
+            milestone_path = log_dir / f"ckpt_ep{epoch + 1:03d}.pth"
+            torch.save(ckpt_payload, milestone_path)
+            logger.info(f"Milestone checkpoint saved: {milestone_path.name}")
 
         if epoch_metric > best_val_cosine:
             best_val_cosine = epoch_metric
