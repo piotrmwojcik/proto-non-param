@@ -307,6 +307,8 @@ class PNPCriterion(nn.Module):
         caption_coef: float = 0.0,
         loss_type: str = "kl",
         residual_reg_coef: float = 0.0,
+        contrastive_coef: float = 0.0,
+        contrastive_temp: float = 0.07,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -323,6 +325,8 @@ class PNPCriterion(nn.Module):
             raise ValueError(f"loss_type must be 'kl' or 'jsd', got {loss_type!r}")
         self.loss_type = loss_type
         self.residual_reg_coef = residual_reg_coef
+        self.contrastive_coef = contrastive_coef
+        self.contrastive_temp = contrastive_temp
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -418,5 +422,17 @@ class PNPCriterion(nn.Module):
         if self.residual_reg_coef != 0:
             l_residual_reg = model.prototype_residual.pow(2).sum(dim=-1).mean()
             loss_dict["l_residual_reg"] = self.residual_reg_coef * l_residual_reg
+
+        # 7) in-batch contrastive: pred_text_embedding (image side) vs CLIP phrase embeddings
+        # Symmetric InfoNCE over the [B, B] cosine similarity matrix.
+        # Requires caption_emb as batch[4] (provided by vg_collate_fn + caption_embeds_path).
+        if self.contrastive_coef != 0:
+            cap_emb = batch[4].to(vocab_logits.device)         # [B, 512]
+            pred_emb = outputs["pred_text_embedding"]          # [B, 512], already normalised
+            cap_emb = F.normalize(cap_emb, dim=-1)
+            sim = pred_emb @ cap_emb.T / self.contrastive_temp  # [B, B]
+            labels = torch.arange(sim.shape[0], device=sim.device)
+            l_contrastive = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels)) / 2
+            loss_dict["l_contrastive"] = self.contrastive_coef * l_contrastive
 
         return loss_dict

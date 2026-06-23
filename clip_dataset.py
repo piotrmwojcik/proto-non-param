@@ -824,6 +824,11 @@ class VisualGenomeDataset(Dataset):
                 w = 1.0 / len(top_items)
                 for wi, _ in top_items:
                     prob_dist[wi] = w
+            elif self.target_type == "uniform":
+                unique_words = list(counts.keys())
+                w = 1.0 / len(unique_words)
+                for wi in unique_words:
+                    prob_dist[wi] = w
             else:
                 total = sum(counts.values())
                 for wi, cnt in counts.items():

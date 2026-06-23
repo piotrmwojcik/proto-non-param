@@ -491,8 +491,10 @@ def main():
     parser.add_argument("--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt")
     parser.add_argument("--clip-text-dim", type=int, default=512)
     parser.add_argument("--kl-coef", type=float, default=1.0)
-    parser.add_argument("--target-mode", type=str, default="prob", choices=["prob", "binary", "topk"],
-                        help="prob=frequency-weighted KL; binary=0/1 BCE; topk=top-K uniform KL")
+    parser.add_argument("--target-mode", type=str, default="prob",
+                        choices=["prob", "binary", "topk", "uniform"],
+                        help="prob=frequency-weighted KL; binary=0/1 BCE; "
+                             "topk=top-K uniform KL; uniform=equal weight over all present words")
     parser.add_argument("--top-k-concepts", type=int, default=10,
                         help="K for --target-mode=topk: keep only top-K concepts per image, uniform 1/K weight")
     parser.add_argument("--bce-coef", type=float, default=1.0,
@@ -530,6 +532,11 @@ def main():
 
     parser.add_argument("--cosine-coef", type=float, default=1.0)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--contrastive-coef", type=float, default=0.0,
+                        help="Weight for in-batch symmetric InfoNCE loss on pred_text_embedding "
+                             "vs CLIP phrase embeddings. Requires --caption-embeds-path.")
+    parser.add_argument("--contrastive-temp", type=float, default=0.07,
+                        help="Temperature for the contrastive similarity matrix (default: 0.07)")
     parser.add_argument("--wandb-entity", type=str, default=None,
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
@@ -537,9 +544,9 @@ def main():
 
     args = parser.parse_args()
 
-    if args.caption_coef != 0 and not args.caption_embeds_path:
-        parser.error("--caption-coef requires --caption-embeds-path (build with "
-                     "vocab/build_vg_caption_embeddings.py --split both)")
+    if (args.caption_coef != 0 or args.contrastive_coef != 0) and not args.caption_embeds_path:
+        parser.error("--caption-coef and --contrastive-coef require --caption-embeds-path "
+                     "(build with vocab/build_vg_caption_embeddings.py --split both)")
 
     wandb.init(
         entity=args.wandb_entity,
@@ -738,6 +745,7 @@ def main():
     _collate = (
         vg_collate_fn
         if (args.dataset == "visual_genome" and args.caption_embeds_path is not None)
+        or args.contrastive_coef != 0
         else coco_clip_collate_fn
     )
 
@@ -842,6 +850,8 @@ def main():
         caption_coef=args.caption_coef,
         loss_type=args.loss_type,
         residual_reg_coef=args.residual_reg_coef,
+        contrastive_coef=args.contrastive_coef,
+        contrastive_temp=args.contrastive_temp,
     )
 
     net.to(device)
