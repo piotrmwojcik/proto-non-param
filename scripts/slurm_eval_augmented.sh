@@ -29,7 +29,7 @@
 
 set -e
 
-SCRATCH="/net/tscratch/people/plgabedychaj"
+SCRATCH="/net/tscrax  steastch/people/plgabedychaj"
 ABLATION_BASE="${SCRATCH}/train_logs/vg_caption_signal_ablation"
 VOCAB_DIR="${VOCAB_DIR:-${SCRATCH}/vocab}"
 VG_ROOT="${VG_ROOT:-${SCRATCH}/vg}"
@@ -80,7 +80,7 @@ set -e
 export HF_HOME=${SCRATCH}/hf_cache
 export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
 source ${SCRATCH}/venv/bin/activate
-cd ~/proto-VLM/proto-non-param
+cd ~/proto-non-param
 
 python vocab/build_caption_prototypes.py \\
   --source vg_test \\
@@ -126,7 +126,7 @@ set -e
 export HF_HOME=${SCRATCH}/hf_cache
 export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
 source ${SCRATCH}/venv/bin/activate
-cd ~/proto-VLM/proto-non-param
+cd ~/proto-non-param
 
 python eval_augmented_prototypes.py \\
   --ckpt ${CKPT} \\

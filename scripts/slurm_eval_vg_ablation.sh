@@ -84,7 +84,7 @@ set -e
 export HF_HOME=${SCRATCH}/hf_cache
 export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
 source ${SCRATCH}/venv/bin/activate
-cd ~/proto-VLM/proto-non-param
+cd ~/proto-non-param
 
 python vocab/build_caption_prototypes.py \\
   --source vg_test \\
@@ -130,7 +130,7 @@ set -e
 export HF_HOME=${SCRATCH}/hf_cache
 export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
 source ${SCRATCH}/venv/bin/activate
-cd ~/proto-VLM/proto-non-param
+cd ~/proto-non-param
 
 python eval_augmented_prototypes.py \\
   --ckpt ${CKPT} \\
