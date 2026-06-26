@@ -7,12 +7,15 @@
 # Results land in:
 #   eval_results/collapse_check/contrastive_A_30ep/ep{N}/pnp_refer/Gref_val.json
 #   eval_results/collapse_check/contrastive_B_30ep/ep{N}/pnp_refer/Gref_val.json
+#   eval_results/collapse_check/contrastive_C_30ep/ep{N}/pnp_refer/Gref_val.json
 #
 # After all jobs finish, print each learning curve:
 #   python scripts/summarize_collapse_check.py \
 #       --check-dir eval_results/collapse_check/contrastive_A_30ep
 #   python scripts/summarize_collapse_check.py \
 #       --check-dir eval_results/collapse_check/contrastive_B_30ep
+#   python scripts/summarize_collapse_check.py \
+#       --check-dir eval_results/collapse_check/contrastive_C_30ep
 #
 # Configuration — override via environment variables:
 #   CONTR_BASE   Base dir with run_A_* / run_B_* subdirs
@@ -39,20 +42,22 @@ mkdir -p "${LOG_SLURM}"
 declare -A CKPT_DIRS=(
   [A]="${CONTR_BASE}/run_A_uniform_contrastive05_30ep"
   [B]="${CONTR_BASE}/run_B_uniform_contrastive10_30ep"
+  [C]="${CONTR_BASE}/run_C_uniform_contrastive_only_30ep"
 )
 
 declare -A VARIANTS=(
   [A]="contrastive_A_30ep"
   [B]="contrastive_B_30ep"
+  [C]="contrastive_C_30ep"
 )
 
-echo "=== Collapse Check — Contrastive VG runs A and B (30 epochs) ==="
+echo "=== Collapse Check — Contrastive VG runs A, B, and C (30 epochs) ==="
 echo "  Epochs : ${EPOCHS}"
 echo ""
 
 TOTAL=0
 
-for RUN in A B; do
+for RUN in A B C; do
   CKPT_DIR="${CKPT_DIRS[$RUN]}"
   VARIANT="${VARIANTS[$RUN]}"
   OUT_BASE="${REPO}/eval_results/collapse_check/${VARIANT}"
@@ -133,3 +138,5 @@ echo "  python scripts/summarize_collapse_check.py \\"
 echo "      --check-dir ${REPO}/eval_results/collapse_check/contrastive_A_30ep"
 echo "  python scripts/summarize_collapse_check.py \\"
 echo "      --check-dir ${REPO}/eval_results/collapse_check/contrastive_B_30ep"
+echo "  python scripts/summarize_collapse_check.py \\"
+echo "      --check-dir ${REPO}/eval_results/collapse_check/contrastive_C_30ep"

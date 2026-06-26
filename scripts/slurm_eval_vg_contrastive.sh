@@ -9,10 +9,12 @@
 # Variants:
 #   A — uniform distribution + contrastive_coef=0.5  (30 epochs)
 #   B — uniform distribution + contrastive_coef=1.0  (30 epochs)
+#   C — contrastive-only (kl_coef=0) + contrastive_coef=1.0  (30 epochs)
 #
 # Results land in:
 #   eval_results/vg_contrastive/contr_A/pnp_refer/{dataset}_{split}.json
 #   eval_results/vg_contrastive/contr_B/pnp_refer/{dataset}_{split}.json
+#   eval_results/vg_contrastive/contr_C/pnp_refer/{dataset}_{split}.json
 #
 # After completion, generate comparison table:
 #   python scripts/compare_ris_results.py \
@@ -44,11 +46,13 @@ mkdir -p "${LOG_SLURM}"
 declare -A CKPTS=(
   [A]="${CONTR_BASE}/run_A_uniform_contrastive05_30ep/ckpt.pth"
   [B]="${CONTR_BASE}/run_B_uniform_contrastive10_30ep/ckpt.pth"
+  [C]="${CONTR_BASE}/run_C_uniform_contrastive_only_30ep/ckpt.pth"
 )
 
 declare -A LABELS=(
   [A]="uniform + contrastive=0.5 (30 epochs)"
   [B]="uniform + contrastive=1.0 (30 epochs)"
+  [C]="contrastive-only=1.0, no KL (30 epochs)"
 )
 
 declare -A SPLITS=(
@@ -60,11 +64,12 @@ declare -A SPLITS=(
 echo "=== PNP Contrastive VG — Zero-shot RIS Evaluation (30 epochs) ==="
 echo "  Ckpt A : ${CKPTS[A]}"
 echo "  Ckpt B : ${CKPTS[B]}"
+echo "  Ckpt C : ${CKPTS[C]}"
 echo "  Data   : ${DATA_ROOT}"
-echo "  Results: eval_results/vg_contrastive/contr_{A,B}/pnp_refer/"
+echo "  Results: eval_results/vg_contrastive/contr_{A,B,C}/pnp_refer/"
 echo ""
 
-for VARIANT in A B; do
+for VARIANT in A B C; do
   CKPT="${CKPTS[$VARIANT]}"
   if [ ! -f "${CKPT}" ]; then
     echo "ERROR: checkpoint not found for variant ${VARIANT}: ${CKPT}"
@@ -106,7 +111,7 @@ python scripts/evaluate_pnp_refer.py \
   echo ""
 done
 
-echo "14 jobs submitted. Monitor with: squeue -u \$USER"
+echo "21 jobs submitted. Monitor with: squeue -u \$USER"
 echo ""
 echo "After completion, generate comparison table with:"
 echo "  python scripts/compare_ris_results.py \\"

@@ -147,6 +147,7 @@ ABLATION_VARIANTS = {
     "vg_contrastive": {
         "A": ("PNP-A (uniform + contrastive=0.5, 30ep)", "contr_A"),
         "B": ("PNP-B (uniform + contrastive=1.0, 30ep)", "contr_B"),
+        "C": ("PNP-C (contrastive-only=1.0, 30ep)",      "contr_C"),
     },
 }
 

@@ -353,37 +353,38 @@ class PNPCriterion(nn.Module):
                 reduction="mean",
             )
             loss_dict["l_bce"] = self.bce_coef * l_bce
-        elif self.loss_type == "kl":
-            # clamp before normalization so log(target) doesn't produce NaN for zero entries
-            target_dist = target_dist.clamp_min(1e-8)
-            target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
-            pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
-            l_kl = F.kl_div(
-                pred_log_probs,
-                target_dist,
-                reduction="batchmean",
-            )
-            loss_dict["l_dist"] = self.kl_coef * l_kl
-        else:
-            # JSD: L_JSD = 0.5 * KL(target || m) + 0.5 * KL(q_hat || m), m = (target + q_hat) / 2
-            # Pairs best with --target-mode topk so target has genuine zeros (the negative signal).
-            # Do NOT clamp target to eps — zeros are the negative signal JSD is designed to exploit.
-            target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
-            q_hat = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V], always > 0
-            m = 0.5 * (target_dist + q_hat)                             # [B, V], always > 0
+        elif self.kl_coef != 0:
+            if self.loss_type == "kl":
+                # clamp before normalization so log(target) doesn't produce NaN for zero entries
+                target_dist = target_dist.clamp_min(1e-8)
+                target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
+                pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
+                l_kl = F.kl_div(
+                    pred_log_probs,
+                    target_dist,
+                    reduction="batchmean",
+                )
+                loss_dict["l_dist"] = self.kl_coef * l_kl
+            else:
+                # JSD: L_JSD = 0.5 * KL(target || m) + 0.5 * KL(q_hat || m), m = (target + q_hat) / 2
+                # Pairs best with --target-mode topk so target has genuine zeros (the negative signal).
+                # Do NOT clamp target to eps — zeros are the negative signal JSD is designed to exploit.
+                target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
+                q_hat = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V], always > 0
+                m = 0.5 * (target_dist + q_hat)                             # [B, V], always > 0
 
-            # KL(target || m): zero entries contribute 0 by convention (0 log 0 = 0)
-            kl_target_m = torch.where(
-                target_dist > 0,
-                target_dist * (target_dist.clamp(min=1e-8).log() - m.log()),
-                torch.zeros_like(target_dist),
-            ).sum(dim=-1).mean()
+                # KL(target || m): zero entries contribute 0 by convention (0 log 0 = 0)
+                kl_target_m = torch.where(
+                    target_dist > 0,
+                    target_dist * (target_dist.clamp(min=1e-8).log() - m.log()),
+                    torch.zeros_like(target_dist),
+                ).sum(dim=-1).mean()
 
-            # KL(q_hat || m): always well-defined since q_hat > 0 and m > 0
-            kl_pred_m = (q_hat * (q_hat.log() - m.log())).sum(dim=-1).mean()
+                # KL(q_hat || m): always well-defined since q_hat > 0 and m > 0
+                kl_pred_m = (q_hat * (q_hat.log() - m.log())).sum(dim=-1).mean()
 
-            l_jsd = 0.5 * (kl_target_m + kl_pred_m)
-            loss_dict["l_dist"] = self.kl_coef * l_jsd
+                l_jsd = 0.5 * (kl_target_m + kl_pred_m)
+                loss_dict["l_dist"] = self.kl_coef * l_jsd
 
         # 2) optional entropy regularization on predicted distribution
         if self.entropy_coef != 0:

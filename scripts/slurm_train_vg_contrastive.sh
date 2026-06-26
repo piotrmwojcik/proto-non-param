@@ -10,9 +10,10 @@
 #   - caption-sample-k 1  : single randomly drawn phrase per image as positive
 #     key → cleaner contrastive signal with no averaging noise
 #
-# Two runs are submitted:
+# Three runs are submitted:
 #   A — KL(uniform) + contrastive_coef=0.5  (balanced)
 #   B — KL(uniform) + contrastive_coef=1.0  (contrastive-dominant)
+#   C — KL disabled + contrastive_coef=1.0  (contrastive-only; no distribution matching)
 #
 # Pipeline:
 #   Job 1 (GPU, ~1 h)  — build vg_caption_embs.pt  [skipped if exists]
@@ -168,16 +169,29 @@ python train.py \\
 ")
 echo "Submitted B (uniform + contrastive=1.0, 30ep): ${JOB_B}"
 
+# -----------------------------------------------------------------------
+# Run C — contrastive-only (kl_coef=0, no distribution matching)
+# -----------------------------------------------------------------------
+JOB_C=$(sbatch --parsable \
+  ${SLURM_COMMON} \
+  --job-name=vg-contr-C \
+  --output="${LOG_SLURM}/vg_contrastive_C_%j.out" \
+  --error="${LOG_SLURM}/vg_contrastive_C_%j.err" \
+  --wrap="${WRAP_HEADER}
+python train.py \\
+  ${TRAIN_COMMON} \\
+  --kl-coef 0.0 \\
+  --contrastive-coef 1.0 \\
+  --log-dir ${LOG_DIR}/run_C_uniform_contrastive_only_30ep
+")
+echo "Submitted C (contrastive-only=1.0, 30ep): ${JOB_C}"
+
 echo ""
 echo "Contrastive runs:"
-echo "  A — uniform + contrastive=0.5 : ${JOB_A}"
-echo "  B — uniform + contrastive=1.0 : ${JOB_B}"
+echo "  A — uniform + contrastive=0.5       : ${JOB_A}"
+echo "  B — uniform + contrastive=1.0       : ${JOB_B}"
+echo "  C — contrastive-only=1.0 (no KL)   : ${JOB_C}"
 echo ""
 echo "Monitor with : squeue -u \$USER"
 echo "Logs under   : ${LOG_SLURM}/"
-echo "Checkpoints  : ${LOG_DIR}/run_{A,B}_*/"
-echo ""
-echo "After training, run the collapse check on each run:"
-echo "  CKPT_DIR=${LOG_DIR}/run_A_uniform_contrastive05_30ep \\"
-echo "  VARIANT=contrastive_A_30ep \\"
-echo "  bash ~/proto-VLM/scripts/slurm_eval_collapse_check.sh"
+echo "Checkpoints  : ${LOG_DIR}/run_{A,B,C}_*/"
