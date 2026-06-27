@@ -145,9 +145,11 @@ ABLATION_VARIANTS = {
         "C": ("PNP-C-dedup (JSD + frozen, dedup)", "dedup_C"),
     },
     "vg_contrastive": {
-        "A": ("PNP-A (uniform + contrastive=0.5, 30ep)", "contr_A"),
-        "B": ("PNP-B (uniform + contrastive=1.0, 30ep)", "contr_B"),
-        "C": ("PNP-C (contrastive-only=1.0, 30ep)",      "contr_C"),
+        "A": ("PNP-A-cont (λ_c=0.5, k=1)",        "contr_A"),
+        "B": ("PNP-B-cont (λ_c=1.0, k=1)",        "contr_B"),
+        "C": ("PNP-C-cont (no KL, λ_c=1.0, k=1)", "contr_C"),
+        "D": ("PNP-D-cont (λ_c=1.0, k=5)",        "contr_D"),
+        "E": ("PNP-E-cont (λ_c=1.0, k=5, soft)",  "contr_E"),
     },
 }
 
@@ -247,7 +249,7 @@ def main():
                         "'vg_ablation' = A/B/C/D (KL×JSD × frozen×residual); "
                         "'vg_long' = A/C (frozen residual, 80 epochs); "
                         "'vg_dedup' = A/C (frozen residual, deduplicated vocab); "
-                        "'vg_contrastive' = A/B (uniform + InfoNCE, 30 epochs). "
+                        "'vg_contrastive' = A/B/C/D/E (uniform + InfoNCE ablations, 30 epochs). "
                         "Default: caption_signal")
     p.add_argument("--out", default=None,
                    help="Optional path to save the table as a .md file")

@@ -309,6 +309,7 @@ class PNPCriterion(nn.Module):
         residual_reg_coef: float = 0.0,
         contrastive_coef: float = 0.0,
         contrastive_temp: float = 0.07,
+        contrastive_label_temp: float = 0.0,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -327,6 +328,7 @@ class PNPCriterion(nn.Module):
         self.residual_reg_coef = residual_reg_coef
         self.contrastive_coef = contrastive_coef
         self.contrastive_temp = contrastive_temp
+        self.contrastive_label_temp = contrastive_label_temp
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -427,13 +429,27 @@ class PNPCriterion(nn.Module):
         # 7) in-batch contrastive: pred_text_embedding (image side) vs CLIP phrase embeddings
         # Symmetric InfoNCE over the [B, B] cosine similarity matrix.
         # Requires caption_emb as batch[4] (provided by vg_collate_fn + caption_embeds_path).
+        # When contrastive_label_temp > 0, uses soft negatives: the one-hot target is replaced
+        # by a distribution derived from pairwise phrase-phrase cosine similarity, so in-batch
+        # images with semantically similar phrases receive partial credit rather than being
+        # treated as hard negatives.
         if self.contrastive_coef != 0:
             cap_emb = batch[4].to(vocab_logits.device)         # [B, 512]
             pred_emb = outputs["pred_text_embedding"]          # [B, 512], already normalised
             cap_emb = F.normalize(cap_emb, dim=-1)
             sim = pred_emb @ cap_emb.T / self.contrastive_temp  # [B, B]
-            labels = torch.arange(sim.shape[0], device=sim.device)
-            l_contrastive = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels)) / 2
+
+            if self.contrastive_label_temp > 0:
+                with torch.no_grad():
+                    label_sim = cap_emb @ cap_emb.T / self.contrastive_label_temp  # [B, B]
+                    soft_labels = F.softmax(label_sim, dim=-1)                      # [B, B]
+                l_i2t = -(soft_labels * F.log_softmax(sim,   dim=-1)).sum(-1).mean()
+                l_t2i = -(soft_labels * F.log_softmax(sim.T, dim=-1)).sum(-1).mean()
+                l_contrastive = (l_i2t + l_t2i) / 2
+            else:
+                labels = torch.arange(sim.shape[0], device=sim.device)
+                l_contrastive = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels)) / 2
+
             loss_dict["l_contrastive"] = self.contrastive_coef * l_contrastive
 
         return loss_dict

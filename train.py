@@ -537,6 +537,10 @@ def main():
                              "vs CLIP phrase embeddings. Requires --caption-embeds-path.")
     parser.add_argument("--contrastive-temp", type=float, default=0.07,
                         help="Temperature for the contrastive similarity matrix (default: 0.07)")
+    parser.add_argument("--contrastive-label-temp", type=float, default=0.0,
+                        help="Temperature for soft-negative labels built from phrase-phrase "
+                             "cosine similarity. 0.0 = standard hard InfoNCE (default). "
+                             "Typical value: 0.5.")
     parser.add_argument("--wandb-entity", type=str, default=None,
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
@@ -852,6 +856,7 @@ def main():
         residual_reg_coef=args.residual_reg_coef,
         contrastive_coef=args.contrastive_coef,
         contrastive_temp=args.contrastive_temp,
+        contrastive_label_temp=args.contrastive_label_temp,
     )
 
     net.to(device)
