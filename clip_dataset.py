@@ -703,13 +703,20 @@ class AwA2CLIPDataset(Dataset):
 
 
 def vg_collate_fn(batch):
-    """Collate for VisualGenomeDataset when caption_embeds_path is set (5-tuple items)."""
+    """Collate for VisualGenomeDataset when caption_embeds_path is set.
+
+    Items are 5-tuples (averaged emb) or 6-tuples (padded pool + length) depending
+    on whether hard_mining is enabled in the dataset.
+    """
     images = torch.stack([b[0] for b in batch])
     phrases = [b[1] for b in batch]
     prob_dists = torch.stack([b[2] for b in batch])
     indices = torch.tensor([b[3] for b in batch], dtype=torch.long)
-    caption_embs = torch.stack([b[4] for b in batch])
-    return images, phrases, prob_dists, indices, caption_embs
+    caption_data = torch.stack([b[4] for b in batch])  # [B, 512] or [B, P, 512]
+    if len(batch[0]) == 6:  # hard mining: pool + valid-length
+        pool_lens = torch.tensor([b[5] for b in batch], dtype=torch.long)
+        return images, phrases, prob_dists, indices, caption_data, pool_lens
+    return images, phrases, prob_dists, indices, caption_data
 
 
 class VisualGenomeDataset(Dataset):
@@ -746,6 +753,8 @@ class VisualGenomeDataset(Dataset):
         top_k_concepts: int = 10,
         caption_embeds_path: str = None,
         caption_sample_k: int = 5,
+        hard_mining: bool = False,
+        caption_pool_size: int = 50,
     ):
         self.vg_root = vg_root
         self.vocab_to_idx = vocab_to_idx
@@ -754,6 +763,8 @@ class VisualGenomeDataset(Dataset):
         self.target_type = target_type if target_type != "topk" else f"topk{top_k_concepts}"
         self.top_k_concepts = top_k_concepts
         self.caption_sample_k = caption_sample_k
+        self.hard_mining = hard_mining
+        self.caption_pool_size = caption_pool_size
 
         if caption_embeds_path is not None:
             print(f"Loading caption embedding pool from {caption_embeds_path} ...")
@@ -869,18 +880,32 @@ class VisualGenomeDataset(Dataset):
         img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
 
         if self.caption_embeds is not None:
-            pool = self.caption_embeds.get(im_path)
-            if pool is not None and pool.shape[0] > 0:
-                N = pool.shape[0]
-                if self.train and N > self.caption_sample_k:
-                    idx = torch.randperm(N)[:self.caption_sample_k]
-                    sampled = pool[idx]
-                else:
-                    sampled = pool
-                caption_emb = F.normalize(sampled.mean(0), dim=-1)
+            pool_raw = self.caption_embeds.get(im_path)
+
+            if self.hard_mining:
+                # Return the deduplicated pool padded to caption_pool_size;
+                # top-k selection happens online in PNPCriterion using pred_text_embedding.
+                P = self.caption_pool_size
+                padded = torch.zeros(P, 512)
+                n = 0
+                if pool_raw is not None and pool_raw.shape[0] > 0:
+                    pool = torch.unique(pool_raw, dim=0)
+                    n = min(pool.shape[0], P)
+                    padded[:n] = pool[:n]
+                return img_tensor, phrases, prob_dist, index, padded, n
             else:
-                caption_emb = torch.zeros(512)
-            return img_tensor, phrases, prob_dist, index, caption_emb
+                if pool_raw is not None and pool_raw.shape[0] > 0:
+                    pool = torch.unique(pool_raw, dim=0)  # remove exact-duplicate phrases
+                    N = pool.shape[0]
+                    if self.train and N > self.caption_sample_k:
+                        idx = torch.randperm(N)[:self.caption_sample_k]
+                        sampled = pool[idx]
+                    else:
+                        sampled = pool
+                    caption_emb = F.normalize(sampled.mean(0), dim=-1)
+                else:
+                    caption_emb = torch.zeros(512)
+                return img_tensor, phrases, prob_dist, index, caption_emb
 
         return img_tensor, phrases, prob_dist, index
 

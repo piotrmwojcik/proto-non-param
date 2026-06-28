@@ -310,6 +310,7 @@ class PNPCriterion(nn.Module):
         contrastive_coef: float = 0.0,
         contrastive_temp: float = 0.07,
         contrastive_label_temp: float = 0.0,
+        contrastive_k: int = 1,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -329,6 +330,7 @@ class PNPCriterion(nn.Module):
         self.contrastive_coef = contrastive_coef
         self.contrastive_temp = contrastive_temp
         self.contrastive_label_temp = contrastive_label_temp
+        self.contrastive_k = contrastive_k
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -433,10 +435,24 @@ class PNPCriterion(nn.Module):
         # by a distribution derived from pairwise phrase-phrase cosine similarity, so in-batch
         # images with semantically similar phrases receive partial credit rather than being
         # treated as hard negatives.
+        # When batch[4].dim() == 3, hard-mining mode: batch[4] is a padded pool [B, P, 512]
+        # and batch[5] is valid lengths [B]; top-k phrases per image are selected online by
+        # cosine similarity to pred_text_embedding, then averaged into the positive key.
         if self.contrastive_coef != 0:
-            cap_emb = batch[4].to(vocab_logits.device)         # [B, 512]
             pred_emb = outputs["pred_text_embedding"]          # [B, 512], already normalised
-            cap_emb = F.normalize(cap_emb, dim=-1)
+
+            if batch[4].dim() == 3:  # hard mining: pool [B, P, 512] + lengths [B]
+                pools = F.normalize(batch[4].to(vocab_logits.device), dim=-1)  # [B, P, 512]
+                pool_lens = batch[5].to(vocab_logits.device)                   # [B]
+                sims = (pools * pred_emb.unsqueeze(1)).sum(-1)                 # [B, P]
+                pad_mask = torch.arange(pools.shape[1], device=sims.device).unsqueeze(0) >= pool_lens.unsqueeze(1)
+                sims = sims.masked_fill(pad_mask, -float('inf'))
+                k = min(self.contrastive_k, pools.shape[1])
+                top_idx = sims.topk(k, dim=1).indices                          # [B, k]
+                selected = pools[torch.arange(pred_emb.shape[0], device=pools.device).unsqueeze(1), top_idx]
+                cap_emb = F.normalize(selected.mean(1), dim=-1)                # [B, 512]
+            else:
+                cap_emb = F.normalize(batch[4].to(vocab_logits.device), dim=-1)  # [B, 512]
             sim = pred_emb @ cap_emb.T / self.contrastive_temp  # [B, B]
 
             if self.contrastive_label_temp > 0:

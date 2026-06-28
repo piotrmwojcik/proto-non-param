@@ -541,6 +541,11 @@ def main():
                         help="Temperature for soft-negative labels built from phrase-phrase "
                              "cosine similarity. 0.0 = standard hard InfoNCE (default). "
                              "Typical value: 0.5.")
+    parser.add_argument("--contrastive-hard-mining", action="store_true",
+                        help="Select top-k phrases per image by cosine similarity to "
+                             "pred_text_embedding (online hard positive mining) instead of "
+                             "random sampling. Also deduplicates the phrase pool. "
+                             "Requires --caption-embeds-path.")
     parser.add_argument("--wandb-entity", type=str, default=None,
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
@@ -652,6 +657,8 @@ def main():
             top_k_concepts=args.top_k_concepts,
             caption_embeds_path=args.caption_embeds_path,
             caption_sample_k=args.caption_sample_k,
+            hard_mining=args.contrastive_hard_mining,
+            caption_pool_size=args.caption_pool_size,
         )
         dataset_test = VisualGenomeDataset(
             vg_root=args.vg_root,
@@ -664,6 +671,8 @@ def main():
             top_k_concepts=args.top_k_concepts,
             caption_embeds_path=args.caption_embeds_path,
             caption_sample_k=args.caption_sample_k,
+            hard_mining=args.contrastive_hard_mining,
+            caption_pool_size=args.caption_pool_size,
         )
         if args.clip_scores_vg:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)
@@ -857,6 +866,7 @@ def main():
         contrastive_coef=args.contrastive_coef,
         contrastive_temp=args.contrastive_temp,
         contrastive_label_temp=args.contrastive_label_temp,
+        contrastive_k=args.caption_sample_k,
     )
 
     net.to(device)
