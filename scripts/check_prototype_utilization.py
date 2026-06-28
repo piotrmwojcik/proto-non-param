@@ -37,6 +37,16 @@ from clip_dataset import VisualGenomeDataset
 from torch import nn
 
 
+def _collate(batch):
+    """Stack images/prob_dists/indices; keep phrases as list (variable length)."""
+    return (
+        torch.stack([b[0] for b in batch]),   # images [B, C, H, W]
+        [b[1] for b in batch],                 # phrases — list of lists
+        torch.stack([b[2] for b in batch]),   # prob_dists [B, V]
+        torch.tensor([b[3] for b in batch]),  # indices [B]
+    )
+
+
 class _DinoBackbone(nn.Module):
     """Minimal DINOv2 backbone that avoids torch.hub.load.
 
@@ -185,6 +195,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        collate_fn=_collate,
         pin_memory=(args.device == "cuda"),
     )
 
