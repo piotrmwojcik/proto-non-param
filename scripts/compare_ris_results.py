@@ -152,6 +152,7 @@ ABLATION_VARIANTS = {
         "E": ("PNP-E-cont (λ_c=1.0, k=5, soft)",        "contr_E"),
         "F": ("PNP-F-cont (λ_c=1.0, k=5, hard-mine)",   "contr_F"),
         "G": ("PNP-G-cont (λ_c=1.0, k=5, mine+soft)",   "contr_G"),
+        "H": ("PNP-H-cont (ViT-L, λ_c=1.0, k=1)",       "contr_H"),
     },
 }
 

@@ -34,24 +34,28 @@ dino_common_kwargs = dict(
     norm_layer=partial(nn.LayerNorm, eps=1e-6),
 )
 
-vit_small_kwargs = dict(embed_dim=384, num_heads=6)
-vit_base_kwargs = dict(embed_dim=768, num_heads=12)
+vit_small_kwargs  = dict(embed_dim=384,  num_heads=6)
+vit_base_kwargs   = dict(embed_dim=768,  num_heads=12)
+vit_large_kwargs  = dict(embed_dim=1024, num_heads=16)
 
 MODEL_DICT = {
-    "dinov2_vits14": partial(Dinov2VisionTransformer, **vit_small_kwargs, **dinov2_common_kwargs),
-    "dinov2_vitb14": partial(Dinov2VisionTransformer, **vit_base_kwargs, **dinov2_common_kwargs)
+    "dinov2_vits14": partial(Dinov2VisionTransformer, **vit_small_kwargs,  **dinov2_common_kwargs),
+    "dinov2_vitb14": partial(Dinov2VisionTransformer, **vit_base_kwargs,   **dinov2_common_kwargs),
+    "dinov2_vitl14": partial(Dinov2VisionTransformer, **vit_large_kwargs,  **dinov2_common_kwargs),
 }
 
 URL_DICT = {
     "dinov2_vits14": "https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_reg4_pretrain.pth",
     "dinov2_vitb14": "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_reg4_pretrain.pth",
+    "dinov2_vitl14": "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_reg4_pretrain.pth",
     "clip_vitb14": "https://huggingface.co/laion/CLIP-ViT-B-14-laion2B-s32B-b79K/resolve/main/open_clip_pytorch_model.bin"
 }
 
 DIM_DICT = {
     "dinov2_vits14": 384,
     "dinov2_vitb14": 768,
-    "clip_vitb14": 768
+    "dinov2_vitl14": 1024,
+    "clip_vitb14":   768,
 }
 
 CLIP_NAME_MAP = {
