@@ -31,16 +31,36 @@ import open_clip
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from modeling.backbone import DINOv2Backbone
+from modeling.backbone import MODEL_DICT, DIM_DICT
 from modeling.pnp import PNP
 from clip_dataset import VisualGenomeDataset
+from torch import nn
+
+
+class _DinoBackbone(nn.Module):
+    """Minimal DINOv2 backbone that avoids torch.hub.load.
+
+    Builds the architecture from the local dinov2 install (PYTHONPATH) and
+    relies on load_state_dict() from the checkpoint for weights — no network
+    access or hub cache required.  Returns 3-tuple to match DINOv2BackboneExpanded.
+    """
+    def __init__(self, name: str = "dinov2_vitb14"):
+        super().__init__()
+        self.dino = MODEL_DICT[name]()
+        self.dim = DIM_DICT[name]
+
+    def forward(self, x: torch.Tensor):
+        fd = self.dino.forward_features(x)
+        patches = fd["x_norm_patchtokens"]   # [B, N, D]
+        cls     = fd["x_norm_clstoken"]      # [B, D]
+        return patches, patches, cls          # 3-tuple: PNP only uses the first
 
 
 def build_model(ckpt_path: str, vocab_cache_path: str, device: torch.device) -> PNP:
     ckpt = torch.load(ckpt_path, map_location="cpu")
     hp = ckpt.get("hparams", {})
 
-    backbone = DINOv2Backbone(name=hp.get("backbone", "dinov2_vitb14"))
+    backbone = _DinoBackbone(name=hp.get("backbone", "dinov2_vitb14"))
     dim = backbone.dim
 
     clip_model, _, _ = open_clip.create_model_and_transforms(
