@@ -195,6 +195,7 @@ def train(
         target_dist = target_dist.to(device, non_blocking=True)
         words_sim_distribution = target_dist
         caption_embs = rest[0].to(device, non_blocking=True) if rest else None
+        pool_lens = rest[1].to(device, non_blocking=True) if len(rest) > 1 else None
 
         # ---- DEBUG PRINT ----
         if i % 200 == 0:
@@ -216,6 +217,8 @@ def train(
         criterion_batch = (images, words_sim_distribution, indices, captions)
         if caption_embs is not None:
             criterion_batch = criterion_batch + (caption_embs,)
+        if pool_lens is not None:
+            criterion_batch = criterion_batch + (pool_lens,)
         loss_dict = criterion(outputs, criterion_batch, model)
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
@@ -278,6 +281,7 @@ def test(
         target_dist = target_dist.to(device, non_blocking=True)
         words_sim_distribution = target_dist
         caption_embs = rest[0].to(device, non_blocking=True) if rest else None
+        pool_lens = rest[1].to(device, non_blocking=True) if len(rest) > 1 else None
 
         # --------------------------
         # Model forward
@@ -286,6 +290,8 @@ def test(
         criterion_batch = (images, words_sim_distribution, indices, captions)
         if caption_embs is not None:
             criterion_batch = criterion_batch + (caption_embs,)
+        if pool_lens is not None:
+            criterion_batch = criterion_batch + (pool_lens,)
         loss_dict = criterion(outputs, criterion_batch, model)
 
         bs = images.size(0)
