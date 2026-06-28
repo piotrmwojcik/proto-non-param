@@ -40,27 +40,42 @@ from torch import nn
 class _DinoBackbone(nn.Module):
     """Minimal DINOv2 backbone that avoids torch.hub.load.
 
-    Builds the architecture from the local dinov2 install (PYTHONPATH) and
-    relies on load_state_dict() from the checkpoint for weights — no network
-    access or hub cache required.  Returns 3-tuple to match DINOv2BackboneExpanded.
+    Depth is inferred from the checkpoint state_dict so it works for both
+    the standard 12-block vitb14 and any DINOv2BackboneExpanded variant
+    (e.g. n_splits=1 → 13 blocks).  Returns 3-tuple to match the training
+    backbone interface (PNP only consumes the first element).
     """
-    def __init__(self, name: str = "dinov2_vitb14"):
+    def __init__(self, name: str = "dinov2_vitb14", depth: int = 12):
         super().__init__()
-        self.dino = MODEL_DICT[name]()
+        self.dino = MODEL_DICT[name](depth=depth)
         self.dim = DIM_DICT[name]
 
     def forward(self, x: torch.Tensor):
         fd = self.dino.forward_features(x)
-        patches = fd["x_norm_patchtokens"]   # [B, N, D]
+        patches = fd["x_norm_patchtokens"]   # [B, N, D]  (registers already excluded)
         cls     = fd["x_norm_clstoken"]      # [B, D]
-        return patches, patches, cls          # 3-tuple: PNP only uses the first
+        return patches, patches, cls          # 3-tuple: PNP only uses element 0
+
+
+def _detect_depth(state_dict: dict) -> int:
+    """Infer transformer block count from checkpoint keys."""
+    indices = [
+        int(k.split(".")[3])
+        for k in state_dict
+        if k.startswith("backbone.dino.blocks.")
+    ]
+    return max(indices) + 1 if indices else 12
 
 
 def build_model(ckpt_path: str, vocab_cache_path: str, device: torch.device) -> PNP:
     ckpt = torch.load(ckpt_path, map_location="cpu")
     hp = ckpt.get("hparams", {})
+    state_dict = ckpt.get("state_dict", ckpt)
 
-    backbone = _DinoBackbone(name=hp.get("backbone", "dinov2_vitb14"))
+    backbone_name = hp.get("backbone", "dinov2_vitb14")
+    depth = _detect_depth(state_dict)
+    print(f"  Backbone : {backbone_name}  depth={depth}")
+    backbone = _DinoBackbone(name=backbone_name, depth=depth)
     dim = backbone.dim
 
     clip_model, _, _ = open_clip.create_model_and_transforms(
@@ -81,7 +96,7 @@ def build_model(ckpt_path: str, vocab_cache_path: str, device: torch.device) -> 
         prototype_init_noise=0.0,
         clip_model=clip_model,
     )
-    net.load_state_dict(ckpt.get("state_dict", ckpt), strict=True)
+    net.load_state_dict(state_dict, strict=True)
     net.eval()
     return net.to(device)
 
