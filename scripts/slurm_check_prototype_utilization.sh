@@ -37,6 +37,8 @@ JOB=$(sbatch --parsable \
   --wrap="
 set -e
 source ${SCRATCH}/venv/bin/activate
+export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
+export HF_HOME=${SCRATCH}/hf_cache
 export HF_HUB_CACHE=${SCRATCH}/.cache/huggingface/hub
 export TRANSFORMERS_CACHE=${SCRATCH}/.cache/huggingface/hub
 cd ${REPO}
