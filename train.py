@@ -552,6 +552,14 @@ def main():
                              "pred_text_embedding (online hard positive mining) instead of "
                              "random sampling. Also deduplicates the phrase pool. "
                              "Requires --caption-embeds-path.")
+    parser.add_argument("--sk-coef", type=float, default=0.0,
+                        help="Weight for Sinkhorn-Knopp batch diversity loss. "
+                             "Calibrated default: 0.1 (l_sk≈9 nats for cosine logits).")
+    parser.add_argument("--sk-eps", type=float, default=0.10,
+                        help="Sinkhorn temperature. 0.10 gives H/H_max≈0.89 for cosine-scale "
+                             "vocab_logits (std≈0.15); SwAV default 0.05 is too small here.")
+    parser.add_argument("--sk-n-iter", type=int, default=3,
+                        help="Sinkhorn-Knopp normalisation iterations (default: 3).")
     parser.add_argument("--wandb-entity", type=str, default=None,
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
@@ -873,6 +881,9 @@ def main():
         contrastive_temp=args.contrastive_temp,
         contrastive_label_temp=args.contrastive_label_temp,
         contrastive_k=args.caption_sample_k,
+        sk_coef=args.sk_coef,
+        sk_eps=args.sk_eps,
+        sk_n_iter=args.sk_n_iter,
     )
 
     net.to(device)

@@ -288,6 +288,29 @@ class PNP(nn.Module):
         return None, pooled
 
 
+@torch.no_grad()
+def sinkhorn_knopp(logits: torch.Tensor, eps: float = 0.10, n_iter: int = 3) -> torch.Tensor:
+    """Doubly-stochastic assignment matrix via Sinkhorn-Knopp (DINO/SwAV style).
+
+    Returns Q [B, V] where rows sum to 1 (per-sample distribution) and
+    column sums are uniform (each prototype receives equal total assignment
+    across the batch → forces prototype diversity).
+
+    ponytail: eps=0.10 calibrated for cosine-scale vocab_logits (std≈0.15);
+    SwAV default eps=0.05 is tuned for larger dot-product logits and yields
+    near one-hot Q on cosine inputs (col uniformity fails in 3 iters).
+    """
+    # Subtract row max for numerical stability before exp
+    logits = logits - logits.max(dim=-1, keepdim=True).values
+    Q = torch.exp(logits / eps).T  # [V, B]
+    Q /= Q.sum()
+    K, B = Q.shape
+    for _ in range(n_iter):
+        Q /= Q.sum(dim=1, keepdim=True) * K  # uniform over vocab
+        Q /= Q.sum(dim=0, keepdim=True) * B  # uniform over batch
+    return (Q * B).T  # [B, V], rows sum to 1
+
+
 class PNPCriterion(nn.Module):
     """
     Matches predicted noun distribution to the target noun distribution from the dataset.
@@ -311,6 +334,9 @@ class PNPCriterion(nn.Module):
         contrastive_temp: float = 0.07,
         contrastive_label_temp: float = 0.0,
         contrastive_k: int = 1,
+        sk_coef: float = 0.0,
+        sk_eps: float = 0.10,
+        sk_n_iter: int = 3,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -331,6 +357,9 @@ class PNPCriterion(nn.Module):
         self.contrastive_temp = contrastive_temp
         self.contrastive_label_temp = contrastive_label_temp
         self.contrastive_k = contrastive_k
+        self.sk_coef = sk_coef
+        self.sk_eps = sk_eps
+        self.sk_n_iter = sk_n_iter
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -467,5 +496,14 @@ class PNPCriterion(nn.Module):
                 l_contrastive = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels)) / 2
 
             loss_dict["l_contrastive"] = self.contrastive_coef * l_contrastive
+
+        # 8) Sinkhorn-Knopp batch diversity: enforce uniform prototype usage across the batch.
+        # Q is computed @no_grad from vocab_logits; cross-entropy from Q → log_P trains the
+        # model to match the doubly-stochastic assignment (more spread prototype use).
+        if self.sk_coef != 0:
+            Q = sinkhorn_knopp(vocab_logits.detach(), eps=self.sk_eps, n_iter=self.sk_n_iter)
+            log_P = F.log_softmax(vocab_logits / self.temperature, dim=-1)
+            l_sk = -(Q * log_P).sum(dim=-1).mean()
+            loss_dict["l_sk"] = self.sk_coef * l_sk
 
         return loss_dict
