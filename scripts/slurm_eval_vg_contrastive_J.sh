@@ -1,5 +1,5 @@
 #!/bin/bash
-# Zero-shot RIS evaluation for run J (ViT-B/14 + contrastive k=1 + SK).
+# Zero-shot RIS evaluation for run J (ViT-L/14 + contrastive k=1 + SK).
 #
 # Submits 7 SLURM jobs: 1 variant (J) × 7 dataset/split combos
 #
@@ -20,7 +20,7 @@ PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"
 LOG_SLURM="${SCRATCH}/logs"
 
-CKPT="${CONTR_BASE}/run_J_contrastive10_k1_sk10_30ep/ckpt.pth"
+CKPT="${CONTR_BASE}/run_J_vitl14_contrastive10_k1_sk10_30ep/ckpt.pth"
 
 mkdir -p "${LOG_SLURM}"
 
@@ -31,7 +31,7 @@ fi
 
 OUT_DIR="${REPO}/eval_results/vg_contrastive/contr_J"
 
-echo "=== PNP Contrastive VG — Zero-shot RIS Evaluation (run J, SK diversity) ==="
+echo "=== PNP Contrastive VG — Zero-shot RIS Evaluation (run J, ViT-L/14 + SK) ==="
 echo "  Ckpt : ${CKPT}"
 echo "  Data : ${DATA_ROOT}"
 echo ""

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Run J — ViT-B/14 + KL + contrastive (k=1) + Sinkhorn-Knopp batch diversity.
+# Run J — ViT-L/14 + KL + contrastive (k=1) + Sinkhorn-Knopp batch diversity.
 #
-# Identical to run B (best ViT-B baseline, k=1) plus SK regularizer:
+# Identical to run H (best ViT-L baseline, k=1) plus SK regularizer:
 #   --sk-coef 0.1   (eps=0.10 gives H/H_max≈0.89 for cosine-scale logits)
 #
 # Configuration — override via environment variables:
@@ -48,27 +48,28 @@ cd ~/proto-non-param
 JOB_J=$(sbatch --parsable \
   --partition="${PARTITION}" \
   --account="${ACCOUNT}" \
-  --job-name=vg-contr-J-sk \
+  --job-name=vg-contr-J-vitl-sk \
   --gres=gpu:1 \
   --cpus-per-task=8 \
   --mem=64G \
   --time=2-00:00:00 \
-  --output="${LOG_SLURM}/vg_contrastive_J_sk_%j.out" \
-  --error="${LOG_SLURM}/vg_contrastive_J_sk_%j.err" \
+  --output="${LOG_SLURM}/vg_contrastive_J_vitl_sk_%j.out" \
+  --error="${LOG_SLURM}/vg_contrastive_J_vitl_sk_%j.err" \
   --wrap="${WRAP_HEADER}
 python train.py \\
   --dataset visual_genome \\
   --vg-root ${VG_ROOT} \\
   --vg-region-descriptions ${VG_DESC} \\
   --vocab-cache-path ${VG_CACHE} \\
-  --backbone dinov2_vitb14 \\
-  --batch-size 128 \\
+  --backbone dinov2_vitl14 \\
+  --batch-size 64 \\
   --epochs 30 \\
   --lr-schedule cosine \\
   --lr-warmup-epochs 5 \\
   --num-workers 8 \\
   --backbone-lr 1e-5 \\
   --text-proj-lr 1e-4 \\
+  --text-proj-hidden-dim 2048 \\
   --target-mode uniform \\
   --loss-type kl \\
   --kl-coef 1.0 \\
@@ -81,11 +82,11 @@ python train.py \\
   --save-every 5 \\
   --wandb-entity ${WANDB_ENTITY} \\
   --wandb-log-images 16 \\
-  --log-dir ${LOG_DIR}/run_J_contrastive10_k1_sk10_30ep
+  --log-dir ${LOG_DIR}/run_J_vitl14_contrastive10_k1_sk10_30ep
 ")
 
-echo "Submitted J (ViT-B/14, k=1, SK coef=0.1 eps=0.10, 30ep): ${JOB_J}"
+echo "Submitted J (ViT-L/14, k=1, SK coef=0.1 eps=0.10, 30ep): ${JOB_J}"
 echo ""
 echo "Monitor with : squeue -u \$USER"
 echo "Logs under   : ${LOG_SLURM}/"
-echo "Checkpoint   : ${LOG_DIR}/run_J_contrastive10_k1_sk10_30ep/"
+echo "Checkpoint   : ${LOG_DIR}/run_J_vitl14_contrastive10_k1_sk10_30ep/"
