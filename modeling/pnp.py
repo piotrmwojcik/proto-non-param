@@ -308,7 +308,7 @@ def sinkhorn_knopp(logits: torch.Tensor, eps: float = 0.10, n_iter: int = 3) -> 
     for _ in range(n_iter):
         Q /= Q.sum(dim=1, keepdim=True) * K  # uniform over vocab
         Q /= Q.sum(dim=0, keepdim=True) * B  # uniform over batch
-    return (Q * B).T  # [B, V], rows sum to 1
+    return (Q / Q.sum(dim=0, keepdim=True)).T  # [B, V], rows sum to exactly 1
 
 
 class PNPCriterion(nn.Module):
