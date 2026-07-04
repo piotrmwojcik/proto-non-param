@@ -79,6 +79,8 @@ set -e
 source ${SCRATCH}/venv/bin/activate
 export HF_HUB_CACHE=${SCRATCH}/.cache/huggingface/hub
 export TRANSFORMERS_CACHE=${SCRATCH}/.cache/huggingface/hub
+export TORCH_HOME=${SCRATCH}/torch_cache
+export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
 cd ${REPO}
 
 python scripts/evaluate_pnp_refer.py \
