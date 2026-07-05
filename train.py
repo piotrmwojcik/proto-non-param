@@ -564,6 +564,9 @@ def main():
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
                         help="Number of images to visualize per W&B log step (default: 8)")
+    parser.add_argument("--koleo-coef", type=float, default=0.0,
+                        help="Weight for KoLeo nearest-neighbour repulsion on "
+                             "pred_text_embedding. DINOv3 default: 0.1.")
 
     args = parser.parse_args()
 
@@ -884,6 +887,7 @@ def main():
         sk_coef=args.sk_coef,
         sk_eps=args.sk_eps,
         sk_n_iter=args.sk_n_iter,
+        koleo_coef=args.koleo_coef,
     )
 
     net.to(device)

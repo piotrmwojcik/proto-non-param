@@ -311,6 +311,19 @@ def sinkhorn_knopp(logits: torch.Tensor, eps: float = 0.10, n_iter: int = 3) -> 
     return (Q / Q.sum(dim=0, keepdim=True)).T  # [B, V], rows sum to exactly 1
 
 
+def koleo_loss(z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """KoLeo nearest-neighbour repulsion (DINOv3, Darcet et al. 2023).
+    Maximises -E[log(nn_dist)] to spread L2-normalised embeddings across the batch.
+    Applied to pred_text_embedding [B, 512] which is already unit-normalised.
+    """
+    z = F.normalize(z, dim=-1)                                  # [B, D]
+    sim = z @ z.T                                               # [B, B]
+    sim.fill_diagonal_(-1.0)                                    # exclude self
+    nn_sim = sim.max(dim=-1).values                             # [B]
+    nn_dist = (2.0 - 2.0 * nn_sim).clamp(min=eps).sqrt()      # cosine → L2
+    return -nn_dist.clamp(min=eps).log().mean()
+
+
 class PNPCriterion(nn.Module):
     """
     Matches predicted noun distribution to the target noun distribution from the dataset.
@@ -337,6 +350,7 @@ class PNPCriterion(nn.Module):
         sk_coef: float = 0.0,
         sk_eps: float = 0.10,
         sk_n_iter: int = 3,
+        koleo_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -360,6 +374,7 @@ class PNPCriterion(nn.Module):
         self.sk_coef = sk_coef
         self.sk_eps = sk_eps
         self.sk_n_iter = sk_n_iter
+        self.koleo_coef = koleo_coef
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -505,5 +520,10 @@ class PNPCriterion(nn.Module):
             log_P = F.log_softmax(vocab_logits / self.temperature, dim=-1)
             l_sk = -(Q * log_P).sum(dim=-1).mean()
             loss_dict["l_sk"] = self.sk_coef * l_sk
+
+        # 9) KoLeo: push nearest-neighbour pred_text_embeddings apart across the batch.
+        if self.koleo_coef != 0:
+            l_koleo = koleo_loss(outputs["pred_text_embedding"])
+            loss_dict["l_koleo"] = self.koleo_coef * l_koleo
 
         return loss_dict
