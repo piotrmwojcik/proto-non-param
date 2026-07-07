@@ -225,8 +225,10 @@ class PNP(nn.Module):
         vocab_logits = topk_vals.mean(dim=1)
         #vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
 
-        # MSN: masked anchor pass — second backbone forward with random patch masking.
-        # Only active during training when msn_mask_ratio > 0.
+        # MSN: post-backbone masking — zero out a random fraction of patch tokens
+        # and recompute vocab_logits from the survivors. No second backbone pass.
+        # ponytail: avoids 2x backbone cost; backbone saw the full image but prototype
+        # assignment is still forced to work from partial patch evidence.
         vocab_logits_masked = None
         if self.msn_mask_ratio > 0 and self.training:
             B, N = patch_tokens.shape[:2]
@@ -234,8 +236,8 @@ class PNP(nn.Module):
             msn_masks = torch.zeros(B, N, dtype=torch.bool, device=x.device)
             for i in range(B):
                 msn_masks[i, torch.randperm(N, device=x.device)[:n_mask]] = True
-            patch_tokens_m, _, _ = self.backbone(x, masks=msn_masks)
-            patch_tokens_m = F.normalize(patch_tokens_m, p=2, dim=-1)
+            patch_tokens_m = patch_tokens.clone()
+            patch_tokens_m[msn_masks] = 0.0          # zero out masked positions
             ppl_m = einsum(patch_tokens_m, prototypes, "B n_patches dim, V dim -> B n_patches V")
             vocab_logits_masked = ppl_m.topk(k, dim=1).values.mean(dim=1)
 
