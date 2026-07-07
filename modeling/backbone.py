@@ -217,13 +217,13 @@ class DINOv2BackboneExpanded(nn.Module):
         for name, param in self.dino.named_parameters():
             param.requires_grad = name in self.learnable_param_names
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def forward(self, x: torch.Tensor, masks=None) -> tuple[torch.Tensor, ...]:
         """
         When appending a single block to the backbone and freezing the rest during fine-tuning, the output of the second last block
         is the original DINO feature, which will be used for DINO-specific foreground extraction during the second stage of training (for loss calculation etc.).
         An alternate approach is to cache foreground masks and part assignment maps generated from the first stage of training.
         """
-        x = self.dino.prepare_tokens_with_masks(x)
+        x = self.dino.prepare_tokens_with_masks(x, masks)
 
         original_feature = None
         for i, blk in enumerate(self.dino.blocks):

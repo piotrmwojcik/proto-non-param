@@ -84,7 +84,8 @@ class PNP(nn.Module):
         text_proj_hidden_dim: int = 1024,
         vocab_cache_path: str = "vocab/mscoco_new_cache.pt",
         prototype_init_noise: float = 0.01,
-        clip_model = None
+        clip_model = None,
+        msn_mask_ratio: float = 0.0,
     ):
         super().__init__()
         self.backbone = backbone
@@ -95,6 +96,7 @@ class PNP(nn.Module):
 
         # CLIP image model used for visual gating / concept selection
         self.clip_model = clip_model
+        self.msn_mask_ratio = msn_mask_ratio
         if self.clip_model is not None:
             self.clip_model.eval()
             for p in self.clip_model.parameters():
@@ -223,6 +225,20 @@ class PNP(nn.Module):
         vocab_logits = topk_vals.mean(dim=1)
         #vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
 
+        # MSN: masked anchor pass — second backbone forward with random patch masking.
+        # Only active during training when msn_mask_ratio > 0.
+        vocab_logits_masked = None
+        if self.msn_mask_ratio > 0 and self.training:
+            B, N = patch_tokens.shape[:2]
+            n_mask = int(N * self.msn_mask_ratio)
+            msn_masks = torch.zeros(B, N, dtype=torch.bool, device=x.device)
+            for i in range(B):
+                msn_masks[i, torch.randperm(N, device=x.device)[:n_mask]] = True
+            patch_tokens_m, _, _ = self.backbone(x, masks=msn_masks)
+            patch_tokens_m = F.normalize(patch_tokens_m, p=2, dim=-1)
+            ppl_m = einsum(patch_tokens_m, prototypes, "B n_patches dim, V dim -> B n_patches V")
+            vocab_logits_masked = ppl_m.topk(k, dim=1).values.mean(dim=1)
+
         # -----------------------------------
         # CLIP visual embedding -> vocab diagnostics
         # -----------------------------------
@@ -263,6 +279,7 @@ class PNP(nn.Module):
             pred_text_embedding=pred_text_embedding,
             clip_image_embedding=clip_image_embedding,
             prototypes=prototypes,
+            vocab_logits_masked=vocab_logits_masked,
         )
         return outputs
 
@@ -351,6 +368,7 @@ class PNPCriterion(nn.Module):
         sk_eps: float = 0.10,
         sk_n_iter: int = 3,
         koleo_coef: float = 0.0,
+        msn_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -375,6 +393,7 @@ class PNPCriterion(nn.Module):
         self.sk_eps = sk_eps
         self.sk_n_iter = sk_n_iter
         self.koleo_coef = koleo_coef
+        self.msn_coef = msn_coef
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -525,5 +544,12 @@ class PNPCriterion(nn.Module):
         if self.koleo_coef != 0:
             l_koleo = koleo_loss(outputs["pred_text_embedding"])
             loss_dict["l_koleo"] = self.koleo_coef * l_koleo
+
+        # 10) MSN: predict full-image prototype distribution from masked-patch view.
+        if self.msn_coef != 0 and outputs.get("vocab_logits_masked") is not None:
+            target   = F.softmax(outputs["vocab_logits"].detach() / self.temperature, dim=-1)
+            log_pred = F.log_softmax(outputs["vocab_logits_masked"] / self.temperature, dim=-1)
+            l_msn = -(target * log_pred).sum(dim=-1).mean()
+            loss_dict["l_msn"] = self.msn_coef * l_msn
 
         return loss_dict

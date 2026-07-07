@@ -567,6 +567,11 @@ def main():
     parser.add_argument("--koleo-coef", type=float, default=0.0,
                         help="Weight for KoLeo nearest-neighbour repulsion on "
                              "pred_text_embedding. DINOv3 default: 0.1.")
+    parser.add_argument("--msn-coef", type=float, default=0.0,
+                        help="Weight for MSN masked-prediction loss. Default 0 (off).")
+    parser.add_argument("--msn-mask-ratio", type=float, default=0.25,
+                        help="Fraction of patches to mask in MSN anchor pass "
+                             "(0.25 = 64/256 patches for ViT-L/14@224).")
 
     args = parser.parse_args()
 
@@ -816,7 +821,8 @@ def main():
         text_proj_hidden_dim=args.text_proj_hidden_dim,
         vocab_cache_path=args.vocab_cache_path,
         prototype_init_noise=0.0 if args.residual_lr == 0 else args.prototype_init_noise,
-        clip_model=clip_model,  # ← added
+        clip_model=clip_model,
+        msn_mask_ratio=args.msn_mask_ratio,
     )
     # freeze backbone first
     #for p in net.backbone.parameters():
@@ -888,6 +894,7 @@ def main():
         sk_eps=args.sk_eps,
         sk_n_iter=args.sk_n_iter,
         koleo_coef=args.koleo_coef,
+        msn_coef=args.msn_coef,
     )
 
     net.to(device)

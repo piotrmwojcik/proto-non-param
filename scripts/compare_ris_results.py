@@ -158,6 +158,7 @@ ABLATION_VARIANTS = {
         "K1": ("PNP-K1-cont (ViT-L, λ_c=1.0, k=1, KoLeo λ=0.1)",          "contr_K1"),
         "K2": ("PNP-K2-cont (ViT-L, λ_c=1.0, k=1, SK+KoLeo)",            "contr_K2"),
         "K3": ("PNP-K3-cont (ViT-L, λ_c=1.0, k=5, hard-mine+KoLeo)",     "contr_K3"),
+        "L":  ("PNP-L-cont (ViT-L, λ_c=1.0, k=1, MSN λ=0.1)",           "contr_L"),
     },
 }
 
@@ -257,7 +258,7 @@ def main():
                         "'vg_ablation' = A/B/C/D (KL×JSD × frozen×residual); "
                         "'vg_long' = A/C (frozen residual, 80 epochs); "
                         "'vg_dedup' = A/C (frozen residual, deduplicated vocab); "
-                        "'vg_contrastive' = A/B/C/D/E/F/G/H/I/J/K1/K2/K3 (uniform + InfoNCE + SK + KoLeo ablations, 30 epochs). "
+                        "'vg_contrastive' = A/B/C/D/E/F/G/H/I/J/K1/K2/K3/L (uniform + InfoNCE + SK/KoLeo/MSN ablations, 30 epochs). "
                         "Default: caption_signal")
     p.add_argument("--out", default=None,
                    help="Optional path to save the table as a .md file")
