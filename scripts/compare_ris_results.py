@@ -159,6 +159,8 @@ ABLATION_VARIANTS = {
         "K2": ("PNP-K2-cont (ViT-L, λ_c=1.0, k=1, SK+KoLeo)",            "contr_K2"),
         "K3": ("PNP-K3-cont (ViT-L, λ_c=1.0, k=5, hard-mine+KoLeo)",     "contr_K3"),
         "L":  ("PNP-L-cont (ViT-L, λ_c=1.0, k=1, MSN λ=0.1)",           "contr_L"),
+        "M1": ("PNP-M1 (ViT-L, no contrastive, SK+KoLeo)",              "contr_M1"),
+        "M2": ("PNP-M2 (ViT-L, no contrastive, SK+KoLeo+MSN)",          "contr_M2"),
     },
 }
 
