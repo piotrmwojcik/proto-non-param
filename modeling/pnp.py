@@ -230,6 +230,8 @@ class PNP(nn.Module):
         # ponytail: avoids 2x backbone cost; backbone saw the full image but prototype
         # assignment is still forced to work from partial patch evidence.
         vocab_logits_masked = None
+        ibot_logits_masked = None
+        ibot_logits_full = None
         if self.msn_mask_ratio > 0 and self.training:
             B, N = patch_tokens.shape[:2]
             n_mask = int(N * self.msn_mask_ratio)
@@ -240,6 +242,9 @@ class PNP(nn.Module):
             patch_tokens_m[msn_masks] = 0.0          # zero out masked positions
             ppl_m = einsum(patch_tokens_m, prototypes, "B n_patches dim, V dim -> B n_patches V")
             vocab_logits_masked = ppl_m.topk(k, dim=1).values.mean(dim=1)
+            # iBOT: per-patch CE at masked positions (reuses ppl_m, no extra compute)
+            ibot_logits_masked = ppl_m[msn_masks]                          # [B*n_mask, V]
+            ibot_logits_full = patch_prototype_logits.detach()[msn_masks]  # [B*n_mask, V]
 
         # -----------------------------------
         # CLIP visual embedding -> vocab diagnostics
@@ -282,6 +287,8 @@ class PNP(nn.Module):
             clip_image_embedding=clip_image_embedding,
             prototypes=prototypes,
             vocab_logits_masked=vocab_logits_masked,
+            ibot_logits_masked=ibot_logits_masked,
+            ibot_logits_full=ibot_logits_full,
         )
         return outputs
 
@@ -343,6 +350,25 @@ def koleo_loss(z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return -nn_dist.clamp(min=eps).log().mean()
 
 
+def sigreg_loss(z: torch.Tensor, sketch_dim: int = 64) -> torch.Tensor:
+    """Sliced Epps-Pulley ECF goodness-of-fit toward isotropic Gaussian (SIGReg, Balestriero 2025).
+    Projects z onto random 1-D directions and minimises distance between empirical and Gaussian
+    characteristic functions. Applied to pred_text_embedding [B, 512] (unit sphere → uniform).
+    compile-safe: uses cos/sin instead of complex exponentials.
+    """
+    N, C = z.size()
+    A = torch.randn(C, sketch_dim, device=z.device)
+    A = A / (A.norm(p=2, dim=0, keepdim=True) + 1e-6)          # [C, sketch_dim]
+    t = torch.linspace(-5.0, 5.0, 17, device=z.device)
+    exp_f = (-0.5 * t ** 2).exp()                               # Gaussian CF: e^{-t²/2}
+    args = (z @ A).unsqueeze(2) * t.view(1, 1, -1)             # [N, sketch_dim, 17]
+    cos_mean = args.cos().mean(0)                               # [sketch_dim, 17]
+    sin_mean = args.sin().mean(0)
+    diff_sq = (cos_mean - exp_f).square() + sin_mean.square()
+    dt = t[1] - t[0]
+    return (diff_sq * exp_f * dt).sum(-1).mean() * N
+
+
 class PNPCriterion(nn.Module):
     """
     Matches predicted noun distribution to the target noun distribution from the dataset.
@@ -371,6 +397,9 @@ class PNPCriterion(nn.Module):
         sk_n_iter: int = 3,
         koleo_coef: float = 0.0,
         msn_coef: float = 0.0,
+        ibot_coef: float = 0.0,
+        sigreg_coef: float = 0.0,
+        sigreg_sketch_dim: int = 64,
     ) -> None:
         super().__init__()
         self.kl_coef = kl_coef
@@ -396,6 +425,9 @@ class PNPCriterion(nn.Module):
         self.sk_n_iter = sk_n_iter
         self.koleo_coef = koleo_coef
         self.msn_coef = msn_coef
+        self.ibot_coef = ibot_coef
+        self.sigreg_coef = sigreg_coef
+        self.sigreg_sketch_dim = sigreg_sketch_dim
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -553,5 +585,18 @@ class PNPCriterion(nn.Module):
             log_pred = F.log_softmax(outputs["vocab_logits_masked"] / self.temperature, dim=-1)
             l_msn = -(target * log_pred).sum(dim=-1).mean()
             loss_dict["l_msn"] = self.msn_coef * l_msn
+
+        # 11) iBOT: per-patch masked CE at masked positions only (patch-level, not global).
+        # Requires --msn-mask-ratio > 0 so the masking block runs and ibot_logits_* are set.
+        if self.ibot_coef != 0 and outputs.get("ibot_logits_masked") is not None:
+            target   = F.softmax(outputs["ibot_logits_full"] / self.temperature, dim=-1)
+            log_pred = F.log_softmax(outputs["ibot_logits_masked"] / self.temperature, dim=-1)
+            l_ibot = -(target * log_pred).sum(dim=-1).mean()
+            loss_dict["l_ibot"] = self.ibot_coef * l_ibot
+
+        # 12) SigReg: push pred_text_embedding toward isotropic Gaussian via sliced ECF matching.
+        if self.sigreg_coef != 0:
+            l_sigreg = sigreg_loss(outputs["pred_text_embedding"], self.sigreg_sketch_dim)
+            loss_dict["l_sigreg"] = self.sigreg_coef * l_sigreg
 
         return loss_dict

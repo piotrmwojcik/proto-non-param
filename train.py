@@ -572,6 +572,14 @@ def main():
     parser.add_argument("--msn-mask-ratio", type=float, default=0.25,
                         help="Fraction of patches to mask in MSN anchor pass "
                              "(0.25 = 64/256 patches for ViT-L/14@224).")
+    parser.add_argument("--ibot-coef", type=float, default=0.0,
+                        help="Weight for iBOT per-patch masked CE loss. "
+                             "Requires --msn-mask-ratio > 0.")
+    parser.add_argument("--sigreg-coef", type=float, default=0.0,
+                        help="Weight for SigReg ECF goodness-of-fit loss on pred_text_embedding. "
+                             "LeJEPA default: 0.02.")
+    parser.add_argument("--sigreg-sketch-dim", type=int, default=64,
+                        help="Random projection dimension for SigReg (default: 64).")
 
     args = parser.parse_args()
 
@@ -895,6 +903,9 @@ def main():
         sk_n_iter=args.sk_n_iter,
         koleo_coef=args.koleo_coef,
         msn_coef=args.msn_coef,
+        ibot_coef=args.ibot_coef,
+        sigreg_coef=args.sigreg_coef,
+        sigreg_sketch_dim=args.sigreg_sketch_dim,
     )
 
     net.to(device)
