@@ -350,23 +350,52 @@ def koleo_loss(z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return -nn_dist.clamp(min=eps).log().mean()
 
 
-def sigreg_loss(z: torch.Tensor, sketch_dim: int = 64) -> torch.Tensor:
-    """Sliced Epps-Pulley ECF goodness-of-fit toward isotropic Gaussian (SIGReg, Balestriero 2025).
-    Projects z onto random 1-D directions and minimises distance between empirical and Gaussian
-    characteristic functions. Applied to pred_text_embedding [B, 512] (unit sphere → uniform).
-    compile-safe: uses cos/sin instead of complex exponentials.
+class _EppsPulley(nn.Module):
+    """Univariate Epps-Pulley goodness-of-fit test.
+    Adapted from galilai-group/stable-pretraining (LeJEPA, Balestriero & LeCun 2025).
     """
-    N, C = z.size()
-    A = torch.randn(C, sketch_dim, device=z.device)
-    A = A / (A.norm(p=2, dim=0, keepdim=True) + 1e-6)          # [C, sketch_dim]
-    t = torch.linspace(-5.0, 5.0, 17, device=z.device)
-    exp_f = (-0.5 * t ** 2).exp()                               # Gaussian CF: e^{-t²/2}
-    args = (z @ A).unsqueeze(2) * t.view(1, 1, -1)             # [N, sketch_dim, 17]
-    cos_mean = args.cos().mean(0)                               # [sketch_dim, 17]
-    sin_mean = args.sin().mean(0)
-    diff_sq = (cos_mean - exp_f).square() + sin_mean.square()
-    dt = t[1] - t[0]
-    return (diff_sq * exp_f * dt).sum(-1).mean() * N
+    def __init__(self, t_max: float = 3.0, n_points: int = 17):
+        super().__init__()
+        assert n_points % 2 == 1
+        t = torch.linspace(0, t_max, n_points)
+        dt = t_max / (n_points - 1)
+        phi = (-0.5 * t ** 2).exp()
+        weights = torch.full((n_points,), 2 * dt)
+        weights[[0, -1]] = dt                   # trapezoidal quadrature
+        self.register_buffer("t", t)
+        self.register_buffer("phi", phi)
+        self.register_buffer("weights", weights * phi)  # pre-weight by Gaussian CF
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [N, S]. Returns per-slice statistic [S]."""
+        N = x.size(0)
+        x_t = x.unsqueeze(-1) * self.t         # [N, S, n_points]
+        cos_mean = x_t.cos().mean(0)            # [S, n_points]
+        sin_mean = x_t.sin().mean(0)
+        err = (cos_mean - self.phi).square() + sin_mean.square()
+        return (err @ self.weights) * N         # [S]
+
+
+class SlicedEppsPulley(nn.Module):
+    """Sliced Epps-Pulley goodness-of-fit for multivariate normality.
+    Uses a step-seeded generator so random projection directions are deterministic per step.
+    Adapted from galilai-group/stable-pretraining (LeJEPA, Balestriero & LeCun 2025).
+    """
+    def __init__(self, num_slices: int = 1024, t_max: float = 3.0, n_points: int = 17):
+        super().__init__()
+        self.num_slices = num_slices
+        self.ep = _EppsPulley(t_max=t_max, n_points=n_points)
+        self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [N, D]. Returns scalar mean EP statistic."""
+        with torch.no_grad():
+            g = torch.Generator(device=x.device).manual_seed(self.global_step.item())
+            A = torch.randn(x.size(-1), self.num_slices, device=x.device, generator=g)
+            A = A / A.norm(p=2, dim=0)
+            self.global_step.add_(1)
+        proj = x @ A                            # [N, num_slices]
+        return self.ep(proj).mean()
 
 
 class PNPCriterion(nn.Module):
@@ -427,7 +456,7 @@ class PNPCriterion(nn.Module):
         self.msn_coef = msn_coef
         self.ibot_coef = ibot_coef
         self.sigreg_coef = sigreg_coef
-        self.sigreg_sketch_dim = sigreg_sketch_dim
+        self.sigreg = SlicedEppsPulley(num_slices=sigreg_sketch_dim)
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
         vocab_logits = outputs["vocab_logits"]              # [B, V]
@@ -596,7 +625,7 @@ class PNPCriterion(nn.Module):
 
         # 12) SigReg: push pred_text_embedding toward isotropic Gaussian via sliced ECF matching.
         if self.sigreg_coef != 0:
-            l_sigreg = sigreg_loss(outputs["pred_text_embedding"], self.sigreg_sketch_dim)
+            l_sigreg = self.sigreg(outputs["pred_text_embedding"])
             loss_dict["l_sigreg"] = self.sigreg_coef * l_sigreg
 
         return loss_dict
