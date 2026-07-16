@@ -909,6 +909,7 @@ def main():
     )
 
     net.to(device)
+    criterion.to(device)
 
     param_groups = [
         {"params": net.text_projection_head.parameters(), "lr": args.text_proj_lr},
