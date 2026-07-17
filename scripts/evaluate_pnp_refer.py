@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import heapq
 import json
 import os
 import sys
@@ -25,6 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
+from PIL import Image
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,47 @@ _img_transform = T.Compose([
 
 
 # ---------------------------------------------------------------------------
+# Hardest-samples dump
+# ---------------------------------------------------------------------------
+
+def _save_hardest_dump(worst, out_dir, dataset, split, threshold):
+    """Save composite PNGs + JSON for the N lowest-IoU samples."""
+    dump_dir = os.path.join(out_dir, f"hardest_{dataset}_{split}")
+    os.makedirs(dump_dir, exist_ok=True)
+
+    # ascending IoU order (worst first); heap stores -iou at index 0
+    samples = sorted(worst, key=lambda x: x[0])
+
+    records = []
+    for rank, (neg_iou, idx, sentence, pil_img, pred_mask, gt_mask) in enumerate(samples):
+        iou = -neg_iou
+        W, H = 224, 224
+        orig = pil_img.convert("RGB").resize((W, H))
+        orig_np = np.array(orig)
+
+        gt_up  = np.array(Image.fromarray(gt_mask * 255).resize((W, H), Image.NEAREST)) > 0
+        pr_up  = np.array(Image.fromarray(pred_mask * 255).resize((W, H), Image.NEAREST)) > 0
+
+        def tint(base, mask, ch):
+            out = base.copy()
+            out[mask, ch] = np.clip(out[mask, ch].astype(np.int32) + 128, 0, 255).astype(np.uint8)
+            return out
+
+        panel = np.concatenate(
+            [orig_np, tint(orig_np, gt_up, 1), tint(orig_np, pr_up, 0)], axis=1
+        )
+        fname = f"{rank+1:02d}_iou{iou:.3f}.png"
+        Image.fromarray(panel).save(os.path.join(dump_dir, fname))
+        records.append({"rank": rank + 1, "index": idx, "iou": round(iou, 6),
+                        "sentence": sentence, "image_file": fname})
+
+    with open(os.path.join(dump_dir, f"{dataset}_{split}_hardest.json"), "w") as fh:
+        json.dump({"threshold": threshold, "samples": records}, fh, indent=2)
+
+    print(f"Hardest {len(samples)} samples → {dump_dir}/  (orig | GT-green | pred-red)")
+
+
+# ---------------------------------------------------------------------------
 # Main evaluation loop
 # ---------------------------------------------------------------------------
 
@@ -175,6 +218,10 @@ def evaluate(args):
     total_I  = {t: 0 for t in thresholds}
     total_U  = {t: 0 for t in thresholds}
     per_sample = {t: [] for t in thresholds}
+
+    n_dump = args.dump_hardest
+    # max-heap of (-iou, idx, sentence, pil_img, pred_mask, gt_mask); bounded to n_dump entries
+    worst: list = []
 
     # ── Eval loop ──────────────────────────────────────────────────────────
     for i in tqdm(range(len(ds)), desc=f"Eval {args.dataset}/{args.data_split}"):
@@ -225,6 +272,16 @@ def evaluate(args):
                 "iou": round(sample_iou, 6),
             })
 
+            # Track worst N samples (non-sweep: single t; sweep: first t only)
+            if n_dump > 0 and t == thresholds[0]:
+                # ponytail: heap stores -iou so Python min-heap becomes max-IoU-at-top
+                entry = (-sample_iou, i, str(sentence), pil_img.copy(),
+                         pred_mask.copy(), gt_bin.copy())
+                if len(worst) < n_dump:
+                    heapq.heappush(worst, entry)
+                elif sample_iou < -worst[0][0]:
+                    heapq.heapreplace(worst, entry)
+
     # ── Save JSON (one per threshold) ──────────────────────────────────────
     out_dir = os.path.join(args.out_dir, "pnp_refer")
     os.makedirs(out_dir, exist_ok=True)
@@ -264,6 +321,11 @@ def evaluate(args):
 
     print(f"\nResults saved to {out_dir}/")
 
+    if n_dump > 0:
+        if sweep_mode:
+            print(f"Note: --dump-hardest ranks by IoU at t={thresholds[0]:.2f} (lowest sweep threshold).")
+        _save_hardest_dump(worst, out_dir, args.dataset, args.data_split, thresholds[0])
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -289,6 +351,8 @@ def parse_args():
                         "Overrides --threshold. Saves one JSON per value with _tXXX suffix. "
                         "Example: --threshold-sweep 0.3 0.4 0.5 0.6 0.7")
     p.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
+    p.add_argument("--dump-hardest", type=int, default=0, metavar="N",
+                   help="Save the N lowest-IoU samples as images+JSON. 0 = off.")
     return p.parse_args()
 
 
