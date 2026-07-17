@@ -7,6 +7,8 @@ from collections import Counter
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+from collections import Counter
+from tqdm import tqdm
 from torchvision import transforms
 from torchvision.transforms import v2
 
@@ -153,7 +155,11 @@ class CocoCLIPDataset(Dataset):
 
         samples = []
         print("Building samples")
-        for image_id, captions in captions_per_image.items():
+        for image_id, captions in tqdm(
+            captions_per_image.items(),
+            total=len(captions_per_image),
+            desc="Building samples"
+        ):
             file_name = image_id_to_file.get(image_id)
             if file_name is None:
                 continue
@@ -210,3 +216,42 @@ class CocoCLIPDataset(Dataset):
             img_tensor = self.eval_transform(img)
 
         return img_tensor, captions, prob_dist, index
+
+    import torch
+import nltk
+
+
+if __name__ == "__main__":
+    import torch
+    import nltk
+    from torch.utils.data import DataLoader
+
+    nltk.download("punkt", quiet=True)
+    nltk.download("averaged_perceptron_tagger", quiet=True)
+    nltk.download("wordnet", quiet=True)
+    nltk.download("omw-1.4", quiet=True)
+
+    vocab_cache_path = "/net/tscratch/people/plgpiotrwojcik/vocab/merged_vocab_openclip_pretrained.pt"
+
+    cache = torch.load(vocab_cache_path, map_location="cpu")
+    vocab_words = list(cache.keys())
+    vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
+
+    print("Vocab size:", len(vocab_to_idx), flush=True)
+
+    dataset = CocoCLIPDataset(
+        annotations_json="/net/tscratch/people/plgpiotrwojcik/coco_2014/annotations/captions_val2014.json",
+        coco_root="/net/tscratch/people/plgpiotrwojcik/coco_2014",
+        vocab_to_idx=vocab_to_idx,
+        train=False,
+        device="cpu",
+    )
+
+    print("Dataset size:", len(dataset), flush=True)
+
+    image, captions, prob_dist, idx = dataset[0]
+
+    print("Image shape:", image.shape, flush=True)
+    print("First caption:", captions[0], flush=True)
+    print("Prob dist shape:", prob_dist.shape, flush=True)
+    print("Index:", idx, flush=True)

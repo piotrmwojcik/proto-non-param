@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from html import parser
 import sys
 import logging
 from collections import defaultdict
@@ -7,6 +8,9 @@ from pathlib import Path
 import numpy as np
 import math
 import random
+import os
+import nltk
+from nltk.stem import WordNetLemmatizer
 import open_clip
 from collections import defaultdict
 import argparse
@@ -14,6 +18,7 @@ from sklearn.manifold import TSNE
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 
+from vg_dataset import build_webdataset, collate_batch
 import wandb
 import lightning as L
 import torch
@@ -191,62 +196,99 @@ def wandb_log_top_proto_heatmaps(
         sample_grids.append(wandb.Image(fig, caption=f"sample={b}"))
         plt.close(fig)
 
-    log_dict = {
-        "global_step": step,
-        log_key: sample_grids,
-    }
 
-    wandb.log(log_dict)
+        log_dict = {
+            "global_step": step,
+            log_key: sample_grids,
+        }
 
+        print(f"W&B logging {len(sample_grids)} heatmap image(s) to {log_key} at step={step}")
+        wandb.log(log_dict, step=step)
+
+def _slice_batch_outputs(outputs: dict, batch_idx: int, batch_size: int) -> dict:
+    sliced = {}
+
+    for k, v in outputs.items():
+        if torch.is_tensor(v) and v.ndim > 0 and v.shape[0] == batch_size:
+            sliced[k] = v[batch_idx : batch_idx + 1]
+        else:
+            sliced[k] = v
+
+    return sliced
 
 def train(
-    model: nn.Module,
-    criterion: nn.Module,
-    dataloader: DataLoader,
-    epoch: int,
-    optimizer: optim.Optimizer,
-    logger: Logger,
-    device: torch.device,
-    clip_model: nn.Module,
-    noun_embeddings: torch.Tensor,
-    target_temperature: float = 0.01,
+    model,
+    criterion,
+    dataloader,
+    optimizer,
+    logger,
+    device,
+    max_steps,
     *,
+    start_step=0,
     vocab_to_idx=None,
 ):
     model.train()
 
     running_losses = defaultdict(float)
+    num_samples = 0
 
     for i, batch in enumerate(tqdm(dataloader)):
+        if i >= 10:
+            break
+
         images, captions, target_dist, indices = batch
+
+        bs = images.size(0)
+        num_samples += bs
+
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
 
-        # avoid exact zeros for KL / log-based losses
         words_sim_distribution = target_dist.clamp_min(1e-8)
 
-        # ---- DEBUG PRINT ----
         if i % 200 == 0:
             b = 0
-            topk_vals, topk_idx = words_sim_distribution[b].topk(10)
 
-            words = [model.vocab_words[j] for j in topk_idx.tolist()]
-            weights = topk_vals.tolist()
+            raw_dist = target_dist[b]
+            dist = words_sim_distribution[b]
+
+            topk_vals, topk_idx = raw_dist.topk(10)
 
             print("\nAll captions:")
             for c in captions[b]:
                 print(" ", c)
 
-            print("Top-10 words:")
-            for w, s in zip(words, weights):
-                print(f"  {w:15s} {s:.7f}")
+            print("\nDistribution stats:")
+            print(f"  shape:          {tuple(raw_dist.shape)}")
+            print(f"  raw sum:        {raw_dist.sum().item():.7f}")
+            print(f"  raw min:        {raw_dist.min().item():.7f}")
+            print(f"  raw max:        {raw_dist.max().item():.7f}")
+            print(f"  raw mean:       {raw_dist.mean().item():.7f}")
+            print(f"  raw nonzero:    {(raw_dist > 0).sum().item()} / {raw_dist.numel()}")
+            print(f"  clamped min:    {dist.min().item():.7f}")
+
+            print("\nTop-10 words:")
+            for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
+                word = model.vocab_words[idx]
+                print(f"  {idx:6d}  {word:20s}  {val:.7f}")
+
+            print("\nFull nonzero raw distribution:")
+            for idx, val in enumerate(raw_dist.tolist()):
+                if val > 0:
+                    word = model.vocab_words[idx]
+                    print(f"  {idx:6d}  {word:20s}  {val:.7f}")
 
         outputs = model(images)
+
         loss_dict = criterion(
-            outputs, (images, words_sim_distribution, indices, captions), model
+            outputs,
+            (images, words_sim_distribution, indices, captions),
+            model,
         )
 
         loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
+
         if not isinstance(loss, torch.Tensor):
             raise ValueError("Loss is not a tensor")
 
@@ -254,64 +296,57 @@ def train(
         loss.backward()
         optimizer.step()
 
-        log_dict = {}
+        global_step = start_step + i
+
+        log_dict = {
+            "global_step": global_step,
+            "train/total_loss": loss.item(),
+        }
+
         for k, v in loss_dict.items():
-            running_losses[k] += v.item() * images.size(0)
+            running_losses[k] += v.item() * bs
             log_dict[f"train/{k}"] = v.item()
 
-        global_step = epoch * len(dataloader) + i
-        log_dict["train/total_loss"] = loss.item()
-        log_dict["epoch"] = epoch
-        log_dict["global_step"] = global_step
-        wandb.log(log_dict)
+        wandb.log(log_dict, step=global_step)
 
     for k, v in running_losses.items():
-        loss_avg = v / len(dataloader.dataset)
-        logger.info(f"EPOCH {epoch} train {k}: {loss_avg:.4f}")
-
+        loss_avg = v / max(1, num_samples)
+        logger.info(f"TRAIN {k}: {loss_avg:.4f}")
 
 @torch.inference_mode()
 def test(
-    model: nn.Module,
-    criterion: nn.Module,
-    dataloader: DataLoader,
-    epoch: int,
-    logger: Logger,
-    device: torch.device,
-    clip_model: nn.Module,
+    model,
+    criterion,
+    dataloader,
+    logger,
+    device,
     *,
-    train_steps_per_epoch: int,
+    global_step: int,
     log_every: int = 50,
-    vocab_to_idx=None,
 ):
     model.eval()
 
     running_losses = defaultdict(float)
     num_samples = 0
 
+    print("\nSTARTING EVALUATION\n")
+
     for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, indices, _ = batch
-
-        global_step = epoch * train_steps_per_epoch + i
-
-        # --------------------------
-        # Caption → noun distribution
-        # --------------------------
-
-        # B, D = img_feat.shape
-        # V = noun_embeddings.shape[0]
-
         images, captions, target_dist, indices = batch
+
         images = images.to(device, non_blocking=True)
         target_dist = target_dist.to(device, non_blocking=True)
+
         words_sim_distribution = target_dist.clamp_min(1e-8)
 
-        # --------------------------
-        # Model forward
-        # --------------------------
         outputs = model(images)
+
+        print("--!!! ", i)
+
         loss_dict = criterion(
-            outputs, (images, words_sim_distribution, indices, captions), model
+            outputs,
+            (images, words_sim_distribution, indices, captions),
+            model,
         )
 
         bs = images.size(0)
@@ -320,85 +355,72 @@ def test(
         for k, v in loss_dict.items():
             running_losses[k] += v.item() * bs
 
-        # --------------------------
-        # Logging
-        # --------------------------
-        log_batches = set(
-            random.sample(
-                range(len(dataloader)), k=max(1, len(dataloader) // log_every)
-            )
-        )
+        eval_step = global_step + i
 
-        # choose random image in the batch
-        b = random.randrange(images.shape[0])
+        should_log_images = i == 0 or (log_every is not None and log_every > 0 and i % log_every == 0)
 
-        for i, batch in enumerate(dataloader):
-            if i in log_batches:
-                # choose random image in batch
-                b = random.randrange(images.size(0))
+        print("!!! ", i, should_log_images)
 
-                log_dict = {
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "eval/batch_idx": i,
-                    "eval/sample_idx": b,
-                }
-                if "mixture_weights" in outputs:
-                    topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
+        if should_log_images:
+            b = random.randrange(bs)
 
-                    words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
-
-                    log_dict["eval/top_words"] = ", ".join(words)
-
-                for k, v in loss_dict.items():
-                    log_dict[f"eval/{k}"] = v.item()
-
-                wandb.log(log_dict)
-
-                # --------------------------
-                # Visualization logging
-                # --------------------------
-                wandb_log_top_proto_heatmaps(
-                    model=model,
-                    images=images[b : b + 1],
-                    outputs={
-                        k: (
-                            v[b : b + 1]
-                            if hasattr(v, "__getitem__")
-                            and getattr(v, "shape", None) is not None
-                            and len(v.shape) > 0
-                            and v.shape[0] == images.shape[0]
-                            else v
-                        )
-                        for k, v in outputs.items()
-                    },
-                    step=global_step,
-                    captions=[captions[b]],
-                    log_tsne=False,
-                )
-        # --------------------------
-        # Epoch metrics
-        # --------------------------
-        avg_losses = {}
-
-        for k, v in running_losses.items():
-            avg_losses[k] = v / num_samples
-            logger.info(f"EPOCH {epoch} test {k}: {avg_losses[k]:.4f}")
-
-        avg_losses["total_loss"] = sum(
-            v for k, v in avg_losses.items() if not k.startswith("_")
-        )
-
-        wandb.log(
-            {
-                "epoch": epoch,
-                "global_step": epoch * train_steps_per_epoch + len(dataloader) - 1,
-                **{f"test/{k}": v for k, v in avg_losses.items()},
+            log_dict = {
+                "global_step": eval_step,
+                "eval/batch_idx": i,
+                "eval/sample_idx": b,
             }
-        )
 
-        return avg_losses
+            if "mixture_weights" in outputs:
+                topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
+                words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
+                log_dict["eval/top_words"] = ", ".join(words)
 
+            for k, v in loss_dict.items():
+                log_dict[f"eval/{k}"] = v.item()
+
+            print("LOGGING IMAGE TO WANDB")
+            print("outputs keys:", outputs.keys())
+            print("patch logits shape:", outputs["patch_prototype_logits"].shape)
+            print("image shape:", images[b : b + 1].shape)
+            print("eval_step:", eval_step)
+
+            sample_outputs = _slice_batch_outputs(
+                outputs=outputs,
+                batch_idx=b,
+                batch_size=bs,
+            )
+
+            wandb_log_top_proto_heatmaps(
+                model=model,
+                images=images[b : b + 1],
+                outputs=sample_outputs,
+                step=eval_step,
+                captions=[captions[b]],
+                log_key="eval/top_proto_heatmaps",
+                log_tsne=False,
+            )
+
+            wandb.log(log_dict, step=eval_step)
+
+    avg_losses = {}
+
+    for k, v in running_losses.items():
+        avg_losses[k] = v / max(1, num_samples)
+        logger.info(f"TEST {k}: {avg_losses[k]:.4f}")
+
+    avg_losses["total_loss"] = sum(
+        v for k, v in avg_losses.items() if not k.startswith("_")
+    )
+
+    wandb.log(
+        {
+            "global_step": global_step,
+            **{f"test/{k}": v for k, v in avg_losses.items()},
+        },
+        step=global_step,
+    )
+
+    return avg_losses
 
 def build_backbone(args):
     if "dinov2" in args.backbone:
@@ -445,7 +467,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
-        "--dataset", type=str, default="coco_clip", choices=["coco_clip"]
+        "--dataset",
+        type=str,
+        default="coco_clip",
+        choices=["coco_clip", "cub_clip"],
     )
     parser.add_argument(
         "--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/"
@@ -481,11 +506,11 @@ def main():
     parser.add_argument("--kl-coef", type=float, default=1.0)
     parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
     parser.add_argument("--prototype-init-noise", type=float, default=0.01)
+    parser.add_argument("--eval-every-steps", type=int, default=1000)
     parser.add_argument("--temperature", type=float, default=0.2)
 
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--bin-coef", type=float, default=0.1)
     parser.add_argument("--backbone-lr", type=float, default=1.0e-5)
     parser.add_argument("--text-proj-lr", type=float, default=1.0e-4)
@@ -493,11 +518,13 @@ def main():
 
     parser.add_argument("--cosine-coef", type=float, default=1.0)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--max-steps", type=int, default=1000)
 
     args = parser.parse_args()
 
     wandb.init(
-        project="proto-non-param",
+        entity=os.environ.get("WANDB_ENTITY"),
+        project=os.environ.get("WANDB_PROJECT", "proto-non-param"),
         config=vars(args),
         dir=args.log_dir,
     )
@@ -532,35 +559,55 @@ def main():
 
     print("Building datasets")
 
-    dataset_train = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_train2014.json",
-        coco_root="/data/pwojcik/coco_2014",
+    from glob import glob
+
+    shards = sorted(glob("/net/tscratch/people/plgpiotrwojcik/vg_coco/train/shard-*.tar"))
+
+    nltk.download("punkt", quiet=True)
+    nltk.download("averaged_perceptron_tagger", quiet=True)
+    nltk.download("wordnet", quiet=True)
+    nltk.download("omw-1.4", quiet=True)
+
+    # -------------------------
+    # Build datasets
+    # -------------------------
+    shards = sorted(glob("/net/tscratch/people/plgpiotrwojcik/vg_coco/train/shard-*.tar"))
+    if len(shards) == 0:
+        raise RuntimeError("No train shards found!")
+    dataset_train = build_webdataset(
+        shards=shards,
         vocab_to_idx=vocab_to_idx,
         train=True,
-    )
+        shardshuffle=True,
+        sample_shuffle=1000,
+    ).with_epoch(args.eval_every_steps * args.batch_size)
 
     dataset_test = CocoCLIPDataset(
-        annotations_json="/data/pwojcik/coco_2014/annotations/captions_val2014.json",
-        coco_root="/data/pwojcik/coco_2014",
+        annotations_json="/net/tscratch/people/plgpiotrwojcik/coco_2014/annotations/captions_val2014.json",
+        coco_root="/net/tscratch/people/plgpiotrwojcik/coco_2014/val2014",
         vocab_to_idx=vocab_to_idx,
         train=False,
     )
 
     print("Done with datasets")
-    print("Train: ", len(dataset_train))
-    print("Test: ", len(dataset_test))
+    print("Train shards:", len(shards))
+    print("Test:", len(dataset_test))
 
+    # -------------------------
+    # Build dataloaders
+    # -------------------------
     dataloader_train = DataLoader(
-        dataset=dataset_train,
+        dataset_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=coco_clip_collate_fn,
-        shuffle=True,
+        collate_fn=collate_batch,
         pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None,
     )
 
     dataloader_test = DataLoader(
-        dataset=dataset_test,
+        dataset_test,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         collate_fn=coco_clip_collate_fn,
@@ -666,47 +713,41 @@ def main():
 
     print_parameters(net=net, logger=logger)
 
-    best_epoch = 0
-    best_val_cosine = float("-inf")
-
     cache = torch.load(args.vocab_cache_path, map_location="cpu")
     vocab_words = list(cache.keys())
     vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
     noun_embeddings = torch.stack([cache[w] for w in vocab_words], dim=0)
     noun_embeddings = F.normalize(noun_embeddings, dim=-1).to(device)
 
-    for epoch in range(args.epochs):
+    global_step = 0
+    best_test_loss = float("inf")
+
+    while global_step < args.max_steps:
+        steps_this_epoch = min(args.eval_every_steps, args.max_steps - global_step)
+
         train(
             model=net,
             criterion=criterion,
             dataloader=dataloader_train,
-            epoch=epoch,
             optimizer=optimizer,
             logger=logger,
             device=device,
-            clip_model=clip_model,
-            noun_embeddings=noun_embeddings,
-            target_temperature=0.01,
+            max_steps=steps_this_epoch,
+            start_step=global_step,
             vocab_to_idx=vocab_to_idx,
         )
 
-        epoch_metrics = test(
+        global_step += steps_this_epoch
+
+        test_metrics = test(
             model=net,
             criterion=criterion,
             dataloader=dataloader_test,
-            epoch=epoch,
             logger=logger,
             device=device,
-            clip_model=clip_model,
-            train_steps_per_epoch=len(dataloader_train),
-            vocab_to_idx=vocab_to_idx,  # ADD THIS
+            global_step=global_step,
         )
 
-        epoch_metric = -sum(
-            v
-            for k, v in epoch_metrics.items()
-            if k.startswith("test/") and not k.startswith("test/_")
-        )
         torch.save(
             {
                 "state_dict": {
@@ -716,26 +757,21 @@ def main():
             },
             log_dir / "ckpt.pth",
         )
-        logger.info("Model saved as ckpt.pth")
-        torch.save(
-            {
-                "state_dict": {
-                    k: v.detach().cpu() for k, v in net.state_dict().items()
+
+        logger.info(f"Checkpoint saved at step {global_step}")
+
+        if test_metrics["total_loss"] < best_test_loss:
+            best_test_loss = test_metrics["total_loss"]
+            torch.save(
+                {
+                    "state_dict": {
+                        k: v.detach().cpu() for k, v in net.state_dict().items()
+                    },
+                    "hparams": vars(args),
                 },
-                "hparams": vars(args),
-            },
-            log_dir / "ckpt.pth",
-        )
-        logger.info("Model saved as ckpt.pth")
-
-        if epoch_metric > best_val_cosine:
-            best_val_cosine = epoch_metric
-            best_epoch = epoch
-
-    logger.info(
-        f"DONE! Best epoch is epoch {best_epoch} with cosine similarity {best_val_cosine:.4f}."
-    )
-
+                log_dir / "best_ckpt.pth",
+            )
+            logger.info(f"Best checkpoint saved at step {global_step}")
 
 if __name__ == "__main__":
     main()
