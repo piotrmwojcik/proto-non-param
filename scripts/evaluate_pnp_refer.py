@@ -120,7 +120,9 @@ def build_model(ckpt_path: str, device: torch.device):
         prototype_init_noise=getattr(hparams, "prototype_init_noise", 0.01),
         clip_model=clip_model,
     )
-    net.load_state_dict(ckpt["state_dict"])
+    missing, unexpected = net.load_state_dict(ckpt["state_dict"], strict=False)
+    if missing:
+        print(f"Note: checkpoint missing keys (using defaults): {missing}")
     net.eval().to(device)
 
     tokenizer = open_clip.get_tokenizer(clip_model_name)
