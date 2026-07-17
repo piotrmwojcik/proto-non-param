@@ -86,11 +86,13 @@ class PNP(nn.Module):
         prototype_init_noise: float = 0.01,
         clip_model = None,
         msn_mask_ratio: float = 0.0,
+        attn_temp_init: float = 0.1,
     ):
         super().__init__()
         self.backbone = backbone
         self.dim = dim
         self.temperature = temperature
+        self.attn_temp = nn.Parameter(torch.tensor(attn_temp_init))
         self.clip_text_dim = clip_text_dim
         self.prototype_init_noise = prototype_init_noise
 
@@ -218,12 +220,10 @@ class PNP(nn.Module):
         )  # [B, N, V]
 
         # -----------------------------------
-        # Image-level prototype logits
+        # Image-level prototype logits (cross-attention over patches)
         # -----------------------------------
-        k = 5
-        topk_vals = patch_prototype_logits.topk(k, dim=1).values
-        vocab_logits = topk_vals.mean(dim=1)
-        #vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
+        attn_weights = F.softmax(patch_prototype_logits / self.attn_temp, dim=1)  # [B, N, V]
+        vocab_logits = (attn_weights * patch_prototype_logits).sum(dim=1)          # [B, V]
 
         # MSN: post-backbone masking — zero out a random fraction of patch tokens
         # and recompute vocab_logits from the survivors. No second backbone pass.
@@ -241,7 +241,8 @@ class PNP(nn.Module):
             patch_tokens_m = patch_tokens.clone()
             patch_tokens_m[msn_masks] = 0.0          # zero out masked positions
             ppl_m = einsum(patch_tokens_m, prototypes, "B n_patches dim, V dim -> B n_patches V")
-            vocab_logits_masked = ppl_m.topk(k, dim=1).values.mean(dim=1)
+            attn_weights_m = F.softmax(ppl_m / self.attn_temp, dim=1)
+            vocab_logits_masked = (attn_weights_m * ppl_m).sum(dim=1)
             # iBOT: per-patch CE at masked positions (reuses ppl_m, no extra compute)
             ibot_logits_masked = ppl_m[msn_masks]                          # [B*n_mask, V]
             ibot_logits_full = patch_prototype_logits.detach()[msn_masks]  # [B*n_mask, V]
@@ -279,6 +280,7 @@ class PNP(nn.Module):
         outputs = dict(
             patch_tokens=patch_tokens,
             patch_prototype_logits=patch_prototype_logits,
+            attn_weights=attn_weights,
             vocab_logits=vocab_logits,
             clip_vocab_logits=clip_vocab_logits,
             clip_gate_logits=None,

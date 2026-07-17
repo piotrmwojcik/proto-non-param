@@ -580,6 +580,9 @@ def main():
                              "LeJEPA default: 0.02.")
     parser.add_argument("--sigreg-sketch-dim", type=int, default=64,
                         help="Random projection dimension for SigReg (default: 64).")
+    parser.add_argument("--attn-temp-init", type=float, default=0.1,
+                        help="Initial value of the learnable patch attention temperature τ. "
+                             "Small = sparse attention (≈top-1), large = uniform pooling.")
 
     args = parser.parse_args()
 
@@ -831,6 +834,7 @@ def main():
         prototype_init_noise=0.0 if args.residual_lr == 0 else args.prototype_init_noise,
         clip_model=clip_model,
         msn_mask_ratio=args.msn_mask_ratio,
+        attn_temp_init=args.attn_temp_init,
     )
     # freeze backbone first
     #for p in net.backbone.parameters():
