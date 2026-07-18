@@ -166,6 +166,7 @@ ABLATION_VARIANTS = {
         "O2": ("PNP-O2 (ViT-L, no contrastive, SK λ=0.3+SigReg λ=0.5)", "contr_O2"),
         "P":  ("PNP-P (ViT-L, no contrastive, SK+KoLeo+cross-attn)",   "contr_P"),
         "Q":  ("PNP-Q (ViT-L, no contrastive, SK λ=0.3+KoLeo, top-k)", "contr_Q"),
+        "R":  ("PNP-R (ViT-L, no contrastive, SK 0.5→0.1 + KoLeo 0.3→0.1 annealed, top-k)", "contr_R"),
     },
 }
 

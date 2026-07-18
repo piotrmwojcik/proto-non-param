@@ -170,6 +170,15 @@ def wandb_log_top_proto_heatmaps(
     })
     plt.close(fig)
 
+
+def _annealed_coef(epoch: int, total_epochs: int, init: float, final: float) -> float:
+    """Cosine decay from `init` (epoch 0) to `final` (last epoch)."""
+    if total_epochs <= 1:
+        return final
+    t = min(epoch / (total_epochs - 1), 1.0)
+    return final + 0.5 * (init - final) * (1 + math.cos(math.pi * t))
+
+
 def train(
     model: nn.Module,
     criterion: nn.Module,
@@ -243,6 +252,8 @@ def train(
 
         global_step = epoch * len(dataloader) + i
         log_dict["train/total_loss"] = loss.item()
+        log_dict["train/sk_coef"] = criterion.sk_coef
+        log_dict["train/koleo_coef"] = criterion.koleo_coef
         log_dict["epoch"] = epoch
         log_dict["global_step"] = global_step
         wandb.log(log_dict)
@@ -560,6 +571,10 @@ def main():
                              "vocab_logits (std≈0.15); SwAV default 0.05 is too small here.")
     parser.add_argument("--sk-n-iter", type=int, default=3,
                         help="Sinkhorn-Knopp normalisation iterations (default: 3).")
+    parser.add_argument("--sk-coef-init", type=float, default=None,
+                        help="If set, anneal --sk-coef from this value down to --sk-coef "
+                             "(steady-state) via cosine decay over training. "
+                             "Default: None = constant --sk-coef (previous behavior).")
     parser.add_argument("--wandb-entity", type=str, default=None,
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
@@ -567,6 +582,8 @@ def main():
     parser.add_argument("--koleo-coef", type=float, default=0.0,
                         help="Weight for KoLeo nearest-neighbour repulsion on "
                              "pred_text_embedding. DINOv3 default: 0.1.")
+    parser.add_argument("--koleo-coef-init", type=float, default=None,
+                        help="Same as --sk-coef-init but for --koleo-coef.")
     parser.add_argument("--msn-coef", type=float, default=0.0,
                         help="Weight for MSN masked-prediction loss. Default 0 (off).")
     parser.add_argument("--msn-mask-ratio", type=float, default=0.25,
@@ -974,6 +991,11 @@ def main():
     noun_embeddings = F.normalize(noun_embeddings, dim=-1).to(device)
 
     for epoch in range(args.epochs):
+        if args.sk_coef_init is not None:
+            criterion.sk_coef = _annealed_coef(epoch, args.epochs, args.sk_coef_init, args.sk_coef)
+        if args.koleo_coef_init is not None:
+            criterion.koleo_coef = _annealed_coef(epoch, args.epochs, args.koleo_coef_init, args.koleo_coef)
+
         train(
             model=net,
             criterion=criterion,
