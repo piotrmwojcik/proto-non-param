@@ -119,6 +119,9 @@ def build_model(ckpt_path: str, device: torch.device):
         vocab_cache_path=vocab_cache_path,
         prototype_init_noise=getattr(hparams, "prototype_init_noise", 0.01),
         clip_model=clip_model,
+        agg_mode=getattr(hparams, "agg_mode", "topk"),
+        topk_k=getattr(hparams, "topk_k", 5),
+        attn_temp_init=getattr(hparams, "attn_temp_init", 0.1),
     )
     missing, unexpected = net.load_state_dict(ckpt["state_dict"], strict=False)
     if missing:
