@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
+from scipy.ndimage import label as cc_label
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,22 @@ def mask_IU(pred: np.ndarray, gt: np.ndarray):
     I = (pred_bool & gt_bool).sum()
     U = (pred_bool | gt_bool).sum()
     return I, U
+
+
+def keep_single_best_instance(pred_mask: np.ndarray, activation: np.ndarray) -> np.ndarray:
+    """Collapse a possibly multi-blob mask down to its single highest-mean-activation
+    connected component. Targets queries like "the closest swimmer" where several
+    same-category instances all pass the threshold but the GT is exactly one of them."""
+    labeled, n_components = cc_label(pred_mask)
+    if n_components <= 1:
+        return pred_mask
+    best_label, best_mean = 1, -np.inf
+    for comp in range(1, n_components + 1):
+        comp_mask = labeled == comp
+        mean_act = activation[comp_mask].mean()
+        if mean_act > best_mean:
+            best_mean, best_label = mean_act, comp
+    return (labeled == best_label).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +284,8 @@ def evaluate(args):
         gt_bin = (gt_mask > 0).astype(np.uint8)
         for t in thresholds:
             pred_mask = (activation >= t).astype(np.uint8)
+            if args.single_instance:
+                pred_mask = keep_single_best_instance(pred_mask, activation)
             I, U = mask_IU(pred_mask, gt_bin)
             sample_iou = float(I) / (float(U) + 1e-8) if U > 0 else 0.0
             total_I[t] += I
@@ -358,6 +377,12 @@ def parse_args():
     p.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     p.add_argument("--dump-hardest", type=int, default=0, metavar="N",
                    help="Save the N lowest-IoU samples as images+JSON. 0 = off.")
+    p.add_argument("--single-instance", action="store_true",
+                   help="Collapse the thresholded mask to its single highest-mean-"
+                        "activation connected component. Targets multi-instance "
+                        "disambiguation queries (e.g. 'the closest swimmer') where "
+                        "several same-category regions all pass threshold but GT is "
+                        "exactly one. Default off — reproduces prior eval results.")
     return p.parse_args()
 
 
