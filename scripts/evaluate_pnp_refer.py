@@ -58,22 +58,40 @@ def mask_IU(pred: np.ndarray, gt: np.ndarray):
     return I, U
 
 
-def pick_best_proposal(sam_masks, activation: np.ndarray, min_px: int = 20):
-    """Proposal-and-rank: score each SAM mask proposal by its mean activation and
-    return the best one (CoPatch/TAS-style instance competition). Returns None
-    when no usable proposal exists — caller falls back to threshold masking."""
-    H, W = activation.shape
-    best, best_score = None, -np.inf
+def prepare_proposals(sam_masks, shape):
+    """Normalize SAM proposals to boolean arrays at the activation's resolution."""
+    H, W = shape
+    out = []
     for m in sam_masks:
         seg = m["segmentation"]
         if seg.shape != (H, W):
             seg = np.array(Image.fromarray(seg.astype(np.uint8) * 255)
                            .resize((W, H), Image.NEAREST)) > 0
-        if seg.sum() < min_px:
+        else:
+            seg = seg.astype(bool)
+        if seg.any():
+            out.append(seg)
+    return out
+
+
+def pick_best_proposal(proposals, thresh_mask: np.ndarray):
+    """SAM-as-refiner: return the proposal with highest IoU against the thresholded
+    activation mask. The dense prediction sets the object's location and scale; the
+    proposal that best matches it wins with clean instance boundaries. (Scoring by
+    mean activation instead selects tiny high-activation fragments — SAM over-
+    segments into parts, and a 30-px bright speck beats the true object.)
+    Returns None when nothing matches — caller keeps the threshold mask."""
+    t = thresh_mask.astype(bool)
+    if not t.any():
+        return None
+    best, best_iou = None, 0.0
+    for seg in proposals:
+        inter = (seg & t).sum()
+        if inter == 0:
             continue
-        score = activation[seg].mean()
-        if score > best_score:
-            best_score, best = score, seg
+        iou = inter / (seg | t).sum()
+        if iou > best_iou:
+            best_iou, best = iou, seg
     return None if best is None else best.astype(np.uint8)
 
 
@@ -249,7 +267,7 @@ def evaluate(args):
         from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
         sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint).to(device)
         sam_generator = SamAutomaticMaskGenerator(sam)
-        print(f"SAM proposal-and-rank: {args.sam_model_type} from {args.sam_checkpoint}")
+        print(f"SAM mask refinement: {args.sam_model_type} from {args.sam_checkpoint}")
     # ponytail: single-entry proposal cache — samples iterate sentences grouped by
     # image, so caching the last img_id avoids re-running SAM per sentence; a dict
     # cache would only help if sentence order interleaves images.
@@ -317,23 +335,23 @@ def evaluate(args):
         if a_max > a_min:
             activation = (activation - a_min) / (a_max - a_min + 1e-8)
 
-        # SAM proposal-and-rank: prediction is threshold-independent (best proposal
-        # by mean activation); computed once per sample, reused across thresholds.
-        sam_pred = None
+        # SAM proposals: generated once per image (cached), matched per threshold below.
+        proposals = None
         if sam_generator is not None:
             if img_id != sam_cache_id:
                 sam_cache_id = img_id
                 sam_cache_masks = sam_generator.generate(np.array(pil_img.convert("RGB")))
-            sam_pred = pick_best_proposal(sam_cache_masks, activation)
+            proposals = prepare_proposals(sam_cache_masks, activation.shape)
 
         gt_bin = (gt_mask > 0).astype(np.uint8)
         for t in thresholds:
-            if sam_pred is not None:
-                pred_mask = sam_pred
-            else:
-                pred_mask = (activation >= t).astype(np.uint8)
-                if args.single_instance:
-                    pred_mask = keep_single_best_instance(pred_mask, activation)
+            pred_mask = (activation >= t).astype(np.uint8)
+            if args.single_instance:
+                pred_mask = keep_single_best_instance(pred_mask, activation)
+            if proposals is not None:
+                refined = pick_best_proposal(proposals, pred_mask)
+                if refined is not None:
+                    pred_mask = refined
             I, U = mask_IU(pred_mask, gt_bin)
             sample_iou = float(I) / (float(U) + 1e-8) if U > 0 else 0.0
             total_I[t] += I
@@ -432,10 +450,9 @@ def parse_args():
                         "(DINOv2 interpolates positional embeddings).")
     p.add_argument("--sam-checkpoint", type=str, default=None,
                    help="Path to a SAM checkpoint (e.g. sam_vit_h_4b8939.pth). When set, "
-                        "prediction switches to proposal-and-rank: SAM generates instance "
-                        "mask proposals and the one with highest mean activation wins "
-                        "(CoPatch/TAS-style object competition). Requires the "
-                        "segment-anything package.")
+                        "the thresholded prediction is replaced by the SAM instance "
+                        "proposal with highest IoU against it (SAM as boundary refiner / "
+                        "instance snapper). Requires the segment-anything package.")
     p.add_argument("--sam-model-type", type=str, default="vit_h",
                    choices=("vit_h", "vit_l", "vit_b"),
                    help="SAM backbone matching --sam-checkpoint (default: vit_h).")

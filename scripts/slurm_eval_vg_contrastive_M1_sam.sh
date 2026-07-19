@@ -1,12 +1,12 @@
 #!/bin/bash
-# Tier-0 experiment: SAM proposal-and-rank inference on the existing M1 checkpoint.
+# Tier-0 experiment: SAM mask refinement on the existing M1 checkpoint.
 #
-# Instead of thresholding the dense activation map, SAM generates instance mask
-# proposals and the proposal with the highest mean activation wins — the object-
-# competition mechanism behind current zero-shot RIS SOTA (CoPatch 44.1 Gref mIoU,
-# HybridGL, TAS all use propose-then-rank; CTRL-O gets it from slot attention).
-# Directly targets the wrong-blob and no-instance-competition failures in the
-# hardest-Gref dump. No retraining.
+# The thresholded activation mask is replaced by the SAM instance proposal with
+# highest IoU against it — the dense prediction sets location/scale, SAM snaps it
+# to clean instance boundaries. (v1 scored proposals by mean activation instead
+# and collapsed to ~5 IoU: SAM over-segments into parts, and tiny high-activation
+# fragments always won. IoU-vs-threshold-mask scoring removes that bias.)
+# No retraining.
 #
 # One-time setup on Athena before first run:
 #   pip install segment-anything                       # inside $SCRATCH/venv

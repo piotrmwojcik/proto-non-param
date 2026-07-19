@@ -43,12 +43,17 @@ echo ""
 
 declare -A SPLITS=(
   [Gref]="val"
-  [unc]="val"
-  [unc+]="val"
+  [unc]="val testA testB"
+  [unc+]="val testA testB"
 )
 
 for DATASET in Gref unc unc+; do
     for SPLIT in ${SPLITS[$DATASET]}; do
+        # val splits confirmed +1.2-1.3 mIoU — skip any split already evaluated
+        if [ -f "${OUT_DIR}/pnp_refer/${DATASET}_${SPLIT}.json" ]; then
+            echo "  skip   ${DATASET}/${SPLIT} (result exists)"
+            continue
+        fi
         JOB=$(sbatch --parsable \
             --job-name="pnp-M1r448-${DATASET}-${SPLIT}" \
             --partition="${PARTITION}" \
@@ -81,4 +86,4 @@ python scripts/evaluate_pnp_refer.py \
 done
 
 echo ""
-echo "3 jobs submitted. Monitor with: squeue -u \$USER"
+echo "Jobs submitted (existing results skipped). Monitor with: squeue -u \$USER"
