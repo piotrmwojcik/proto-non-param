@@ -575,6 +575,12 @@ def main():
                         help="If set, anneal --sk-coef from this value down to --sk-coef "
                              "(steady-state) via cosine decay over training. "
                              "Default: None = constant --sk-coef (previous behavior).")
+    parser.add_argument("--sk-prior-tau", type=float, default=0.0,
+                        help="PMSN-style non-uniform Sinkhorn prior: target vocab marginal "
+                             "∝ empirical_word_freq^tau. 0 = uniform (previous behavior); "
+                             "1 = full empirical distribution; 0.5 = tempered. Matches "
+                             "long-tailed (Zipfian) VG vocab instead of forcing equal "
+                             "mass onto rare words.")
     parser.add_argument("--wandb-entity", type=str, default=None,
                         help="W&B entity (team/org) to log runs under. Defaults to personal account.")
     parser.add_argument("--wandb-log-images", type=int, default=8,
@@ -584,6 +590,11 @@ def main():
                              "pred_text_embedding. DINOv3 default: 0.1.")
     parser.add_argument("--koleo-coef-init", type=float, default=None,
                         help="Same as --sk-coef-init but for --koleo-coef.")
+    parser.add_argument("--vicreg-coef", type=float, default=0.0,
+                        help="Weight for VICReg variance+covariance anti-collapse loss on "
+                             "pred_text_embedding (single-view, no invariance term). "
+                             "Alternative to KoLeo; the covariance term also fights "
+                             "dimensional collapse. Default 0 (off).")
     parser.add_argument("--msn-coef", type=float, default=0.0,
                         help="Weight for MSN masked-prediction loss. Default 0 (off).")
     parser.add_argument("--msn-mask-ratio", type=float, default=0.25,
@@ -911,6 +922,20 @@ def main():
             if p.requires_grad:
                 print("TRAINABLE BACKBONE:", name)
 
+    sk_prior = None
+    if args.sk_prior_tau > 0:
+        if not hasattr(dataset_train, "samples"):
+            raise ValueError("--sk-prior-tau requires a dataset with cached .samples "
+                             "(word-frequency marginal is computed from them)")
+        freqs = torch.zeros(len(dataset_train.samples[0][2]))
+        for s in dataset_train.samples:
+            freqs += s[2]
+        sk_prior = freqs.clamp_min(1e-8).pow(args.sk_prior_tau)
+        sk_prior /= sk_prior.sum()
+        print(f"SK prior (tau={args.sk_prior_tau}): "
+              f"max={sk_prior.max():.2e} min={sk_prior.min():.2e} "
+              f"effective vocab={(1.0 / sk_prior.pow(2).sum()).item():.0f}/{len(sk_prior)}")
+
     criterion = PNPCriterion(
         kl_coef=args.kl_coef,
         entropy_coef=args.entropy_coef,
@@ -931,7 +956,9 @@ def main():
         sk_coef=args.sk_coef,
         sk_eps=args.sk_eps,
         sk_n_iter=args.sk_n_iter,
+        sk_prior=sk_prior,
         koleo_coef=args.koleo_coef,
+        vicreg_coef=args.vicreg_coef,
         msn_coef=args.msn_coef,
         ibot_coef=args.ibot_coef,
         sigreg_coef=args.sigreg_coef,

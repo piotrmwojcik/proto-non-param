@@ -167,6 +167,10 @@ ABLATION_VARIANTS = {
         "P":  ("PNP-P (ViT-L, no contrastive, SK+KoLeo+cross-attn)",   "contr_P"),
         "Q":  ("PNP-Q (ViT-L, no contrastive, SK λ=0.3+KoLeo, top-k)", "contr_Q"),
         "R":  ("PNP-R (ViT-L, no contrastive, SK 0.5→0.1 + KoLeo 0.3→0.1 annealed, top-k)", "contr_R"),
+        "T":  ("PNP-T (ViT-L, no contrastive, SK+KoLeo, PMSN prior τ=0.5)", "contr_T"),
+        "U":  ("PNP-U (ViT-L, no contrastive, SK+VICReg)",                  "contr_U"),
+        "M1-448": ("PNP-M1 @448px (eval-only, 32×32 grid)",                 "contr_M1_res448"),
+        "M1-SAM": ("PNP-M1 + SAM proposal-rank (eval-only)",                "contr_M1_sam"),
     },
 }
 

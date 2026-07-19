@@ -58,6 +58,25 @@ def mask_IU(pred: np.ndarray, gt: np.ndarray):
     return I, U
 
 
+def pick_best_proposal(sam_masks, activation: np.ndarray, min_px: int = 20):
+    """Proposal-and-rank: score each SAM mask proposal by its mean activation and
+    return the best one (CoPatch/TAS-style instance competition). Returns None
+    when no usable proposal exists — caller falls back to threshold masking."""
+    H, W = activation.shape
+    best, best_score = None, -np.inf
+    for m in sam_masks:
+        seg = m["segmentation"]
+        if seg.shape != (H, W):
+            seg = np.array(Image.fromarray(seg.astype(np.uint8) * 255)
+                           .resize((W, H), Image.NEAREST)) > 0
+        if seg.sum() < min_px:
+            continue
+        score = activation[seg].mean()
+        if score > best_score:
+            best_score, best = score, seg
+    return None if best is None else best.astype(np.uint8)
+
+
 def keep_single_best_instance(pred_mask: np.ndarray, activation: np.ndarray) -> np.ndarray:
     """Collapse a possibly multi-blob mask down to its single highest-mean-activation
     connected component. Targets queries like "the closest swimmer" where several
@@ -156,11 +175,13 @@ def build_model(ckpt_path: str, device: torch.device):
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
-_img_transform = T.Compose([
-    T.Resize((224, 224)),
-    T.ToTensor(),
-    T.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
-])
+
+def build_img_transform(img_size: int):
+    return T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +237,23 @@ def evaluate(args):
     print(f"Loading PNP model from {args.ckpt} ...")
     net, tokenizer, hparams = build_model(args.ckpt, device)
 
-    # Number of patches: 224 / 14 = 16 → 16×16 = 256 patches
-    patch_grid = 224 // 14  # 16
+    assert args.img_size % 14 == 0, "--img-size must be a multiple of the ViT patch size (14)"
+    patch_grid = args.img_size // 14  # 224→16, 448→32
+    img_transform = build_img_transform(args.img_size)
+    if args.img_size != 224:
+        print(f"Eval resolution: {args.img_size}px → {patch_grid}×{patch_grid} patch grid")
+
+    # Optional SAM proposal-and-rank (lazy import: package only needed with the flag)
+    sam_generator = None
+    if args.sam_checkpoint:
+        from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+        sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint).to(device)
+        sam_generator = SamAutomaticMaskGenerator(sam)
+        print(f"SAM proposal-and-rank: {args.sam_model_type} from {args.sam_checkpoint}")
+    # ponytail: single-entry proposal cache — samples iterate sentences grouped by
+    # image, so caching the last img_id avoids re-running SAM per sentence; a dict
+    # cache would only help if sentence order interleaves images.
+    sam_cache_id, sam_cache_masks = None, None
 
     # ── Dataset ────────────────────────────────────────────────────────────
     data_root = os.path.join(args.data_root, args.dataset)
@@ -249,8 +285,8 @@ def evaluate(args):
     for i in tqdm(range(len(ds)), desc=f"Eval {args.dataset}/{args.data_split}"):
         sentence, img_id, pil_img, gt_mask, _ = ds.get_raw_item(i)
 
-        # Image → [1, 3, 224, 224]
-        img_t = _img_transform(pil_img).unsqueeze(0).to(device)
+        # Image → [1, 3, img_size, img_size]
+        img_t = img_transform(pil_img).unsqueeze(0).to(device)
 
         # Expression → CLIP text embedding [1, 512]
         # sentence may be a numpy bytes/str; coerce to Python str
@@ -281,11 +317,23 @@ def evaluate(args):
         if a_max > a_min:
             activation = (activation - a_min) / (a_max - a_min + 1e-8)
 
+        # SAM proposal-and-rank: prediction is threshold-independent (best proposal
+        # by mean activation); computed once per sample, reused across thresholds.
+        sam_pred = None
+        if sam_generator is not None:
+            if img_id != sam_cache_id:
+                sam_cache_id = img_id
+                sam_cache_masks = sam_generator.generate(np.array(pil_img.convert("RGB")))
+            sam_pred = pick_best_proposal(sam_cache_masks, activation)
+
         gt_bin = (gt_mask > 0).astype(np.uint8)
         for t in thresholds:
-            pred_mask = (activation >= t).astype(np.uint8)
-            if args.single_instance:
-                pred_mask = keep_single_best_instance(pred_mask, activation)
+            if sam_pred is not None:
+                pred_mask = sam_pred
+            else:
+                pred_mask = (activation >= t).astype(np.uint8)
+                if args.single_instance:
+                    pred_mask = keep_single_best_instance(pred_mask, activation)
             I, U = mask_IU(pred_mask, gt_bin)
             sample_iou = float(I) / (float(U) + 1e-8) if U > 0 else 0.0
             total_I[t] += I
@@ -377,6 +425,20 @@ def parse_args():
     p.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     p.add_argument("--dump-hardest", type=int, default=0, metavar="N",
                    help="Save the N lowest-IoU samples as images+JSON. 0 = off.")
+    p.add_argument("--img-size", type=int, default=224,
+                   help="Eval resolution (multiple of 14). 224 → 16×16 patch grid "
+                        "(default, reproduces prior results); 448 → 32×32 grid, 4× "
+                        "spatial resolution for small objects, same checkpoint "
+                        "(DINOv2 interpolates positional embeddings).")
+    p.add_argument("--sam-checkpoint", type=str, default=None,
+                   help="Path to a SAM checkpoint (e.g. sam_vit_h_4b8939.pth). When set, "
+                        "prediction switches to proposal-and-rank: SAM generates instance "
+                        "mask proposals and the one with highest mean activation wins "
+                        "(CoPatch/TAS-style object competition). Requires the "
+                        "segment-anything package.")
+    p.add_argument("--sam-model-type", type=str, default="vit_h",
+                   choices=("vit_h", "vit_l", "vit_b"),
+                   help="SAM backbone matching --sam-checkpoint (default: vit_h).")
     p.add_argument("--single-instance", action="store_true",
                    help="Collapse the thresholded mask to its single highest-mean-"
                         "activation connected component. Targets multi-instance "

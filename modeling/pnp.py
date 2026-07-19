@@ -331,12 +331,15 @@ class PNP(nn.Module):
 
 
 @torch.no_grad()
-def sinkhorn_knopp(logits: torch.Tensor, eps: float = 0.10, n_iter: int = 3) -> torch.Tensor:
+def sinkhorn_knopp(logits: torch.Tensor, eps: float = 0.10, n_iter: int = 3,
+                   prior: torch.Tensor = None) -> torch.Tensor:
     """Doubly-stochastic assignment matrix via Sinkhorn-Knopp (DINO/SwAV style).
 
     Returns Q [B, V] where rows sum to 1 (per-sample distribution) and
-    column sums are uniform (each prototype receives equal total assignment
-    across the batch → forces prototype diversity).
+    column sums match `prior` (each prototype receives prior[v] of the total
+    assignment across the batch). prior=None → uniform (original behavior,
+    forces equal prototype usage). A non-uniform prior (PMSN, Assran et al.
+    2022) matches long-tailed vocabularies where uniform usage is unrealistic.
 
     ponytail: eps=0.10 calibrated for cosine-scale vocab_logits (std≈0.15);
     SwAV default eps=0.05 is tuned for larger dot-product logits and yields
@@ -348,9 +351,30 @@ def sinkhorn_knopp(logits: torch.Tensor, eps: float = 0.10, n_iter: int = 3) -> 
     Q /= Q.sum()
     K, B = Q.shape
     for _ in range(n_iter):
-        Q /= Q.sum(dim=1, keepdim=True) * K  # uniform over vocab
-        Q /= Q.sum(dim=0, keepdim=True) * B  # uniform over batch
+        if prior is None:
+            Q /= Q.sum(dim=1, keepdim=True) * K       # uniform over vocab
+        else:
+            Q = Q / Q.sum(dim=1, keepdim=True) * prior.unsqueeze(1)  # prior[v] over vocab
+        Q /= Q.sum(dim=0, keepdim=True) * B            # uniform over batch
     return (Q / Q.sum(dim=0, keepdim=True)).T  # [B, V], rows sum to exactly 1
+
+
+def vicreg_loss(z: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """VICReg variance + covariance regularizer (Bardes et al. 2022), single-view.
+
+    No invariance term (we have one view); this is the anti-collapse half only.
+    z is unit-normalised [B, D], so per-dim std is ~1/sqrt(D) — rescale by
+    sqrt(D) so the standard std-target of 1 is meaningful. Covariance term is
+    down-weighted 1/25 to match VICReg's default var:cov = 25:1 ratio.
+    """
+    B, D = z.shape
+    z = z * sqrt(D)
+    z = z - z.mean(dim=0)
+    std = (z.var(dim=0) + eps).sqrt()
+    var_loss = F.relu(1.0 - std).mean()
+    cov = (z.T @ z) / max(B - 1, 1)
+    cov_loss = cov.fill_diagonal_(0.0).pow(2).sum() / D
+    return var_loss + cov_loss / 25.0
 
 
 def koleo_loss(z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -440,7 +464,9 @@ class PNPCriterion(nn.Module):
         sk_coef: float = 0.0,
         sk_eps: float = 0.10,
         sk_n_iter: int = 3,
+        sk_prior: torch.Tensor = None,
         koleo_coef: float = 0.0,
+        vicreg_coef: float = 0.0,
         msn_coef: float = 0.0,
         ibot_coef: float = 0.0,
         sigreg_coef: float = 0.0,
@@ -468,7 +494,12 @@ class PNPCriterion(nn.Module):
         self.sk_coef = sk_coef
         self.sk_eps = sk_eps
         self.sk_n_iter = sk_n_iter
+        if sk_prior is not None:
+            self.register_buffer("sk_prior", sk_prior)
+        else:
+            self.sk_prior = None
         self.koleo_coef = koleo_coef
+        self.vicreg_coef = vicreg_coef
         self.msn_coef = msn_coef
         self.ibot_coef = ibot_coef
         self.sigreg_coef = sigreg_coef
@@ -614,7 +645,8 @@ class PNPCriterion(nn.Module):
         # Q is computed @no_grad from vocab_logits; cross-entropy from Q → log_P trains the
         # model to match the doubly-stochastic assignment (more spread prototype use).
         if self.sk_coef != 0:
-            Q = sinkhorn_knopp(vocab_logits.detach(), eps=self.sk_eps, n_iter=self.sk_n_iter)
+            Q = sinkhorn_knopp(vocab_logits.detach(), eps=self.sk_eps, n_iter=self.sk_n_iter,
+                               prior=self.sk_prior)
             log_P = F.log_softmax(vocab_logits / self.temperature, dim=-1)
             l_sk = -(Q * log_P).sum(dim=-1).mean()
             loss_dict["l_sk"] = self.sk_coef * l_sk
@@ -623,6 +655,12 @@ class PNPCriterion(nn.Module):
         if self.koleo_coef != 0:
             l_koleo = koleo_loss(outputs["pred_text_embedding"])
             loss_dict["l_koleo"] = self.koleo_coef * l_koleo
+
+        # 9b) VICReg variance+covariance anti-collapse on pred_text_embedding
+        # (alternative to KoLeo; covariance term fights dimensional collapse).
+        if self.vicreg_coef != 0:
+            l_vicreg = vicreg_loss(outputs["pred_text_embedding"])
+            loss_dict["l_vicreg"] = self.vicreg_coef * l_vicreg
 
         # 10) MSN: predict full-image prototype distribution from masked-patch view.
         if self.msn_coef != 0 and outputs.get("vocab_logits_masked") is not None:
