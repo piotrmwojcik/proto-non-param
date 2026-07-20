@@ -74,17 +74,27 @@ def prepare_proposals(sam_masks, shape):
     return out
 
 
-def pick_best_proposal(proposals, thresh_mask: np.ndarray):
+def pick_best_proposal(proposals, thresh_mask: np.ndarray, min_iou: float = 0.5):
     """SAM-as-refiner: return the proposal with highest IoU against the thresholded
-    activation mask. The dense prediction sets the object's location and scale; the
-    proposal that best matches it wins with clean instance boundaries. (Scoring by
-    mean activation instead selects tiny high-activation fragments — SAM over-
-    segments into parts, and a 30-px bright speck beats the true object.)
-    Returns None when nothing matches — caller keeps the threshold mask."""
+    activation mask, gated by min_iou. The dense prediction sets the object's
+    location and scale; the proposal that best matches it wins with clean instance
+    boundaries. (Scoring by mean activation instead selects tiny high-activation
+    fragments — SAM over-segments into parts, and a 30-px bright speck beats the
+    true object.)
+
+    min_iou gate: when the activation is ambiguous (multiple plausible objects),
+    IoU-matching can confidently commit to the wrong SAM segment — a low best_iou
+    is exactly the signal that this is happening (no candidate closely tracks our
+    own mask). Ungated (min_iou=0), this broke ~28% of previously-correct Gref/val
+    predictions down to zero IoU for a handful of large wins on ambiguous cases —
+    net positive mIoU, net negative reliability. Gating at 0.5 requires strong
+    agreement before swapping.
+
+    Returns None when nothing clears the gate — caller keeps the threshold mask."""
     t = thresh_mask.astype(bool)
     if not t.any():
         return None
-    best, best_iou = None, 0.0
+    best, best_iou = None, min_iou
     for seg in proposals:
         inter = (seg & t).sum()
         if inter == 0:
@@ -349,7 +359,7 @@ def evaluate(args):
             if args.single_instance:
                 pred_mask = keep_single_best_instance(pred_mask, activation)
             if proposals is not None:
-                refined = pick_best_proposal(proposals, pred_mask)
+                refined = pick_best_proposal(proposals, pred_mask, min_iou=args.sam_min_iou)
                 if refined is not None:
                     pred_mask = refined
             I, U = mask_IU(pred_mask, gt_bin)
@@ -456,6 +466,13 @@ def parse_args():
     p.add_argument("--sam-model-type", type=str, default="vit_h",
                    choices=("vit_h", "vit_l", "vit_b"),
                    help="SAM backbone matching --sam-checkpoint (default: vit_h).")
+    p.add_argument("--sam-min-iou", type=float, default=0.5,
+                   help="Confidence gate for SAM refinement: only swap in a "
+                        "proposal if its IoU against the thresholded mask is >= "
+                        "this value; otherwise keep the threshold mask. Ungated "
+                        "(0.0) let ambiguous activations commit hard to the wrong "
+                        "object, breaking ~28%% of previously-correct predictions "
+                        "on Gref/val for a handful of large wins. Default: 0.5.")
     p.add_argument("--single-instance", action="store_true",
                    help="Collapse the thresholded mask to its single highest-mean-"
                         "activation connected component. Targets multi-instance "

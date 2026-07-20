@@ -2,10 +2,15 @@
 # Tier-0 experiment: SAM mask refinement on the existing M1 checkpoint.
 #
 # The thresholded activation mask is replaced by the SAM instance proposal with
-# highest IoU against it — the dense prediction sets location/scale, SAM snaps it
-# to clean instance boundaries. (v1 scored proposals by mean activation instead
-# and collapsed to ~5 IoU: SAM over-segments into parts, and tiny high-activation
-# fragments always won. IoU-vs-threshold-mask scoring removes that bias.)
+# highest IoU against it, gated by --sam-min-iou — the dense prediction sets
+# location/scale, SAM snaps it to clean instance boundaries, but only when it
+# agrees strongly enough. (v1 scored proposals by mean activation and collapsed
+# to ~5 IoU: tiny high-activation fragments always won. v2 removed that bias with
+# IoU-vs-threshold-mask scoring but was ungated: it broke ~28% of previously-
+# correct Gref/val predictions down to zero IoU — ambiguous activations committed
+# hard to the wrong SAM segment — for a handful of huge wins that inflated mIoU
+# +8 while oIoU stayed flat/negative. See scripts/diagnose_sam_delta.sh. v3 gates
+# at IoU>=0.5 by default: no confident match -> keep the threshold mask.)
 # No retraining.
 #
 # One-time setup on Athena before first run:
@@ -15,11 +20,12 @@
 #
 # Usage:
 #   bash scripts/slurm_eval_vg_contrastive_M1_sam.sh
+#   SAM_MIN_IOU=0.3 OUT_SUFFIX=_iou03 bash scripts/slurm_eval_vg_contrastive_M1_sam.sh
 #
 # Compare with:
-#   BASE_DIR=eval_results/vg_contrastive/contr_M1/pnp_refer \
 #   SI_DIR=eval_results/vg_contrastive/contr_M1_sam/pnp_refer \
 #   bash scripts/compare_single_instance_eval.sh
+#   bash scripts/diagnose_sam_delta.sh Gref val   # zero-IoU rate, rescued vs broken
 
 set -e
 
@@ -28,6 +34,8 @@ REPO=~/proto-non-param
 CONTR_BASE="${CONTR_BASE:-${SCRATCH}/train_logs/vg_contrastive}"
 DATA_ROOT="${DATA_ROOT:-${SCRATCH}/data/refcoco}"
 SAM_CKPT="${SAM_CKPT:-${SCRATCH}/sam/sam_vit_h_4b8939.pth}"
+SAM_MIN_IOU="${SAM_MIN_IOU:-0.5}"
+OUT_SUFFIX="${OUT_SUFFIX:-}"
 
 PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"
@@ -56,12 +64,14 @@ if ! (source "${SCRATCH}/venv/bin/activate" && python -c "import segment_anythin
     exit 1
 fi
 
-OUT_DIR="${REPO}/eval_results/vg_contrastive/contr_M1_sam"
+OUT_DIR="${REPO}/eval_results/vg_contrastive/contr_M1_sam${OUT_SUFFIX}"
 
-echo "=== PNP — Zero-shot RIS Evaluation (run M1 + SAM proposal-and-rank) ==="
-echo "  Ckpt : ${CKPT}"
-echo "  SAM  : ${SAM_CKPT}"
-echo "  Data : ${DATA_ROOT}"
+echo "=== PNP — Zero-shot RIS Evaluation (run M1 + gated SAM refinement) ==="
+echo "  Ckpt    : ${CKPT}"
+echo "  SAM     : ${SAM_CKPT}"
+echo "  MinIoU  : ${SAM_MIN_IOU}"
+echo "  Out     : ${OUT_DIR}"
+echo "  Data    : ${DATA_ROOT}"
 echo ""
 
 declare -A SPLITS=(
@@ -74,15 +84,15 @@ declare -A SPLITS=(
 for DATASET in Gref unc unc+; do
     for SPLIT in ${SPLITS[$DATASET]}; do
         JOB=$(sbatch --parsable \
-            --job-name="pnp-M1sam-${DATASET}-${SPLIT}" \
+            --job-name="pnp-M1sam${OUT_SUFFIX}-${DATASET}-${SPLIT}" \
             --partition="${PARTITION}" \
             --account="${ACCOUNT}" \
             --gres=gpu:1 \
             --cpus-per-task=4 \
             --mem=48G \
             --time=12:00:00 \
-            --output="${LOG_SLURM}/pnp_M1sam_${DATASET}_${SPLIT}_%j.out" \
-            --error="${LOG_SLURM}/pnp_M1sam_${DATASET}_${SPLIT}_%j.err" \
+            --output="${LOG_SLURM}/pnp_M1sam${OUT_SUFFIX}_${DATASET}_${SPLIT}_%j.out" \
+            --error="${LOG_SLURM}/pnp_M1sam${OUT_SUFFIX}_${DATASET}_${SPLIT}_%j.err" \
             --wrap="
 set -e
 source ${SCRATCH}/venv/bin/activate
@@ -99,7 +109,8 @@ python scripts/evaluate_pnp_refer.py \
   --data_root ${DATA_ROOT} \
   --out_dir ${OUT_DIR} \
   --sam-checkpoint ${SAM_CKPT} \
-  --sam-model-type vit_h
+  --sam-model-type vit_h \
+  --sam-min-iou ${SAM_MIN_IOU}
 ")
         echo "  ${JOB}  ${DATASET}/${SPLIT}"
     done
