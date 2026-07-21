@@ -528,6 +528,13 @@ def main():
                              "topk=top-K uniform KL; uniform=equal weight over all present words")
     parser.add_argument("--top-k-concepts", type=int, default=10,
                         help="K for --target-mode=topk: keep only top-K concepts per image, uniform 1/K weight")
+    parser.add_argument("--random-caption-target", action="store_true",
+                        help="visual_genome only: build the KL target per-step from a random draw of "
+                             "--random-caption-target-k region phrases instead of the fixed, precomputed "
+                             "union-of-all-phrases distribution")
+    parser.add_argument("--random-caption-target-k", type=int, default=3,
+                        help="Number of region phrases randomly drawn per __getitem__ call when "
+                             "--random-caption-target is set")
     parser.add_argument("--bce-coef", type=float, default=1.0,
                         help="Weight for BCE loss (used when --target-mode=binary)")
     parser.add_argument("--bce-pos-weight", type=float, default=100.0,
@@ -745,6 +752,8 @@ def main():
             caption_sample_k=args.caption_sample_k,
             hard_mining=args.contrastive_hard_mining,
             caption_pool_size=args.caption_pool_size,
+            random_caption_target=args.random_caption_target,
+            random_caption_target_k=args.random_caption_target_k,
         )
         dataset_test = VisualGenomeDataset(
             vg_root=args.vg_root,
@@ -759,6 +768,8 @@ def main():
             caption_sample_k=args.caption_sample_k,
             hard_mining=args.contrastive_hard_mining,
             caption_pool_size=args.caption_pool_size,
+            random_caption_target=args.random_caption_target,
+            random_caption_target_k=args.random_caption_target_k,
         )
         if args.clip_scores_vg:
             dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_vg, args.clip_scores_temperature, args.clip_scores_top_k, args.clip_scores_caption_filter)

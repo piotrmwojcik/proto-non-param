@@ -750,6 +750,29 @@ def vg_collate_fn(batch):
     return images, phrases, prob_dists, indices, caption_data
 
 
+def _prob_dist_from_counts(counts: Counter, vocab_size: int, target_type: str, top_k_concepts: int) -> torch.Tensor:
+    """Build a target distribution over the vocabulary from word counts, per target_type."""
+    prob_dist = torch.zeros(vocab_size, dtype=torch.float32)
+    if target_type == "binary":
+        for wi in counts:
+            prob_dist[wi] = 1.0
+    elif target_type.startswith("topk"):
+        top_items = counts.most_common(top_k_concepts)
+        w = 1.0 / len(top_items)
+        for wi, _ in top_items:
+            prob_dist[wi] = w
+    elif target_type == "uniform":
+        unique_words = list(counts.keys())
+        w = 1.0 / len(unique_words)
+        for wi in unique_words:
+            prob_dist[wi] = w
+    else:
+        total = sum(counts.values())
+        for wi, cnt in counts.items():
+            prob_dist[wi] = cnt / total
+    return prob_dist
+
+
 class VisualGenomeDataset(Dataset):
     """Visual Genome dataset using region description phrases as vocabulary supervision.
 
@@ -768,6 +791,12 @@ class VisualGenomeDataset(Dataset):
     Optional: pass caption_embeds_path (built by vocab/build_vg_caption_embeddings.py)
     to enable caption-level supervision.  __getitem__ then returns a 5-tuple with a
     per-image CLIP caption embedding (randomly sampled from a pool of up to 50 phrases).
+
+    Optional: pass random_caption_target=True to build the KL target itself from
+    random_caption_target_k randomly-drawn region phrases per __getitem__ call (train
+    split only) instead of the fixed, precomputed union-of-all-phrases distribution.
+    The target then varies across epochs. Falls back to the fixed distribution if the
+    drawn phrases yield no vocabulary words.
     """
 
     def __init__(
@@ -786,6 +815,8 @@ class VisualGenomeDataset(Dataset):
         caption_sample_k: int = 5,
         hard_mining: bool = False,
         caption_pool_size: int = 50,
+        random_caption_target: bool = False,
+        random_caption_target_k: int = 3,
     ):
         self.vg_root = vg_root
         self.vocab_to_idx = vocab_to_idx
@@ -796,6 +827,8 @@ class VisualGenomeDataset(Dataset):
         self.caption_sample_k = caption_sample_k
         self.hard_mining = hard_mining
         self.caption_pool_size = caption_pool_size
+        self.random_caption_target = random_caption_target
+        self.random_caption_target_k = random_caption_target_k
 
         if caption_embeds_path is not None:
             print(f"Loading caption embedding pool from {caption_embeds_path} ...")
@@ -856,26 +889,9 @@ class VisualGenomeDataset(Dataset):
             if not counts:
                 continue
 
-            prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32)
-
-            if self.target_type == "binary":
-                for wi in counts:
-                    prob_dist[wi] = 1.0
-            elif self.target_type.startswith("topk"):
-                top_items = counts.most_common(self.top_k_concepts)
-                w = 1.0 / len(top_items)
-                for wi, _ in top_items:
-                    prob_dist[wi] = w
-            elif self.target_type == "uniform":
-                unique_words = list(counts.keys())
-                w = 1.0 / len(unique_words)
-                for wi in unique_words:
-                    prob_dist[wi] = w
-            else:
-                total = sum(counts.values())
-                for wi, cnt in counts.items():
-                    prob_dist[wi] = cnt / total
-
+            prob_dist = _prob_dist_from_counts(
+                counts, self.vocab_size, self.target_type, self.top_k_concepts
+            )
             all_samples.append((im_path, phrases, prob_dist))
 
         # Deterministic 90/10 train/val split over shuffled index list
@@ -909,6 +925,19 @@ class VisualGenomeDataset(Dataset):
         im_path, phrases, prob_dist = self.samples[index]
         img = Image.open(im_path).convert("RGB")
         img_tensor = self.train_transform(img) if self.train else self.eval_transform(img)
+
+        if self.random_caption_target and self.train:
+            k = min(self.random_caption_target_k, len(phrases))
+            drawn = random.sample(phrases, k)
+            counts = Counter()
+            for phrase in drawn:
+                for wi in extract_caption_words(phrase, self.vocab_to_idx):
+                    counts[wi] += 1
+            if counts:
+                prob_dist = _prob_dist_from_counts(
+                    counts, self.vocab_size, self.target_type, self.top_k_concepts
+                )
+            # else: no vocab words in the drawn phrases — keep the fixed fallback target
 
         if self.caption_embeds is not None:
             pool_raw = self.caption_embeds.get(im_path)
