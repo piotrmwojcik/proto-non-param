@@ -6,6 +6,7 @@ opencv
 matplotlib
 einops
 scipy
+scikit-learn
 lightning
 tensorboard
 tqdm

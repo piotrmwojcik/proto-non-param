@@ -40,6 +40,19 @@ Usage (VG):
         --annotations /path/to/region_descriptions.json \\
         --vocab-cache vocab/vg_cache.pt \\
         --output vocab/vg_clip_scores.pt
+
+Usage (CUB, with Label-free-CBM-style CLIP-cutoff concept filtering):
+    python build_clip_vocab_scores.py \\
+        --dataset cub \\
+        --data-root /path/to/cub200 \\
+        --annotations /path/to/cub200/annotations \\
+        --vocab-cache vocab/cub_labelfreecbm_cache.pt \\
+        --output vocab/cub_clip_scores.pt \\
+        --concept-clip-cutoff 0.25
+    # With --concept-clip-cutoff set, also writes:
+    #   vocab/cub_clip_scores_concepts_filtered.txt  (surviving concept phrases)
+    #   vocab/cub_clip_scores_vocab_filtered.pt      (surviving concepts' CLIP cache)
+    # and --output itself is rewritten to the filtered [N, V_kept] scores.
 """
 
 import argparse
@@ -117,6 +130,19 @@ def _load_vg_images(vg_root: str, region_descriptions_json: str) -> tuple[list, 
     return paths, ids
 
 
+def _load_cub_images(cub_root: str, annotations_dir: str) -> tuple[list, list]:
+    """train + val splits (both get CLIPScoreDataset-wrapped in train.py's cub200
+    branch, mirroring dataset_train/dataset_test symmetry). Reuses the same
+    images.txt-keyed path->id map CLIPScoreDataset's CUB id_fn uses, so the ids
+    produced here line up exactly with what train.py will look up later."""
+    from clip_dataset import build_cub_path_to_id
+
+    path_to_id = build_cub_path_to_id(cub_root, annotations_dir)
+    paths = sorted(path_to_id.keys())
+    ids = [path_to_id[p] for p in paths]
+    return paths, ids
+
+
 def _load_vocab_embeddings(vocab_cache_path: str) -> tuple[list, torch.Tensor]:
     cache = torch.load(vocab_cache_path, map_location="cpu")
     vocab = list(cache.keys())
@@ -154,13 +180,34 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build per-image CLIP vocab scores for COCO or Visual Genome"
     )
-    parser.add_argument("--dataset", required=True, choices=["coco", "vg"])
+    parser.add_argument("--dataset", required=True, choices=["coco", "vg", "cub"])
     parser.add_argument("--data-root", required=True, help="Root directory of the dataset")
     parser.add_argument(
         "--annotations",
         default=None,
-        help="Captions JSON for COCO, or region_descriptions.json path for VG. "
-             "For VG defaults to <data-root>/region_descriptions.json.",
+        help="Captions JSON for COCO, region_descriptions.json path for VG, or the "
+             "CUB annotations dir (contains images.txt) for cub. For VG defaults to "
+             "<data-root>/region_descriptions.json; for cub defaults to "
+             "<data-root>/annotations.",
+    )
+    parser.add_argument(
+        "--concept-clip-cutoff", type=float, default=None,
+        help="Label-free-CBM-style concept filter (their default: 0.25): after "
+             "computing scores, keep only concepts whose mean top-5 image "
+             "activation exceeds this cutoff. When set, also writes a filtered "
+             "concept list and a filtered vocab cache alongside --output (see "
+             "--filtered-concepts-out / --filtered-vocab-cache-out). Off by default "
+             "so existing coco/vg invocations are unaffected.",
+    )
+    parser.add_argument(
+        "--filtered-concepts-out", default=None,
+        help="Output path for the surviving concept list (only used with "
+             "--concept-clip-cutoff). Default: <output>_concepts_filtered.txt",
+    )
+    parser.add_argument(
+        "--filtered-vocab-cache-out", default=None,
+        help="Output path for the surviving concepts' CLIP cache (only used with "
+             "--concept-clip-cutoff). Default: <output>_vocab_filtered.pt",
     )
     parser.add_argument("--vocab-cache", required=True, help="Path to vocab .pt cache {word: tensor}")
     parser.add_argument("--clip-model", default="ViT-B-32", help="open_clip model name")
@@ -212,6 +259,9 @@ def main():
         if args.annotations is None:
             parser.error("--annotations is required for --dataset coco")
         image_paths, image_ids = _load_coco_images(args.data_root, args.annotations)
+    elif args.dataset == "cub":
+        ann = args.annotations or os.path.join(args.data_root, "annotations")
+        image_paths, image_ids = _load_cub_images(args.data_root, ann)
     else:
         ann = args.annotations or os.path.join(args.data_root, "region_descriptions.json")
         image_paths, image_ids = _load_vg_images(args.data_root, ann)
@@ -259,6 +309,40 @@ def main():
     clip_soft_labels = torch.cat(clip_soft_chunks, dim=0)    # [N, V]
 
     print(f"Done. Scores shape: {clip_scores.shape}, dtype: {clip_scores.dtype}")
+
+    # --- Optional concept filtering (Label-free-CBM's CLIP-cutoff, their default 0.25):
+    # drop concepts CLIP itself can't reliably detect in any image before they ever
+    # reach training. Subsets vocab/vocab_emb/clip_scores/clip_soft_labels together so
+    # every downstream artifact stays in lockstep. ---
+    if args.concept_clip_cutoff is not None:
+        k = min(5, N)
+        top5_mean = clip_scores.float().topk(k, dim=0).values.mean(dim=0)  # [V]
+        keep_mask = top5_mean > args.concept_clip_cutoff
+        n_kept = int(keep_mask.sum().item())
+        print(f"Concept CLIP-cutoff {args.concept_clip_cutoff}: keeping {n_kept}/{V} concepts")
+        if n_kept == 0:
+            raise RuntimeError(
+                f"--concept-clip-cutoff {args.concept_clip_cutoff} filtered out all "
+                f"{V} concepts -- cutoff too strict for this vocab/dataset."
+            )
+
+        vocab = [w for w, keep in zip(vocab, keep_mask.tolist()) if keep]
+        vocab_emb = vocab_emb[keep_mask]
+        clip_scores = clip_scores[:, keep_mask]
+        clip_soft_labels = clip_soft_labels[:, keep_mask]
+        V = n_kept
+
+        concepts_out = args.filtered_concepts_out or f"{os.path.splitext(args.output)[0]}_concepts_filtered.txt"
+        vocab_cache_out = args.filtered_vocab_cache_out or f"{os.path.splitext(args.output)[0]}_vocab_filtered.pt"
+
+        Path(concepts_out).parent.mkdir(parents=True, exist_ok=True)
+        with open(concepts_out, "w", encoding="utf-8") as f:
+            f.write("\n".join(vocab) + "\n")
+        print(f"Saved filtered concept list -> {concepts_out}")
+
+        Path(vocab_cache_out).parent.mkdir(parents=True, exist_ok=True)
+        torch.save({w: vocab_emb[i] for i, w in enumerate(vocab)}, vocab_cache_out)
+        print(f"Saved filtered vocab cache -> {vocab_cache_out}")
 
     # --- Optional blending ---
     mixed_labels: Optional[torch.Tensor] = None

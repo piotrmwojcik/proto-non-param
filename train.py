@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 from clip_dataset import (CocoCLIPDataset, Caltech101CLIPDataset, CUBCLIPDataset,
                            AwA2CLIPDataset, VisualGenomeDataset, coco_clip_collate_fn,
-                           vg_collate_fn, CLIPScoreDataset)
+                           vg_collate_fn, CLIPScoreDataset, build_cub_path_to_id)
 from modeling.backbone import DINOv2Backbone, DINOv2BackboneExpanded, DINOBackboneExpanded, CLIPBackbone
 from modeling.pnp import PNP, PNPCriterion
 from modeling.utils import print_parameters
@@ -428,6 +428,14 @@ def main():
 
     parser.add_argument("--log-dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--init-ckpt", type=str, default=None,
+                        help="Path to a PNP checkpoint (ckpt['state_dict']) to warm-start "
+                             "from instead of random init. Loaded with strict=False, "
+                             "mirroring evaluate_pnp_refer.py's build_model() -- missing/"
+                             "mismatched keys (e.g. a different-sized vocab) are skipped, "
+                             "not fatal. Backbone/text_projection_head weights transfer; "
+                             "prototype_residual and vocab-sized buffers only transfer "
+                             "when the new run's vocab matches the checkpoint's exactly.")
 
     parser.add_argument("--dataset", type=str, default="coco_clip",
                         choices=["coco_clip", "caltech101", "cub200", "awa2", "visual_genome", "coco_vg"])
@@ -469,6 +477,12 @@ def main():
     parser.add_argument("--clip-scores-vg", type=str, default=None,
                         help="Path to CLIP vocab scores .pt for Visual Genome "
                              "(covers all images; works for both train and val splits).")
+    parser.add_argument("--clip-scores-cub", type=str, default=None,
+                        help="Path to CLIP vocab scores .pt for CUB-200 (built by "
+                             "build_clip_vocab_scores.py --dataset cub; covers train+val). "
+                             "Replaces CUBCLIPDataset's attribute-derived targets -- needed "
+                             "for concept vocabularies with no per-image CUB labels (e.g. "
+                             "Label-free-CBM's GPT-generated concept phrases).")
     parser.add_argument("--clip-scores-temperature", type=float, default=0.07,
                         help="Softmax temperature applied to raw CLIP cosine similarities "
                              "when loading score files. 0.07 matches CLIP's own training "
@@ -696,6 +710,10 @@ def main():
             vocab_to_idx=vocab_to_idx,
             train=False,
         )
+        if args.clip_scores_cub:
+            cub_id_fn = build_cub_path_to_id(args.cub_root, args.cub_annotations).get
+            dataset_train = CLIPScoreDataset(dataset_train, args.clip_scores_cub, args.clip_scores_temperature, args.clip_scores_top_k, id_fn=cub_id_fn)
+            dataset_test = CLIPScoreDataset(dataset_test, args.clip_scores_cub, args.clip_scores_temperature, args.clip_scores_top_k, id_fn=cub_id_fn)
     elif args.dataset == "awa2":
         if args.awa_root is None or args.awa_annotations is None:
             raise ValueError("--awa-root and --awa-annotations are required for awa2 dataset")
@@ -873,6 +891,26 @@ def main():
         topk_k=args.topk_k,
         attn_temp_init=args.attn_temp_init,
     )
+
+    if args.init_ckpt:
+        print(f"Warm-starting from {args.init_ckpt} ...")
+        init_state = torch.load(args.init_ckpt, map_location="cpu")["state_dict"]
+        # strict=False only tolerates missing/unexpected keys, NOT shape
+        # mismatches -- it still raises if a key exists in both but differs in
+        # shape. Pre-filter by shape so vocab-sized tensors (prototype_residual,
+        # vocab_clip_embeddings) are cleanly skipped -- not transferable anyway
+        # when the new run's vocab differs in size/identity from the checkpoint's.
+        own_state = net.state_dict()
+        compatible = {k: v for k, v in init_state.items()
+                     if k in own_state and own_state[k].shape == v.shape}
+        skipped = sorted(set(init_state.keys()) - set(compatible.keys()))
+        if skipped:
+            print(f"Note: init_ckpt keys skipped (shape mismatch, e.g. vocab-sized "
+                  f"buffers when vocab differs -- fresh init kept): {skipped}")
+        missing, unexpected = net.load_state_dict(compatible, strict=False)
+        if missing:
+            print(f"Note: init_ckpt missing keys (using fresh init): {missing}")
+
     # freeze backbone first
     #for p in net.backbone.parameters():
     #    p.requires_grad = False

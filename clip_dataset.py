@@ -4,6 +4,7 @@ import random
 import hashlib
 from collections import Counter
 from pathlib import Path
+from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -534,6 +535,36 @@ class CUBCLIPDataset(Dataset):
         return img_tensor, attr_words, prob_dist, index
 
 
+def build_cub_path_to_id(dataset_root: str, annotations_dir: str) -> dict[str, int]:
+    """Map an organized CUB image path (dataset_root/{train,val}/<ClassName>/<file>)
+    to its official CUB image_id from images.txt. Used as CLIPScoreDataset's id_fn,
+    since CUB filenames aren't integers (unlike COCO/VG's default int(stem) lookup).
+    """
+    filename_to_id: dict[str, int] = {}
+    with open(os.path.join(annotations_dir, "images.txt")) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            img_id_str, rel_path = line.split(maxsplit=1)
+            filename_to_id[os.path.basename(rel_path)] = int(img_id_str)
+
+    path_to_id: dict[str, int] = {}
+    for split in ("train", "val"):
+        split_dir = os.path.join(dataset_root, split)
+        if not os.path.isdir(split_dir):
+            continue
+        for cls_name in os.listdir(split_dir):
+            cls_dir = os.path.join(split_dir, cls_name)
+            if not os.path.isdir(cls_dir):
+                continue
+            for fname in os.listdir(cls_dir):
+                img_id = filename_to_id.get(fname)
+                if img_id is not None:
+                    path_to_id[os.path.join(cls_dir, fname)] = img_id
+    return path_to_id
+
+
 class AwA2CLIPDataset(Dataset):
     """Animals with Attributes 2 (AwA2) dataset using predicate annotations.
 
@@ -917,8 +948,12 @@ class CLIPScoreDataset(Dataset):
     The base dataset must store samples as a list of (im_path, ..., prob_dist)
     tuples in self.samples (all built-in dataset classes satisfy this).
 
-    Lookup is keyed by the integer file stem of the image path
-    (COCO: 000000123456.jpg → 123456, VG: 12345.jpg → 12345).
+    Lookup is keyed by the integer file stem of the image path by default
+    (COCO: 000000123456.jpg → 123456, VG: 12345.jpg → 12345). Pass id_fn for
+    datasets whose filenames aren't integers (e.g. CUB's
+    Black_Footed_Albatross_0001_796111.jpg) — id_fn(im_path) -> int | None
+    replaces the int(stem) lookup; return None for "not found" the same way
+    a ValueError does in the default path.
     Images not found in the CLIP scores file fall back to the original prob_dist.
 
     temperature controls softmax sharpness; top_k restricts the distribution to only
@@ -936,6 +971,7 @@ class CLIPScoreDataset(Dataset):
         temperature: float = 0.07,
         top_k: int = 50,
         caption_filter: bool = False,
+        id_fn: Optional[Callable[[str], Optional[int]]] = None,
     ):
         self.base = base_dataset
 
@@ -996,10 +1032,14 @@ class CLIPScoreDataset(Dataset):
         missed = 0
         for sample in base_dataset.samples:
             im_path = sample[0]
-            try:
-                label = id_to_label.get(int(Path(im_path).stem))
-            except ValueError:
-                label = None
+            if id_fn is not None:
+                img_id = id_fn(im_path)
+            else:
+                try:
+                    img_id = int(Path(im_path).stem)
+                except ValueError:
+                    img_id = None
+            label = id_to_label.get(img_id) if img_id is not None else None
             self._labels.append(label)
             if label is None:
                 missed += 1
