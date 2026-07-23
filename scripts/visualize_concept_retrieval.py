@@ -82,9 +82,13 @@ def suggest_concepts(vocab_words, n_nouns=5, n_adjs=3, seed=0):
 
 
 @torch.inference_mode()
-def collect_patch_logits(net, images, img_transform, device, batch_size=16):
+@torch.inference_mode()
+def collect_patch_logits(net, images, img_transform, device, concept_indices, batch_size=16):
     """Forward pass over the deduped image corpus. Returns patch_prototype_logits
-    [M, N, V] (cpu) and the list of PIL images in the same order (kept for crops)."""
+    sliced to just concept_indices, [M, N, C] (cpu), and the PIL images in the
+    same order (kept for crops). Slicing to C columns (a handful of concepts)
+    before accumulating is essential — the full [M, N, V] tensor over the whole
+    vocab (V ~ 10-20k VG words) OOMs even at moderate corpus sizes."""
     all_logits = []
     pil_images = [img for _, img in images]
 
@@ -92,7 +96,7 @@ def collect_patch_logits(net, images, img_transform, device, batch_size=16):
         batch = pil_images[start:start + batch_size]
         img_t = torch.stack([img_transform(im) for im in batch]).to(device)
         outputs = net(img_t)
-        all_logits.append(outputs["patch_prototype_logits"].detach().cpu())
+        all_logits.append(outputs["patch_prototype_logits"][:, :, concept_indices].detach().cpu())
 
     return torch.cat(all_logits, dim=0), pil_images
 
@@ -186,14 +190,17 @@ def main():
     images = dedup_images(args.data_root, args.dataset, args.split)
     print(f"  {len(images)} unique images")
 
-    patch_logits, pil_images = collect_patch_logits(net, images, img_transform, device, args.batch_size)
-
     concept_indices = [vocab_to_idx[c] for c in concepts]
+    # patch_logits is pre-sliced to just these concept columns (order matches
+    # `concepts`), NOT the full vocab — see collect_patch_logits docstring.
+    patch_logits, pil_images = collect_patch_logits(
+        net, images, img_transform, device, concept_indices, args.batch_size
+    )
 
     # mixture_weights-equivalent per-image score: max patch activation per concept
     # (simplest, standard "does this concept fire anywhere in the image" ranking).
     concept_word_to_score_and_patch = {}
-    for concept, col in zip(concepts, concept_indices):
+    for col, concept in enumerate(concepts):
         col_logits = patch_logits[:, :, col]           # [M, N]
         img_scores = col_logits.max(dim=1).values       # [M]
         k = min(args.topk, img_scores.shape[0])
