@@ -171,6 +171,7 @@ ABLATION_VARIANTS = {
         "U":  ("PNP-U (ViT-L, no contrastive, SK+VICReg)",                  "contr_U"),
         "M1-448": ("PNP-M1 @448px (eval-only, 32×32 grid)",                 "contr_M1_res448"),
         "M1-SAM": ("PNP-M1 + SAM proposal-rank (eval-only)",                "contr_M1_sam"),
+        "M1-RC": ("PNP-M1-RC (ViT-L, no contrastive, SK+KoLeo, random-caption-target k=3)", "contr_M1-RC-k3"),
     },
 }
 

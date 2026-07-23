@@ -52,7 +52,7 @@ class ReferDataset(data.Dataset):
         self.set = splitset
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.drop_prob = drop_prob
-        self.data_list = glob(osp.join(root, self.set + '_batch', '*'))
+        self.data_list = sorted(glob(osp.join(root, self.set + '_batch', '*')))
 
     def __len__(self):
         return len(self.data_list)
