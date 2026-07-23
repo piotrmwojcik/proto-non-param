@@ -1,5 +1,10 @@
 #!/bin/bash
-# Qualitative concept-retrieval figure for M1 @ 672px over RefCOCOg/val images.
+# Qualitative concept-retrieval figure for M1 over RefCOCOg/val images.
+#
+# IMG_SIZE must stay 224: PNP.forward() unconditionally also runs the image
+# through CLIP ViT-B/32's own image encoder for a diagnostic side-output, and
+# that encoder (unlike the DINOv2 backbone) has a fixed 224px positional
+# embedding — see visualize_concept_retrieval.py's --img-size help text.
 #
 # Usage:
 #   bash scripts/slurm_visualize_concept_retrieval.sh
@@ -11,7 +16,7 @@ SCRATCH="/net/tscratch/people/plgabedychaj"
 REPO=~/proto-non-param
 CONTR_BASE="${CONTR_BASE:-${SCRATCH}/train_logs/vg_contrastive}"
 DATA_ROOT="${DATA_ROOT:-${SCRATCH}/data/refcoco}"
-IMG_SIZE="${IMG_SIZE:-672}"
+IMG_SIZE="${IMG_SIZE:-224}"
 
 PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"

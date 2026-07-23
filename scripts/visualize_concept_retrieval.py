@@ -144,7 +144,12 @@ def main():
     p.add_argument("--data-root", required=True, help="e.g. $SCRATCH/data/refcoco")
     p.add_argument("--dataset", default="Gref")
     p.add_argument("--split", default="val")
-    p.add_argument("--img-size", type=int, default=672)
+    p.add_argument("--img-size", type=int, default=224,
+                   help="Must stay 224 (CLIP ViT-B/32's fixed positional-embedding size) "
+                        "unless PNP.forward() is changed: forward() unconditionally also "
+                        "runs x through self.clip_model.encode_image() for a diagnostic "
+                        "side-output (clip_vocab_logits), and that encoder — unlike the "
+                        "DINOv2 backbone — doesn't support other resolutions.")
     p.add_argument("--concepts", type=str, nargs="+", default=None,
                    help="Override automatic concept suggestion with explicit vocab words")
     p.add_argument("--n-nouns", type=int, default=5)
