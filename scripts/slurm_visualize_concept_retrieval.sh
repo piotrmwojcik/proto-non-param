@@ -1,0 +1,65 @@
+#!/bin/bash
+# Qualitative concept-retrieval figure for M1 @ 672px over RefCOCOg/val images.
+#
+# Usage:
+#   bash scripts/slurm_visualize_concept_retrieval.sh
+#   CONCEPTS="dog red wooden" bash scripts/slurm_visualize_concept_retrieval.sh   # explicit words
+
+set -e
+
+SCRATCH="/net/tscratch/people/plgabedychaj"
+REPO=~/proto-non-param
+CONTR_BASE="${CONTR_BASE:-${SCRATCH}/train_logs/vg_contrastive}"
+DATA_ROOT="${DATA_ROOT:-${SCRATCH}/data/refcoco}"
+IMG_SIZE="${IMG_SIZE:-672}"
+
+PARTITION="plgrid-gpu-a100"
+ACCOUNT="plgunhype-gpu-a100"
+LOG_SLURM="${SCRATCH}/logs"
+
+CKPT="${CONTR_BASE}/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth"
+
+mkdir -p "${LOG_SLURM}"
+
+if [ ! -f "${CKPT}" ]; then
+    echo "ERROR: checkpoint not found: ${CKPT}"
+    exit 1
+fi
+
+OUT_DIR="${REPO}/results/concept_retrieval"
+
+CONCEPTS_ARG=""
+if [ -n "${CONCEPTS:-}" ]; then
+    CONCEPTS_ARG="--concepts ${CONCEPTS}"
+fi
+
+JOB=$(sbatch --parsable \
+    --job-name="pnp-concept-retrieval" \
+    --partition="${PARTITION}" \
+    --account="${ACCOUNT}" \
+    --gres=gpu:1 \
+    --cpus-per-task=4 \
+    --mem=32G \
+    --time=02:00:00 \
+    --output="${LOG_SLURM}/pnp_concept_retrieval_%j.out" \
+    --error="${LOG_SLURM}/pnp_concept_retrieval_%j.err" \
+    --wrap="
+set -e
+source ${SCRATCH}/venv/bin/activate
+export HF_HUB_CACHE=${SCRATCH}/.cache/huggingface/hub
+export TRANSFORMERS_CACHE=${SCRATCH}/.cache/huggingface/hub
+export TORCH_HOME=${SCRATCH}/torch_cache
+export PYTHONPATH=${SCRATCH}/dinov2:\$PYTHONPATH
+cd ${REPO}
+
+python scripts/visualize_concept_retrieval.py \
+  --ckpt ${CKPT} \
+  --data-root ${DATA_ROOT} \
+  --dataset Gref \
+  --split val \
+  --img-size ${IMG_SIZE} \
+  --out-dir ${OUT_DIR} \
+  ${CONCEPTS_ARG}
+")
+echo "Submitted: ${JOB}"
+echo "Output: ${OUT_DIR}/concept_retrieval_Gref_val.png"
