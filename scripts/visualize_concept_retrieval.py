@@ -70,10 +70,23 @@ def dedup_images(data_root, dataset, split):
 def suggest_concepts(vocab_words, n_nouns=5, n_adjs=3, seed=0):
     """Classify vocab words by single-word POS tag, sample a noun/adjective mix.
     Relational phrases aren't in this vocab (see module docstring) — objects and
-    attributes only."""
+    attributes only.
+
+    The vocab (15k+ words, auto-extracted from raw VG captions via NLTK, no
+    manual curation) is Zipfian: a handful of good common words, a long tail
+    of typos/rare tokens/extraction artifacts ("jerysey", "mountial",
+    "withred", ...). Sampling uniformly over every POS-tagged noun/adjective
+    mostly hits that tail. Filtering candidates through NLTK's own English
+    word list first (nltk.corpus.words) keeps the sample to real, recognizable
+    words — cheap, no new dependency (NLTK is already required throughout
+    this codebase for POS tagging/lemmatization)."""
+    nltk.download("words", quiet=True)
+    from nltk.corpus import words as nltk_words
+    real_words = set(nltk_words.words())
+
     tagged = nltk.pos_tag(vocab_words)
-    nouns = [w for w, pos in tagged if pos.startswith("NN") and w.isalpha()]
-    adjs = [w for w, pos in tagged if pos.startswith("JJ") and w.isalpha()]
+    nouns = [w for w, pos in tagged if pos.startswith("NN") and w.isalpha() and w in real_words]
+    adjs = [w for w, pos in tagged if pos.startswith("JJ") and w.isalpha() and w in real_words]
 
     rng = random.Random(seed)
     picked_nouns = rng.sample(nouns, min(n_nouns, len(nouns)))
