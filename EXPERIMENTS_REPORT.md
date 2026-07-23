@@ -137,9 +137,9 @@ the concept encoder; species labels are used only to fit the final (Stage 2) or 
 (Stage 3, below) classifier. ProtoPNet-family models train end-to-end on species labels
 throughout and report ~79–87% top-1 on CUB.
 
-## 5. Planned — Joint training with a CLIP-substituted sufficiency regularizer
+## 5. Joint training with a CLIP-substituted sufficiency regularizer
 
-**Status: planned, not yet implemented.**
+**Status: implemented, not yet run.**
 
 Motivated by Espinosa Zarlenga, *"In Defense of Information Leakage in Concept-based
 Models"* (ICML 2026): Sequential/Independent CBM training (what Stage 2 above does) is
@@ -152,19 +152,37 @@ ground-truth concept values.
 **We don't have ground-truth concept labels** — this experiment substitutes CLIP's own
 raw image-vs-concept similarity scores for that ground truth. **This is a deliberate
 weakening of what the paper proves, not a reproduction of it — every result from this
-experiment must be reported with that caveat attached.**
+experiment must be reported with that caveat attached** (both new scripts print/save it
+automatically).
 
-Design (standalone pipeline, no changes to the shared `train.py`/`modeling/pnp.py`/
-`clip_dataset.py` used by every other experiment): new `scripts/train_cub_joint.py`,
-warm-started from the **same M1 base checkpoint** Stage 2 used (not Stage 2's already
-fine-tuned result, for a clean apples-to-apples comparison), jointly training the
-existing KL/SK/KoLeo concept-alignment losses alongside a new classifier head and two new
-loss terms: `L_cls` (classification loss from the model's own concept activations) and
-`L_suff` (the adapted sufficiency term, classification loss from CLIP's raw similarity
-scores standing in for ground truth). New `scripts/eval_cub_sufficiency_curve.py` will
-produce the closest analog to the paper's intervention curves available without real
-ground truth — sweeping the fraction of concepts CLIP-substituted and checking whether
-accuracy rises monotonically. Full design in
-`C:\Users\preze\.claude\plans\golden-wondering-conway.md`.
+Standalone pipeline, no changes to the shared `train.py`/`modeling/pnp.py`/
+`clip_dataset.py` used by every other experiment:
+- `scripts/train_cub_joint.py` — warm-started from the **same M1 base checkpoint**
+  Stage 2 used (not Stage 2's already fine-tuned result, for a clean apples-to-apples
+  comparison), jointly training the existing KL/SK/KoLeo concept-alignment losses
+  (formulas duplicated from `PNPCriterion`, not imported, per the separation decision)
+  alongside a fresh classifier head and two new loss terms: `L_cls` (classification loss
+  from the model's own concept activations) and `L_suff` (the adapted sufficiency term,
+  classification loss from CLIP's raw similarity scores standing in for ground truth).
+  Both feed a shared `nn.Linear(n_concepts, 200)` head after per-sample z-score
+  standardization (the two signals live in different embedding spaces / scales).
+- `scripts/eval_cub_sufficiency_curve.py` — the closest analog to the paper's
+  intervention curves available without real ground truth: sweeps the fraction of
+  concepts CLIP-substituted (0-100%) and checks whether test-set accuracy rises. CLIP
+  scores for the held-out test split are computed fresh (the cached
+  `build_clip_vocab_scores.py` output only covers train+val, since it exists to build
+  training targets).
+- `scripts/slurm_train_cub_joint.sh`, `scripts/slurm_eval_cub_sufficiency_curve.sh` —
+  sbatch launchers, reusing the concept cache / filtered vocab / CLIP scores Stage 2
+  already built (no rebuild).
+
+Run order: `bash scripts/slurm_train_cub_joint.sh` (defaults: `cls_coef=1.0
+sufficiency_coef=1.0`, override via `CLS_COEF=... SUFFICIENCY_COEF=...` env vars), then
+`bash scripts/slurm_eval_cub_sufficiency_curve.sh`.
+
+**Target comparison**: does Joint beat Stage 2's 67.41% top-1 / 93.06% top-5? — not yet
+run; update this section with results once it completes.
+
+Full design/context: `C:\Users\preze\.claude\plans\golden-wondering-conway.md`.
 
 Target comparison once run: does Joint beat Stage 2's 67.41% top-1 / 93.06% top-5?
