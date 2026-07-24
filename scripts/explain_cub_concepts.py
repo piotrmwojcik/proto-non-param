@@ -228,8 +228,11 @@ def main():
     p.add_argument("--image-indices", type=int, nargs="*", default=[0, 1, 2],
                    help="Indices into the test split to explain (default: first 3)")
     p.add_argument("--class-names", type=str, nargs="*", default=None,
-                   help="CUB class folder names to explain (default: 3 random classes)")
-    p.add_argument("--seed", type=int, default=0)
+                   help="CUB class folder names to explain (default: --n-random-classes random ones)")
+    p.add_argument("--n-random-classes", type=int, default=3,
+                   help="How many random classes to sample when --class-names isn't given")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Seed for random class sampling -- change this to get different examples")
     p.add_argument("--topk", type=int, default=5, help="Concepts per plot/report (default: 5)")
     # joint mode
     p.add_argument("--ckpt", help="[joint] train_cub_joint.py checkpoint")
@@ -262,8 +265,9 @@ def main():
     class_names = args.class_names
     if not class_names:
         rng = np.random.default_rng(args.seed)
-        class_names = list(rng.choice(sorted(class_to_idx.keys()), size=3, replace=False))
-        print(f"No --class-names given, sampled: {class_names}")
+        class_names = list(rng.choice(sorted(class_to_idx.keys()),
+                                      size=args.n_random_classes, replace=False))
+        print(f"No --class-names given, sampled (seed={args.seed}): {class_names}")
 
     plot_dir = os.path.join(args.out_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)

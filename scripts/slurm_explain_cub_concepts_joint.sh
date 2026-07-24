@@ -8,9 +8,15 @@
 #
 # Usage:
 #   bash scripts/slurm_explain_cub_concepts_joint.sh
+#   SEED=1 bash scripts/slurm_explain_cub_concepts_joint.sh                   # different random classes
+#   SEED=1 N_RANDOM_CLASSES=10 bash scripts/slurm_explain_cub_concepts_joint.sh  # more of them
 #   CLASS_NAMES="Black_footed_Albatross Indigo_Bunting" \
 #       bash scripts/slurm_explain_cub_concepts_joint.sh
 #   IMAGE_INDICES="0 1 2 3 4" bash scripts/slurm_explain_cub_concepts_joint.sh
+#
+# Output goes to results/cub_explain_joint/seed<SEED>/ so different seeds
+# don't overwrite each other's JSON (per-class plot filenames are keyed by
+# class name, so those also accumulate safely across seeds/class names).
 
 set -e
 
@@ -22,6 +28,8 @@ VOCAB_DIR="${VOCAB_DIR:-${SCRATCH}/vocab}"
 LOG_DIR="${LOG_DIR:-${SCRATCH}/train_logs/cub_joint}"
 IMAGE_INDICES="${IMAGE_INDICES:-0 1 2}"
 CLASS_NAMES="${CLASS_NAMES:-}"
+SEED="${SEED:-0}"
+N_RANDOM_CLASSES="${N_RANDOM_CLASSES:-3}"
 
 PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"
@@ -37,7 +45,7 @@ if [ ! -f "${CKPT}" ]; then
     exit 1
 fi
 
-OUT_DIR="${REPO}/results/cub_explain_joint"
+OUT_DIR="${REPO}/results/cub_explain_joint/seed${SEED}"
 
 CLASS_ARG=""
 if [ -n "${CLASS_NAMES}" ]; then
@@ -71,7 +79,9 @@ python scripts/explain_cub_concepts.py \
   --clip-scores-cub ${SCORES_OUT} \
   --image-indices ${IMAGE_INDICES} \
   --out-dir ${OUT_DIR} \
+  --seed ${SEED} \
+  --n-random-classes ${N_RANDOM_CLASSES} \
   ${CLASS_ARG}
 ")
 echo "Submitted: ${JOB}"
-echo "Output: ${OUT_DIR}/explain_joint.json"
+echo "Output: ${OUT_DIR}/explain_joint.json and ${OUT_DIR}/plots/"
