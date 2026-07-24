@@ -9,6 +9,8 @@
 # Usage:
 #   bash scripts/slurm_visualize_concept_retrieval.sh
 #   CONCEPTS="dog red wooden" bash scripts/slurm_visualize_concept_retrieval.sh   # explicit words
+#   N_CONCEPTS=30 bash scripts/slurm_visualize_concept_retrieval.sh               # more concepts
+#   SEPARATE_FIGURES=0 bash scripts/slurm_visualize_concept_retrieval.sh          # one combined grid instead
 
 set -e
 
@@ -17,6 +19,8 @@ REPO=~/proto-non-param
 CONTR_BASE="${CONTR_BASE:-${SCRATCH}/train_logs/vg_contrastive}"
 DATA_ROOT="${DATA_ROOT:-${SCRATCH}/data/refcoco}"
 IMG_SIZE="${IMG_SIZE:-224}"
+N_CONCEPTS="${N_CONCEPTS:-20}"
+SEPARATE_FIGURES="${SEPARATE_FIGURES:-1}"
 
 PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"
@@ -33,9 +37,14 @@ fi
 
 OUT_DIR="${REPO}/results/concept_retrieval"
 
-CONCEPTS_ARG=""
+CONCEPTS_ARG="--n-concepts ${N_CONCEPTS}"
 if [ -n "${CONCEPTS:-}" ]; then
     CONCEPTS_ARG="--concepts ${CONCEPTS}"
+fi
+
+SEPARATE_ARG=""
+if [ "${SEPARATE_FIGURES}" = "1" ]; then
+    SEPARATE_ARG="--separate-figures"
 fi
 
 JOB=$(sbatch --parsable \
@@ -64,7 +73,12 @@ python scripts/visualize_concept_retrieval.py \
   --split val \
   --img-size ${IMG_SIZE} \
   --out-dir ${OUT_DIR} \
-  ${CONCEPTS_ARG}
+  ${CONCEPTS_ARG} \
+  ${SEPARATE_ARG}
 ")
 echo "Submitted: ${JOB}"
-echo "Output: ${OUT_DIR}/concept_retrieval_Gref_val.png"
+if [ "${SEPARATE_FIGURES}" = "1" ]; then
+    echo "Output: ${OUT_DIR}/concept_retrieval_<word>.png (one per concept)"
+else
+    echo "Output: ${OUT_DIR}/concept_retrieval_Gref_val.png"
+fi
