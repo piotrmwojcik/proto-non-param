@@ -1,247 +1,348 @@
-from math import sqrt
+from math import isqrt
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
-from einops import einsum
 from torch import nn
-import open_clip
 
 
 class ProjectionHead(nn.Module):
     """
-    SimCLR-style projection head.
+    Project a word embedding into the visual feature space.
 
-    Maps input_dim -> hidden_dim -> output_dim
-    with BN + ReLU in between.
+    LayerNorm is used instead of BatchNorm so the module also works reliably
+    with a batch size of one.
     """
+
     def __init__(
         self,
         input_dim: int = 512,
-        hidden_dim: int = 768,
+        hidden_dim: int = 1024,
         output_dim: int = 768,
-        use_bn: bool = True,
         normalize_output: bool = True,
-    ):
+    ) -> None:
         super().__init__()
+
         self.normalize_output = normalize_output
 
-        layers = [nn.Linear(input_dim, hidden_dim, bias=not use_bn)]
-        if use_bn:
-            layers.append(nn.BatchNorm1d(hidden_dim))
-        layers.append(nn.ReLU(inplace=True))
-        layers.append(nn.Linear(hidden_dim, output_dim, bias=True))
-
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        orig_shape = x.shape
-        x = x.reshape(-1, orig_shape[-1])
+        """
+        Args:
+            x: [..., input_dim]
+
+        Returns:
+            Projected tensor with shape [..., output_dim].
+        """
         x = self.net(x)
 
         if self.normalize_output:
-            x = F.normalize(x, dim=-1)
+            x = F.normalize(x, p=2, dim=-1)
 
-        x = x.reshape(*orig_shape[:-1], -1)
         return x
-
-
-class NonNegLinear(nn.Module):
-    """Applies a linear transformation to the incoming data with non-negative weights`
-    """
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 device=None, dtype=None) -> None:
-        factory_kwargs = {'device': device, 'dtype': dtype}
-        super(NonNegLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
-        self.normalization_multiplier = nn.Parameter(torch.ones((1,),requires_grad=True))
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
-        else:
-            self.register_parameter('bias', None)
-
-    def forward(self, input):
-        return F.linear(input,torch.relu(self.weight), self.bias)
 
 
 class PNP(nn.Module):
     """
-    Global prototype pool model.
+    Image-word patch similarity model.
 
-    - One prototype per vocabulary item
-    - Prototype pool size == vocab cache size
-    - Reconstructs a CLIP text embedding as a soft mixture over vocab embeddings
+    The model receives:
+
+        images:
+            Image batch with shape [B, 3, H, W].
+
+        word_embedding:
+            One embedding per image with shape [B, text_dim], or one shared
+            embedding with shape [text_dim].
+
+    It returns a cosine-similarity map between the projected word embedding and
+    every spatial image feature.
+
+    No vocabulary, prototype dictionary, or cached word embeddings are used.
     """
+
     def __init__(
         self,
         backbone: nn.Module,
         *,
-        dim: int = 768,
-        temperature: float = 0.2,
-        clip_text_dim: int = 512,
-        text_proj_hidden_dim: int = 1024,
-        vocab_cache_path: str = "vocab/mscoco_new_cache.pt",
-        prototype_init_noise: float = 0.01,
-        clip_model = None
-    ):
+        visual_dim: int = 768,
+        text_dim: int = 512,
+        projection_hidden_dim: int = 1024,
+        temperature: float = 1.0,
+        remove_cls_token: bool = False,
+    ) -> None:
         super().__init__()
+
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than zero")
+
         self.backbone = backbone
-        self.dim = dim
+        self.visual_dim = visual_dim
+        self.text_dim = text_dim
         self.temperature = temperature
-        self.clip_text_dim = clip_text_dim
-        self.prototype_init_noise = prototype_init_noise
+        self.remove_cls_token = remove_cls_token
 
-        # CLIP image model used for visual gating / concept selection
-        self.clip_model = clip_model
-        if self.clip_model is not None:
-            self.clip_model.eval()
-            for p in self.clip_model.parameters():
-                p.requires_grad = False
-
-        # CLIP text space -> image / ViT feature space
         self.text_projection_head = ProjectionHead(
-            input_dim=clip_text_dim,
-            hidden_dim=text_proj_hidden_dim,
-            output_dim=dim,
-            use_bn=True,
+            input_dim=text_dim,
+            hidden_dim=projection_hidden_dim,
+            output_dim=visual_dim,
             normalize_output=True,
         )
 
-        # Load frozen vocab CLIP embeddings: dict[str, tensor(512)]
-        cache = torch.load(vocab_cache_path, map_location="cpu")
-        self.vocab_words = list(cache.keys())
-
-        vocab_clip_embs = torch.stack([cache[w] for w in self.vocab_words], dim=0)  # [V, 512]
-        vocab_clip_embs = F.normalize(vocab_clip_embs, dim=-1)
-
-        self.register_buffer("vocab_clip_embeddings", vocab_clip_embs)  # [V, 512]
-        self.vocab_size = vocab_clip_embs.shape[0]
-
-        self.prototype_residual = nn.Parameter(
-            torch.randn(self.vocab_size, self.clip_text_dim) * self.prototype_init_noise
-        )
-
-        #self.prototype_classifier = NonNegLinear(
-        #    in_features=self.vocab_size,
-        #    out_features=self.vocab_size,
-        #    bias=True
-        #)
-
-    def get_prototypes(self) -> torch.Tensor:
+    def _extract_patch_tokens(
+        self,
+        images: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        Compute visual prototypes from frozen CLIP text embeddings plus
-        a trainable residual, then project to visual space.
-        """
-        clip_proto = self.vocab_clip_embeddings + self.prototype_residual  # [V, 512]
-        clip_proto = F.normalize(clip_proto, dim=-1)
+        Extract patch tokens from the visual backbone.
 
-        proto = self.text_projection_head(clip_proto)  # [V, D]
-        proto = F.normalize(proto, dim=-1)
-        return proto
+        This supports backbones returning either:
 
-    def forward(self, x: torch.Tensor):
+            patch_tokens
+
+        or:
+
+            (patch_tokens, auxiliary_output_1, auxiliary_output_2)
         """
+        backbone_output = self.backbone(images)
+
+        if isinstance(backbone_output, torch.Tensor):
+            patch_tokens = backbone_output
+        elif isinstance(backbone_output, (tuple, list)):
+            if not backbone_output:
+                raise ValueError("The backbone returned an empty tuple/list")
+
+            patch_tokens = backbone_output[0]
+        elif isinstance(backbone_output, dict):
+            patch_tokens = None
+
+            for key in (
+                "patch_tokens",
+                "tokens",
+                "features",
+                "x",
+            ):
+                value = backbone_output.get(key)
+
+                if isinstance(value, torch.Tensor):
+                    patch_tokens = value
+                    break
+
+            if patch_tokens is None:
+                raise ValueError(
+                    "Could not find patch tokens in the backbone output "
+                    "dictionary"
+                )
+        else:
+            raise TypeError(
+                "Unsupported backbone output type: "
+                f"{type(backbone_output)!r}"
+            )
+
+        if patch_tokens.ndim != 3:
+            raise ValueError(
+                "Expected patch tokens with shape [B, N, D], "
+                f"but received {tuple(patch_tokens.shape)}"
+            )
+
+        if patch_tokens.shape[-1] != self.visual_dim:
+            raise ValueError(
+                f"Expected visual feature dimension {self.visual_dim}, "
+                f"but received {patch_tokens.shape[-1]}"
+            )
+
+        if self.remove_cls_token:
+            if patch_tokens.shape[1] < 2:
+                raise ValueError(
+                    "Cannot remove the CLS token because the backbone returned "
+                    "fewer than two tokens"
+                )
+
+            patch_tokens = patch_tokens[:, 1:, :]
+
+        return patch_tokens
+
+    @staticmethod
+    def _resolve_spatial_size(
+        number_of_patches: int,
+        spatial_size: Optional[tuple[int, int]],
+    ) -> tuple[int, int]:
+        """
+        Determine the height and width of the patch feature map.
+        """
+        if spatial_size is not None:
+            height, width = spatial_size
+
+            if height <= 0 or width <= 0:
+                raise ValueError(
+                    "spatial_size values must be positive"
+                )
+
+            if height * width != number_of_patches:
+                raise ValueError(
+                    f"spatial_size={spatial_size} contains "
+                    f"{height * width} locations, but the backbone returned "
+                    f"{number_of_patches} patch tokens"
+                )
+
+            return height, width
+
+        side = isqrt(number_of_patches)
+
+        if side * side != number_of_patches:
+            raise ValueError(
+                f"The backbone returned {number_of_patches} patch tokens, "
+                "which cannot be automatically reshaped into a square map. "
+                "Pass spatial_size=(height, width) to forward()."
+            )
+
+        return side, side
+
+    @staticmethod
+    def _prepare_word_embedding(
+        word_embedding: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """
+        Convert the word embedding to shape [B, text_dim].
+
+        A one-dimensional embedding is shared across the whole image batch.
+        A batch containing one embedding is also expanded when needed.
+        """
+        if word_embedding.ndim == 1:
+            word_embedding = word_embedding.unsqueeze(0)
+
+        if word_embedding.ndim != 2:
+            raise ValueError(
+                "word_embedding must have shape [text_dim] or "
+                f"[B, text_dim], but received {tuple(word_embedding.shape)}"
+            )
+
+        word_batch_size = word_embedding.shape[0]
+
+        if word_batch_size == 1 and batch_size > 1:
+            word_embedding = word_embedding.expand(batch_size, -1)
+        elif word_batch_size != batch_size:
+            raise ValueError(
+                f"Image batch size is {batch_size}, but the word embedding "
+                f"batch size is {word_batch_size}"
+            )
+
+        return word_embedding
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        word_embedding: torch.Tensor,
+        *,
+        spatial_size: Optional[tuple[int, int]] = None,
+        output_size: Optional[tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        """
+        Compute image-word cosine similarity.
+
         Args:
-            x: [B, 3, H, W]
+            images:
+                Image tensor with shape [B, 3, H, W].
+
+            word_embedding:
+                Word embedding with shape [text_dim] or [B, text_dim].
+
+            spatial_size:
+                Optional patch-grid shape ``(patch_height, patch_width)``.
+                This is only required when the number of patch tokens is not
+                a perfect square.
+
+            output_size:
+                Optional final similarity-map size. When supplied, the patch
+                similarity map is bilinearly interpolated to this resolution.
+                For example, use ``images.shape[-2:]`` to obtain a map at the
+                input image resolution.
 
         Returns:
-            dict with:
-                patch_tokens: [B, N, D]
-                patch_prototype_logits: [B, N, V]
-                vocab_logits: [B, V]
-                clip_vocab_logits: [B, V]
-                mixture_weights: [B, V]
-                pred_text_embedding: [B, 512]
-                clip_image_embedding: [B, 512]
-                prototypes: [V, D]
+            Similarity map with shape [B, 1, patch_height, patch_width], or
+            [B, 1, output_height, output_width] when output_size is given.
         """
-        # -----------------------------------
-        # Backbone patch features
-        # -----------------------------------
-        patch_tokens, _, _ = self.backbone(x)  # [B, N, D]
-        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
+        if images.ndim != 4:
+            raise ValueError(
+                "images must have shape [B, 3, H, W], "
+                f"but received {tuple(images.shape)}"
+            )
 
-        prototypes = self.get_prototypes()  # [V, D]
-        prototypes = F.normalize(prototypes, p=2, dim=-1)
+        patch_tokens = self._extract_patch_tokens(images)
+        batch_size, number_of_patches, _ = patch_tokens.shape
 
-        patch_prototype_logits = einsum(
-            patch_tokens,
-            prototypes,
-            "B n_patches dim, V dim -> B n_patches V",
-        )  # [B, N, V]
-
-        # -----------------------------------
-        # Image-level prototype logits
-        # -----------------------------------
-        k = 5
-        topk_vals = patch_prototype_logits.topk(k, dim=1).values
-        vocab_logits = topk_vals.mean(dim=1)
-        #vocab_logits = self.prototype_classifier(vocab_logits)  # [B, V]
-
-        # -----------------------------------
-        # CLIP visual embedding -> vocab diagnostics
-        # -----------------------------------
-        with torch.no_grad():
-            clip_image_embedding = self.clip_model.encode_image(x)  # [B, 512]
-            clip_image_embedding = F.normalize(clip_image_embedding, p=2, dim=-1)
-
-        vocab_clip_embeddings = F.normalize(self.vocab_clip_embeddings, p=2, dim=-1)  # [V, 512]
-
-        clip_vocab_logits = einsum(
-            clip_image_embedding,
-            vocab_clip_embeddings,
-            "B dim, V dim -> B V",
-        )  # [B, V]
-
-        # -----------------------------------
-        # Use prototype logits only
-        # -----------------------------------
-        weights = F.softmax(vocab_logits / self.temperature, dim=-1)  # [B, V]
-
-        pred_text_embedding = einsum(
-            weights,
-            vocab_clip_embeddings,
-            "B V, V dim -> B dim",
-        )  # [B, 512]
-        pred_text_embedding = F.normalize(pred_text_embedding, p=2, dim=-1)
-
-        # diagnostics: top CLIP words
-        diag_k = 7
-
-        outputs = dict(
-            patch_tokens=patch_tokens,
-            patch_prototype_logits=patch_prototype_logits,
-            vocab_logits=vocab_logits,
-            clip_vocab_logits=clip_vocab_logits,
-            clip_gate_logits=None,
-            mixture_weights=weights,
-            pred_text_embedding=pred_text_embedding,
-            clip_image_embedding=clip_image_embedding,
-            prototypes=prototypes,
+        word_embedding = self._prepare_word_embedding(
+            word_embedding,
+            batch_size=batch_size,
         )
-        return outputs
 
-    def push_forward(self, x: torch.Tensor):
-        """
-        Returns a spatial map over the vocab prototype pool.
-        """
-        patch_tokens, _, _ = self.backbone(x)
-        patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
-        prototypes = self.get_prototypes()  # [V, D]
+        if word_embedding.shape[-1] != self.text_dim:
+            raise ValueError(
+                f"Expected word embedding dimension {self.text_dim}, "
+                f"but received {word_embedding.shape[-1]}"
+            )
 
-        patch_prototype_logits = einsum(
+        # Ensure that the word embedding uses the same device and floating-point
+        # type as the visual features.
+        word_embedding = word_embedding.to(
+            device=patch_tokens.device,
+            dtype=patch_tokens.dtype,
+        )
+
+        # [B, N, D]
+        patch_tokens = F.normalize(
             patch_tokens,
-            prototypes,
-            "B n_patches dim, V dim -> B n_patches V",
-        )  # [B, N, V]
+            p=2,
+            dim=-1,
+        )
 
-        _, n_patches, V = patch_prototype_logits.shape
-        H = W = int(sqrt(n_patches))
+        # [B, D]
+        projected_word = self.text_projection_head(word_embedding)
+        projected_word = F.normalize(
+            projected_word,
+            p=2,
+            dim=-1,
+        )
 
-        prototype_logits = patch_prototype_logits.permute(0, 2, 1).reshape(-1, V, H, W)
-        pooled = F.avg_pool2d(prototype_logits, kernel_size=(2, 2), stride=2)
-        return None, pooled
+        # Cosine similarity between every patch and the corresponding word.
+        #
+        # [B, N, D] * [B, 1, D] -> [B, N]
+        patch_similarity = torch.sum(
+            patch_tokens * projected_word.unsqueeze(1),
+            dim=-1,
+        )
+
+        patch_similarity = patch_similarity / self.temperature
+
+        patch_height, patch_width = self._resolve_spatial_size(
+            number_of_patches,
+            spatial_size,
+        )
+
+        # [B, N] -> [B, 1, patch_height, patch_width]
+        similarity_map = patch_similarity.reshape(
+            batch_size,
+            1,
+            patch_height,
+            patch_width,
+        )
+
+        if output_size is not None:
+            similarity_map = F.interpolate(
+                similarity_map,
+                size=output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        return similarity_map
 
 
 class PNPCriterion(nn.Module):
