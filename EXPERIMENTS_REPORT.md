@@ -241,3 +241,44 @@ see whether the sufficiency term changed anything about the concept representati
 robustness even without changing accuracy, before writing this off entirely.
 
 Full design/context: `C:\Users\preze\.claude\plans\golden-wondering-conway.md`.
+
+## 6. Concept-bottleneck interpretability report (per-image + per-class)
+
+**Question**: For a given CUB image, which concepts activate most? For a given species,
+which concepts does the classifier actually rely on — and does that match which concepts
+are, on average, most strongly present for that species?
+
+**Setup**: `scripts/explain_cub_concepts.py`, two directions, `--mode {joint,sequential}`
+to support both CUB pipelines' structurally-different classifiers (dense `nn.Linear` vs.
+sklearn sparse elastic-net — `fit_sparse_cub_probe.py` never persisted its fitted model
+before; added a `joblib` dump so this script can read `coef_` directly instead of
+refitting). Per-class results also render as figures (`plots/<class>_by_{weight,
+avg_activation}.png`): example image + horizontal bar chart of top concepts, matching the
+standard Label-free-CBM-style figure.
+
+**Result — the two per-class views can disagree completely.** Sampled 3 classes
+(Pacific_Loon, Least_Auklet, Sooty_Albatross) on the Joint checkpoint: **zero overlap**
+between "top-5 by classifier weight" and "top-5 by average activation" for all three
+classes. Likely explanation, with a concrete supporting data point: the avg-activation
+ranking is dominated by generic, broadly-firing concepts rather than class-specific ones
+— "a black head with a white beak" is the #1 avg-activation concept for *both*
+Pacific_Loon and Least_Auklet, two unrelated species. A classifier weight reflects a
+concept's *marginal* contribution to distinguishing this class from the other 199, so
+always-on generic concepts naturally get near-zero weight regardless of how strongly they
+activate — the classifier surfaces genuinely discriminative concepts instead (e.g.
+"iridescent feathers," "black and white striped back" for Pacific_Loon specifically).
+
+**Open methodological question, not yet resolved**: `class_avg_activation` averages raw,
+unstandardized activation, while the classifier itself was trained on z-scored activation.
+Concepts with a higher baseline scale across all images could be inflating the "generic
+concept dominates" effect independent of the real discriminative-vs-descriptive story.
+Worth trying a standardized version of the avg-activation ranking (same basis the
+classifier uses) as a fairer comparison before treating the zero-overlap finding as fully
+explained — it might show partial overlap instead of none.
+
+**Status**: seed/class-count made configurable (`--seed`, `--n-random-classes`,
+`SEED`/`N_RANDOM_CLASSES` env vars on the sbatch wrapper) so more examples can be pulled
+without overwriting prior runs (`results/cub_explain_joint/seed<N>/`). Only run against
+the Joint checkpoint so far — Stage 2 (Sequential) needs its own pass (`fit_sparse_cub_probe.py`
+re-run first to produce the now-added `.joblib` model file, then `--mode sequential`) to
+see whether the same zero-overlap pattern holds for the sparse classifier too.
