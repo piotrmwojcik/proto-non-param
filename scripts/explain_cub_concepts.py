@@ -2,10 +2,18 @@
 """
 Concept-bottleneck interpretability report for CUB: two directions.
 
-1. Per-image: for a given test image, the top-5 concepts whose activation
-   (raw, unstandardized vocab_logits -- the model's own patch/prototype
-   similarity, not classifier-internal preprocessing) is highest. "What did
-   the model see in this photo."
+1. Per-image, two views:
+   - Top activating concepts: raw, unstandardized vocab_logits -- the
+     model's own patch/prototype similarity, not classifier-internal
+     preprocessing. "What did the model see in this photo."
+   - Top CONTRIBUTING concepts (matches Label-free-CBM's own
+     evaluate_cbm.ipynb/plots.py figure -- verified against their actual
+     code, not assumed): standardized_activation[concept] * weight[predicted
+     class, concept], ranked by |contribution| (their plots.py bar() sorts by
+     np.argsort(np.abs(values))). This decomposes the model's own predicted-
+     class logit into per-concept summands (sum of contributions + bias ==
+     that logit) -- "why did the model predict what it predicted for THIS
+     photo," as opposed to the class-level views below.
 
 2. Per-class, two views (see Espinosa Zarlenga et al.'s Sec 6.2 "top-m weight
    overlap" for the same technique on the weight side):
@@ -76,11 +84,25 @@ def top5(values, names, k=5):
     return [(names[i], round(float(values[i]), 4)) for i in idx]
 
 
-def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, out_path):
+def topk_by_abs(values, names, k=5):
+    """Same as top5 but ranked by |value|, matching Label-free-CBM's own
+    plots.py bar() (np.argsort(np.abs(values))[::-1]) -- a large negative
+    contribution (concept present, but arguing AGAINST the predicted class)
+    is as notable as a large positive one."""
+    values = np.asarray(values)
+    idx = np.argsort(-np.abs(values))[:k]
+    return [(names[i], round(float(values[i]), 4)) for i in idx]
+
+
+def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, out_path,
+                        signed=False):
     """Example image (left) + horizontal bar chart of concept scores (right),
-    highest score at top -- mirrors the standard Label-free-CBM-style figure."""
+    highest |score| at top -- mirrors the standard Label-free-CBM-style figure.
+    signed=True colors negative bars red (contributions arguing against the
+    class) instead of uniform green."""
     names = [n for n, _ in concept_scores]
     values = [v for _, v in concept_scores]
+    colors = ["#4C9F70" if v >= 0 else "#C0392B" for v in values] if signed else "#4C9F70"
 
     fig, (ax_img, ax_bar) = plt.subplots(
         1, 2, figsize=(11, 0.45 * len(names) + 1.5),
@@ -94,13 +116,16 @@ def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, ou
                      fontweight="bold", loc="left")
 
     y = np.arange(len(names))
-    ax_bar.barh(y, values, color="#4C9F70")
+    ax_bar.barh(y, values, color=colors)
     ax_bar.set_yticks(y)
     ax_bar.set_yticklabels(names)
-    ax_bar.invert_yaxis()  # highest score at top
+    ax_bar.invert_yaxis()  # highest |score| at top
     for yi, v in zip(y, values):
-        ax_bar.text(v * 0.98, yi, f"{v:.3f}", va="center", ha="right",
+        ha = "right" if v >= 0 else "left"
+        ax_bar.text(v * 0.98, yi, f"{v:.3f}", va="center", ha=ha,
                     color="white", fontweight="bold", fontsize=9)
+    if signed:
+        ax_bar.axvline(0, color="black", linewidth=0.8)
     ax_bar.set_xlabel("Concept Score")
     ax_bar.set_title(title_suffix, fontsize=13, fontweight="bold")
     for spine in ("top", "right"):
@@ -116,7 +141,7 @@ def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, ou
 # ---------------------------------------------------------------------------
 
 def run_joint(args):
-    from train_cub_joint import build_pnp, CubJointDataset
+    from train_cub_joint import build_pnp, CubJointDataset, standardize
     import torch.nn as nn
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -160,8 +185,35 @@ def run_joint(args):
                 return path
         return None
 
-    return (concept_names, class_to_idx, idx_to_class, image_activation,
-            class_weight_row, class_avg_activation, class_example_path)
+    def image_path(index):
+        return test_ds.samples[index][0]
+
+    def image_true_label(index):
+        return test_ds.samples[index][1]
+
+    def image_contribution(index):
+        """standardized_activation[concept] * weight[predicted_class, concept],
+        for THIS image's own model prediction -- matches Label-free-CBM's
+        evaluate_cbm.ipynb figure. Returns (pred_class_idx, contributions,
+        bias, pred_logit); sum(contributions) + bias == pred_logit by
+        construction (same standardization the classifier was trained on)."""
+        act = torch.from_numpy(image_activation(index)).float().unsqueeze(0).to(device)
+        std_act = standardize(act)
+        with torch.no_grad():
+            logits = cls_head(std_act)[0]
+        pred_idx = int(logits.argmax().item())
+        weight_row = cls_head.weight[pred_idx].detach().cpu().numpy()
+        bias = float(cls_head.bias[pred_idx].detach().cpu().item())
+        contributions = std_act[0].detach().cpu().numpy() * weight_row
+        return pred_idx, contributions, bias, float(logits[pred_idx].item())
+
+    return {
+        "concept_names": concept_names, "class_to_idx": class_to_idx, "idx_to_class": idx_to_class,
+        "image_activation": image_activation, "class_weight_row": class_weight_row,
+        "class_avg_activation": class_avg_activation, "class_example_path": class_example_path,
+        "image_path": image_path, "image_true_label": image_true_label,
+        "image_contribution": image_contribution,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +229,7 @@ def run_sequential(args):
 
     bundle = joblib.load(args.sklearn_model)
     model = bundle["model"]
+    scaler = bundle["scaler"]
 
     with open(args.concepts_file) as f:
         concept_names = [line.strip() for line in f if line.strip()]
@@ -214,8 +267,33 @@ def run_sequential(args):
                 return path
         return None
 
-    return (concept_names, class_to_idx, idx_to_class, image_activation,
-            class_weight_row, class_avg_activation, class_example_path)
+    def image_path(index):
+        return test_samples[index][0]
+
+    def image_true_label(index):
+        return int(test_y[index])
+
+    def image_contribution(index):
+        """standardized_activation[concept] * weight[predicted_class, concept],
+        for THIS image's own model prediction -- matches Label-free-CBM's
+        evaluate_cbm.ipynb figure. Returns (pred_class_idx, contributions,
+        bias, pred_logit); sum(contributions) + bias == pred_logit by
+        construction (same StandardScaler the classifier was trained on)."""
+        std_act = scaler.transform(test_x[index].reshape(1, -1))[0]
+        decision = model.decision_function(std_act.reshape(1, -1))[0]  # [n_classes]
+        pred_idx = int(np.argmax(decision))
+        weight_row = model.coef_[pred_idx]
+        bias = float(model.intercept_[pred_idx])
+        contributions = std_act * weight_row
+        return pred_idx, contributions, bias, float(decision[pred_idx])
+
+    return {
+        "concept_names": concept_names, "class_to_idx": class_to_idx, "idx_to_class": idx_to_class,
+        "image_activation": image_activation, "class_weight_row": class_weight_row,
+        "class_avg_activation": class_avg_activation, "class_example_path": class_example_path,
+        "image_path": image_path, "image_true_label": image_true_label,
+        "image_contribution": image_contribution,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +331,23 @@ def main():
         for name in ("ckpt", "cub_annotations", "clip_scores_cub"):
             if getattr(args, name) is None:
                 p.error(f"--{name.replace('_', '-')} is required for --mode joint")
-        (concept_names, class_to_idx, idx_to_class, image_activation,
-         class_weight_row, class_avg_activation, class_example_path) = run_joint(args)
+        ctx = run_joint(args)
     else:
         for name in ("activations_cache", "sklearn_model", "concepts_file"):
             if getattr(args, name) is None:
                 p.error(f"--{name.replace('_', '-')} is required for --mode sequential")
-        (concept_names, class_to_idx, idx_to_class, image_activation,
-         class_weight_row, class_avg_activation, class_example_path) = run_sequential(args)
+        ctx = run_sequential(args)
+
+    concept_names = ctx["concept_names"]
+    class_to_idx = ctx["class_to_idx"]
+    idx_to_class = ctx["idx_to_class"]
+    image_activation = ctx["image_activation"]
+    class_weight_row = ctx["class_weight_row"]
+    class_avg_activation = ctx["class_avg_activation"]
+    class_example_path = ctx["class_example_path"]
+    image_path = ctx["image_path"]
+    image_true_label = ctx["image_true_label"]
+    image_contribution = ctx["image_contribution"]
 
     class_names = args.class_names
     if not class_names:
@@ -274,12 +361,47 @@ def main():
 
     report = {"mode": args.mode, "per_image": [], "per_class": []}
 
-    print(f"\n=== Per-image: top-{args.topk} activating concepts ===")
+    print(f"\n=== Per-image: top-{args.topk} activating concepts, and top-{args.topk} "
+          f"CONTRIBUTING concepts (Label-free-CBM-style) ===")
     for idx in args.image_indices:
         act = image_activation(idx)
         top = top5(act, concept_names, k=args.topk)
-        print(f"  image[{idx}]: {top}")
-        report["per_image"].append({"image_index": idx, "top5_concepts": top})
+
+        pred_idx, contributions, bias, pred_logit = image_contribution(idx)
+        contrib_top = topk_by_abs(contributions, concept_names, k=args.topk)
+        true_idx = image_true_label(idx)
+        pred_name = idx_to_class[pred_idx]
+        true_name = idx_to_class[true_idx]
+
+        # Sanity check: contributions + bias must reconstruct the predicted
+        # logit exactly (same standardization the classifier was trained on).
+        recon_err = abs(float(contributions.sum()) + bias - pred_logit)
+        if recon_err > 1e-2:
+            print(f"  WARNING: image[{idx}] contribution reconstruction error "
+                  f"{recon_err:.4f} (expected ~0) -- check standardization")
+
+        print(f"  image[{idx}]  true={true_name}  predicted={pred_name}"
+              f"{' (correct)' if pred_idx == true_idx else ' (WRONG)'}")
+        print(f"    top activating   : {top}")
+        print(f"    top contributing : {contrib_top}")
+
+        img_path = image_path(idx)
+        contrib_plot_path = os.path.join(plot_dir, f"image{idx}_contributions.png")
+        plot_class_concepts(
+            pred_name, img_path, contrib_top,
+            f"Most Strongly Contributing Concepts\n(predicted: {pred_name.replace('_', ' ')})",
+            contrib_plot_path, signed=True,
+        )
+
+        report["per_image"].append({
+            "image_index": idx,
+            "true_class": true_name,
+            "predicted_class": pred_name,
+            "correct": pred_idx == true_idx,
+            "top5_activating": top,
+            "top5_contributing": contrib_top,
+            "reconstruction_error": round(recon_err, 6),
+        })
 
     print(f"\n=== Per-class: top-{args.topk} by classifier weight vs. top-{args.topk} by avg activation ===")
     for cname in class_names:
