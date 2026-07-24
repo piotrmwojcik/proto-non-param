@@ -19,6 +19,11 @@ Concept-bottleneck interpretability report for CUB: two directions.
      informative (e.g. shortcut concepts the classifier weights heavily but
      that aren't actually visually distinctive, or vice versa).
 
+Per-class results are also saved as figures (plots/<class>_by_weight.png,
+plots/<class>_by_avg_activation.png): an example image of the class next to
+a horizontal bar chart of its top concepts, one figure per view. --topk
+controls how many concepts appear (default 5).
+
 Two modes, since the two CUB pipelines' classifiers are structurally
 different (dense nn.Linear vs. sklearn sparse elastic-net):
 
@@ -51,6 +56,10 @@ import sys
 
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from PIL import Image
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -65,6 +74,41 @@ def top5(values, names, k=5):
     values = np.asarray(values)
     idx = np.argsort(-values)[:k]
     return [(names[i], round(float(values[i]), 4)) for i in idx]
+
+
+def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, out_path):
+    """Example image (left) + horizontal bar chart of concept scores (right),
+    highest score at top -- mirrors the standard Label-free-CBM-style figure."""
+    names = [n for n, _ in concept_scores]
+    values = [v for _, v in concept_scores]
+
+    fig, (ax_img, ax_bar) = plt.subplots(
+        1, 2, figsize=(11, 0.45 * len(names) + 1.5),
+        gridspec_kw={"width_ratios": [1, 1.6]}, dpi=140,
+    )
+
+    if image_path is not None:
+        ax_img.imshow(Image.open(image_path).convert("RGB"))
+    ax_img.axis("off")
+    ax_img.set_title(f"Class: {class_name.replace('_', ' ')}", fontsize=13,
+                     fontweight="bold", loc="left")
+
+    y = np.arange(len(names))
+    ax_bar.barh(y, values, color="#4C9F70")
+    ax_bar.set_yticks(y)
+    ax_bar.set_yticklabels(names)
+    ax_bar.invert_yaxis()  # highest score at top
+    for yi, v in zip(y, values):
+        ax_bar.text(v * 0.98, yi, f"{v:.3f}", va="center", ha="right",
+                    color="white", fontweight="bold", fontsize=9)
+    ax_bar.set_xlabel("Concept Score")
+    ax_bar.set_title(title_suffix, fontsize=13, fontweight="bold")
+    for spine in ("top", "right"):
+        ax_bar.spines[spine].set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +154,14 @@ def run_joint(args):
         acts = np.stack([image_activation(i) for i in rows])
         return acts.mean(axis=0)
 
-    return concept_names, class_to_idx, idx_to_class, image_activation, class_weight_row, class_avg_activation
+    def class_example_path(class_idx):
+        for path, lab in test_ds.samples:
+            if lab == class_idx:
+                return path
+        return None
+
+    return (concept_names, class_to_idx, idx_to_class, image_activation,
+            class_weight_row, class_avg_activation, class_example_path)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +188,14 @@ def run_sequential(args):
     class_to_idx = build_class_index(args.cub_root)
     idx_to_class = {i: name for name, i in class_to_idx.items()}
 
+    # list_split iterates the same sorted (class folder, filename) order
+    # encode_split used to build test_x/test_y, so row i here == row i there.
+    test_samples = list_split(args.cub_root, "test", class_to_idx)
+    assert len(test_samples) == test_x.shape[0], (
+        f"{args.cub_root}/test has {len(test_samples)} images but the activations "
+        f"cache has {test_x.shape[0]} rows -- mismatched --cub-root for this cache?"
+    )
+
     def image_activation(index):
         return test_x[index]
 
@@ -149,7 +208,14 @@ def run_sequential(args):
             return None
         return rows.mean(axis=0)
 
-    return concept_names, class_to_idx, idx_to_class, image_activation, class_weight_row, class_avg_activation
+    def class_example_path(class_idx):
+        for path, lab in test_samples:
+            if lab == class_idx:
+                return path
+        return None
+
+    return (concept_names, class_to_idx, idx_to_class, image_activation,
+            class_weight_row, class_avg_activation, class_example_path)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +230,7 @@ def main():
     p.add_argument("--class-names", type=str, nargs="*", default=None,
                    help="CUB class folder names to explain (default: 3 random classes)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--topk", type=int, default=5, help="Concepts per plot/report (default: 5)")
     # joint mode
     p.add_argument("--ckpt", help="[joint] train_cub_joint.py checkpoint")
     p.add_argument("--cub-annotations", help="[joint]")
@@ -183,14 +250,14 @@ def main():
         for name in ("ckpt", "cub_annotations", "clip_scores_cub"):
             if getattr(args, name) is None:
                 p.error(f"--{name.replace('_', '-')} is required for --mode joint")
-        (concept_names, class_to_idx, idx_to_class,
-         image_activation, class_weight_row, class_avg_activation) = run_joint(args)
+        (concept_names, class_to_idx, idx_to_class, image_activation,
+         class_weight_row, class_avg_activation, class_example_path) = run_joint(args)
     else:
         for name in ("activations_cache", "sklearn_model", "concepts_file"):
             if getattr(args, name) is None:
                 p.error(f"--{name.replace('_', '-')} is required for --mode sequential")
-        (concept_names, class_to_idx, idx_to_class,
-         image_activation, class_weight_row, class_avg_activation) = run_sequential(args)
+        (concept_names, class_to_idx, idx_to_class, image_activation,
+         class_weight_row, class_avg_activation, class_example_path) = run_sequential(args)
 
     class_names = args.class_names
     if not class_names:
@@ -198,33 +265,49 @@ def main():
         class_names = list(rng.choice(sorted(class_to_idx.keys()), size=3, replace=False))
         print(f"No --class-names given, sampled: {class_names}")
 
+    plot_dir = os.path.join(args.out_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
     report = {"mode": args.mode, "per_image": [], "per_class": []}
 
-    print("\n=== Per-image: top-5 activating concepts ===")
+    print(f"\n=== Per-image: top-{args.topk} activating concepts ===")
     for idx in args.image_indices:
         act = image_activation(idx)
-        top = top5(act, concept_names)
+        top = top5(act, concept_names, k=args.topk)
         print(f"  image[{idx}]: {top}")
         report["per_image"].append({"image_index": idx, "top5_concepts": top})
 
-    print("\n=== Per-class: top-5 by classifier weight vs. top-5 by avg activation ===")
+    print(f"\n=== Per-class: top-{args.topk} by classifier weight vs. top-{args.topk} by avg activation ===")
     for cname in class_names:
         if cname not in class_to_idx:
             print(f"  WARNING: class '{cname}' not found, skipping "
                   f"(available e.g.: {sorted(class_to_idx.keys())[:3]}...)")
             continue
         cidx = class_to_idx[cname]
+        example_path = class_example_path(cidx)
 
-        weight_top = top5(class_weight_row(cidx), concept_names)
+        weight_top = top5(class_weight_row(cidx), concept_names, k=args.topk)
         avg_act = class_avg_activation(cidx)
-        avg_top = top5(avg_act, concept_names) if avg_act is not None else None
+        avg_top = top5(avg_act, concept_names, k=args.topk) if avg_act is not None else None
 
         print(f"  {cname} (class {cidx}):")
         print(f"    by classifier weight : {weight_top}")
         print(f"    by avg activation    : {avg_top}")
+
+        weight_plot_path = os.path.join(plot_dir, f"{cname}_by_weight.png")
+        plot_class_concepts(cname, example_path, weight_top,
+                            "Most Strongly Contributing Concepts\n(by classifier weight)",
+                            weight_plot_path)
+        if avg_top is not None:
+            avg_plot_path = os.path.join(plot_dir, f"{cname}_by_avg_activation.png")
+            plot_class_concepts(cname, example_path, avg_top,
+                                "Most Strongly Contributing Concepts\n(by average activation)",
+                                avg_plot_path)
+
         report["per_class"].append({
             "class_name": cname,
             "class_index": cidx,
+            "example_image": example_path,
             "top5_by_weight": weight_top,
             "top5_by_avg_activation": avg_top,
         })
