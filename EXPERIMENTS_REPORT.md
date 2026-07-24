@@ -18,13 +18,23 @@ phrases at random (without replacement) and builds the KL target from just those
 Implementation: `clip_dataset.py` (`VisualGenomeDataset.random_caption_target`),
 `scripts/slurm_train_vg_random_caption.sh`.
 
-**Status**: Training completed (`run_M1-RC_vitl14_sk10_koleo01_randk3_30ep`). Zero-shot RIS
-eval submitted across all 7 splits (`scripts/slurm_eval_vg_contrastive_M1_RC.sh`) —
-results land in `eval_results/vg_contrastive/contr_M1-RC-k3/`, registered in
-`compare_ris_results.py` under variant key `M1-RC`. **Numbers not yet pulled into this
-report** — run `python scripts/compare_ris_results.py --eval_dir eval_results
---ablation-dir eval_results/vg_contrastive --ablation-type vg_contrastive --out
-eval_results/vg_contrastive/comparison.md` and update this section.
+**Status: complete — negative result, rejected.** All 7 splits, base 224px eval, vs. M1:
+
+| Split | M1 oIoU/mIoU | M1-RC oIoU/mIoU | Δ oIoU | Δ mIoU |
+|---|---|---|---|---|
+| Gref/val | 19.6/20.4 | 19.3/20.3 | −0.3 | −0.1 |
+| unc/val | 19.1/20.4 | 18.8/20.6 | −0.3 | +0.2 |
+| unc/testA | 18.6/20.5 | 18.4/21.2 | −0.2 | +0.7 |
+| unc/testB | 20.0/21.1 | 19.8/20.9 | −0.2 | −0.2 |
+| unc+/val | 19.2/20.5 | 18.7/20.4 | −0.5 | −0.1 |
+| unc+/testA | 18.5/20.5 | 18.1/20.8 | −0.4 | +0.3 |
+| unc+/testB | 20.5/21.4 | 20.1/21.2 | −0.4 | −0.2 |
+
+oIoU is worse on every single split (−0.2 to −0.5); mIoU is a wash (roughly half up, half
+down, all within noise except one +0.7 outlier). **Don't retry as-is** (same disposition
+as SigReg/cross-attn/Q/R in project memory) — M1's fixed, pooled-across-all-phrases KL
+target is at least as good as, and mildly better than (on the pixel-weighted oIoU metric),
+resampling a random k=3 subset of phrases per training step.
 
 ## 2. mIoU vs. referring-expression length — PNP (M1@672) vs. CTRL-O vs. SaG, Gref/val
 
