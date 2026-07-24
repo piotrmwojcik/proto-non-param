@@ -53,17 +53,25 @@ from eval_retreive_concepts import (  # noqa: E402
 
 
 def dedup_images(data_root, dataset, split):
-    """One entry per unique img_id from ReferDataset (which is one row per
-    referring expression, i.e. many rows per image)."""
+    """One entry per unique physical image from ReferDataset (which is one row
+    per referring expression, i.e. many rows per image).
+
+    Dedup key is im_name, NOT img_id: ReferDataset.get_raw_item's "img_id" is
+    parsed from the .npz filename's trailing number (build_batches.py's
+    `n_batch`, a global counter incremented once per referring expression,
+    unrelated to image identity) -- so it's actually unique per SENTENCE, not
+    per image, making a dedup keyed on it a no-op. im_name (COCO_{split}_
+    {image_id}, build_batches.py:72) is the real, stable per-image identifier
+    -- same value for every sentence about the same photo."""
     ds = ReferDataset(root=os.path.join(data_root, dataset), splitset=split)
     seen = set()
     images = []
     for i in range(len(ds)):
-        _, img_id, pil_img, _, _ = ds.get_raw_item(i)
-        if img_id in seen:
+        _, _, pil_img, _, im_name = ds.get_raw_item(i)
+        if im_name in seen:
             continue
-        seen.add(img_id)
-        images.append((img_id, pil_img))
+        seen.add(im_name)
+        images.append((im_name, pil_img))
     return images
 
 
@@ -132,7 +140,6 @@ def _draw_concept_row(axes_row, concept, topk_values, topk_indices, patch_logits
 
         ax.imshow(overlay_box)
         ax.axis("off")
-        ax.set_title(f"score={score:.3f}", fontsize=9)
     # ax.axis("off") hides a normal ylabel, so annotate with text instead
     axes_row[0].text(-0.1, 0.5, concept, transform=axes_row[0].transAxes,
                      rotation=90, va="center", ha="center", fontsize=12)
