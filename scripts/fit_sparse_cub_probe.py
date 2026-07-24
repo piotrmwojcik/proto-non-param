@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 
+import joblib
 import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
@@ -103,6 +104,13 @@ def main():
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"Saved result to {out_path}")
+
+    # Fitted model + scaler weren't persisted before -- needed by
+    # explain_cub_concepts.py to read per-class weights (coef_) directly
+    # instead of refitting.
+    model_path = os.path.join(args.out_dir, "sparse_probe_model.joblib")
+    joblib.dump({"model": best, "scaler": scaler}, model_path)
+    print(f"Saved fitted model to {model_path}")
 
 
 if __name__ == "__main__":
