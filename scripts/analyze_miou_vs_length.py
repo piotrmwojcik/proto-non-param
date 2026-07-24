@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-mIoU vs. referring-expression length on RefCOCOg, PNP vs CTRL-O.
+mIoU vs. referring-expression length on RefCOCOg, PNP vs CTRL-O vs SaG.
 
 Turns the known PNP-vs-CTRL-O gap on Gref/val into an insight: bucket
 examples by expression length (word count) and show whether the gap
-concentrates in longer, more compositional expressions.
+concentrates in longer, more compositional expressions. SaG is included in
+the same setting for a third reference point.
 
 Inputs:
   - PNP's per-sample eval JSON (evaluate_pnp_refer.py output), which stores
@@ -14,15 +15,26 @@ Inputs:
     sorted).
   - CTRL-O's per-sentence eval JSON (inference_refer.py output, `per_sentence`
     key), which already stores the sentence text directly.
+  - SaG's per-sample eval JSON (sag_refseg/evaluate.py output), which already
+    stores per-example {max,avg,min}_iou + `index` per referring expression —
+    no patch needed there, unlike CTRL-O. Uses the `avg` pooling mode's IoU
+    (avg_iou), matching the mode compare_ris_results.py already treats as
+    SaG's canonical reported number (avg_cIoU/avg_mIoU) elsewhere in this
+    repo. Sentence text recovered the same way as PNP's, via
+    sag_refseg.data.refer_dataset.ReferDataset.get_raw_item(index) — a
+    separate (near-identical) copy of the same .npz-batch-reading class, not
+    shared code, so it needed the same sorted-glob determinism fix applied
+    separately (sag_refseg/data/refer_dataset.py).
 
-Bucket edges are quantiles of PNP's own length distribution (both models are
-evaluated against the same benchmark split, so this is a fair, shared axis).
+Bucket edges are quantiles of PNP's own length distribution (all three models
+are evaluated against the same benchmark split, so this is a fair, shared axis).
 
 Usage:
   python scripts/analyze_miou_vs_length.py \
     --pnp-json eval_results/vg_contrastive/contr_M1_res672/pnp_refer/Gref_val.json \
     --data-root $SCRATCH/data/refcoco --dataset Gref --split val \
     --ctrlo-json $SCRATCH/eval_results/ctrlo/refcocog_metrics.json \
+    --sag-json $SCRATCH/eval_results/sag_refseg/Gref_val.json \
     --out-dir results/miou_vs_length
 
 Future extension (not implemented here): a POS-based compositionality metric
@@ -39,10 +51,13 @@ import sys
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)          # proto-non-param/
+OUTER_REPO_ROOT = os.path.dirname(REPO_ROOT)      # proto-VLM/ (sag_refseg lives here)
 sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, OUTER_REPO_ROOT)
 
 from evaluation.refer_dataset import ReferDataset  # noqa: E402
+from sag_refseg.data.refer_dataset import ReferDataset as SagReferDataset  # noqa: E402
 
 
 def load_pnp_examples(pnp_json_path, data_root, dataset, split):
@@ -60,6 +75,25 @@ def load_pnp_examples(pnp_json_path, data_root, dataset, split):
             "sentence": sentence,
             "length": len(sentence.split()),
             "iou": float(row["iou"]),
+        })
+    return examples
+
+
+def load_sag_examples(sag_json_path, data_root, dataset, split):
+    with open(sag_json_path) as f:
+        data = json.load(f)
+    per_sample = data["per_sample"]
+
+    ds = SagReferDataset(root=os.path.join(data_root, dataset), splitset=split)
+    examples = []
+    for row in per_sample:
+        sentence, _, _, _, _ = ds.get_raw_item(row["index"])
+        sentence = str(sentence)
+        examples.append({
+            "model": "SaG",
+            "sentence": sentence,
+            "length": len(sentence.split()),
+            "iou": float(row["avg_iou"]),
         })
     return examples
 
@@ -115,6 +149,7 @@ def main():
     p.add_argument("--dataset", default="Gref")
     p.add_argument("--split", default="val")
     p.add_argument("--ctrlo-json", required=True, help="inference_refer.py per_sentence result JSON")
+    p.add_argument("--sag-json", default=None, help="sag_refseg/evaluate.py per-sample result JSON (optional)")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--n-buckets", type=int, default=4)
     p.add_argument("--n-bootstrap", type=int, default=2000)
@@ -131,7 +166,13 @@ def main():
     ctrlo_examples = load_ctrlo_examples(args.ctrlo_json)
     print(f"  {len(ctrlo_examples)} CTRL-O examples")
 
-    all_examples = pnp_examples + ctrlo_examples
+    sag_examples = []
+    if args.sag_json:
+        print(f"Loading SaG examples from {args.sag_json} ...")
+        sag_examples = load_sag_examples(args.sag_json, args.data_root, args.dataset, args.split)
+        print(f"  {len(sag_examples)} SaG examples")
+
+    all_examples = pnp_examples + ctrlo_examples + sag_examples
 
     # --- per-example CSV -----------------------------------------------------
     per_example_path = os.path.join(args.out_dir, "per_example.csv")
@@ -152,17 +193,20 @@ def main():
         print(f"Note: only {n_buckets} distinct bucket edges after dedup "
               f"(requested {args.n_buckets}) — length distribution has ties at the tails.")
 
-    pnp_bucket_idx = bucket_examples(pnp_examples, edges)
-    ctrlo_bucket_idx = bucket_examples(ctrlo_examples, edges)
+    # (model name, examples, bucket assignment) for every model actually loaded —
+    # SaG is optional, only included when --sag-json is passed.
+    models = [
+        ("PNP", pnp_examples, bucket_examples(pnp_examples, edges)),
+        ("CTRL-O", ctrlo_examples, bucket_examples(ctrlo_examples, edges)),
+    ]
+    if sag_examples:
+        models.append(("SaG", sag_examples, bucket_examples(sag_examples, edges)))
 
     # --- per-bucket mIoU + bootstrap CI --------------------------------------
     per_bucket_rows = []
     for b in range(n_buckets):
         lo, hi = edges[b], edges[b + 1]
-        for model, examples, bucket_idx in (
-            ("PNP", pnp_examples, pnp_bucket_idx),
-            ("CTRL-O", ctrlo_examples, ctrlo_bucket_idx),
-        ):
+        for model, examples, bucket_idx in models:
             ious = [e["iou"] for e, bi in zip(examples, bucket_idx) if bi == b]
             mean_iou, ci_lo, ci_hi = bootstrap_ci(ious, args.n_bootstrap, args.seed)
             per_bucket_rows.append({
@@ -183,10 +227,10 @@ def main():
         w.writerows(per_bucket_rows)
     print(f"Saved {per_bucket_path}")
 
-    for model, total_n in (("PNP", len(pnp_examples)), ("CTRL-O", len(ctrlo_examples))):
+    for model, examples, _ in models:
         bucket_n_sum = sum(r["n"] for r in per_bucket_rows if r["model"] == model)
-        if bucket_n_sum != total_n:
-            print(f"WARNING: {model} bucket counts sum to {bucket_n_sum}, expected {total_n}")
+        if bucket_n_sum != len(examples):
+            print(f"WARNING: {model} bucket counts sum to {bucket_n_sum}, expected {len(examples)}")
 
     # --- figure ---------------------------------------------------------------
     import matplotlib
@@ -195,7 +239,9 @@ def main():
 
     fig, ax = plt.subplots(figsize=(7, 5), dpi=140)
     x = np.arange(n_buckets)
-    for model, color in (("PNP", "#1f77b4"), ("CTRL-O", "#d62728")):
+    model_colors = {"PNP": "#1f77b4", "CTRL-O": "#d62728", "SaG": "#2ca02c"}
+    for model, _, _ in models:
+        color = model_colors[model]
         rows = [r for r in per_bucket_rows if r["model"] == model]
         y = [r["mean_iou"] for r in rows]
         lo = [r["mean_iou"] - r["ci_lo"] for r in rows]
