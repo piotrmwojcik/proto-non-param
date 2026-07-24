@@ -26,48 +26,63 @@ report** — run `python scripts/compare_ris_results.py --eval_dir eval_results
 --ablation-dir eval_results/vg_contrastive --ablation-type vg_contrastive --out
 eval_results/vg_contrastive/comparison.md` and update this section.
 
-## 2. mIoU vs. referring-expression length — PNP (M1@672) vs. CTRL-O, Gref/val
+## 2. mIoU vs. referring-expression length — PNP (M1@672) vs. CTRL-O vs. SaG, Gref/val
 
 **Question**: Is PNP's gap to CTRL-O on Gref/val (per project memory: 22.0 vs 25.3 mIoU)
 concentrated in long/compositional expressions, as a "bag-of-concepts can't handle
-compositionality" hypothesis would predict?
+compositionality" hypothesis would predict? Extended to include SaG as a third,
+independently-trained baseline in the same setting.
 
-**Setup**: `scripts/analyze_miou_vs_length.py` buckets both models' per-sentence IoU by
-word-count quartiles (PNP's own length distribution sets the bucket edges). PNP's
+**Setup**: `scripts/analyze_miou_vs_length.py` buckets each model's per-sentence IoU by
+word-count quartiles (PNP's own length distribution sets the shared bucket edges). PNP's
 per-example data reused from the existing M1@672 eval JSON (no re-run needed — sentence
 text recovered post-hoc via `ReferDataset.get_raw_item(index)`, which required making
 `ReferDataset.data_list`'s ordering deterministic — `evaluation/refer_dataset.py`, now
 `sorted(glob(...))`). CTRL-O's per-sentence data required a patch to `inference_refer.py`
 (outer `proto-VLM` repo) to persist per-expression records — it previously only kept an
-oracle (best-of-sentences-per-reference) summary, not per-sentence granularity.
+oracle (best-of-sentences-per-reference) summary, not per-sentence granularity. SaG's own
+`sag_refseg/evaluate.py` already wrote per-sample IoU (max/avg/min pooling modes) with no
+patch needed — uses the `avg` mode, matching the mode `compare_ris_results.py` already
+treats as SaG's canonical number elsewhere in this repo. SaG's sentence-recovery needed
+the same sorted-glob determinism fix applied to its own (separate, non-shared) copy of
+`ReferDataset` (`sag_refseg/data/refer_dataset.py`, outer repo).
 
-**Result — hypothesis REFUTED, opposite pattern found**:
+**Result — hypothesis REFUTED for CTRL-O, and PNP turns out to be the most length-robust
+of all three methods**:
 
-| Length (words) | n (PNP/CTRL-O) | PNP mIoU | CTRL-O mIoU | Gap (CTRL-O − PNP) |
+| Length (words) | n (PNP/CTRL-O/SaG) | PNP mIoU | CTRL-O mIoU | SaG mIoU |
 |---|---|---|---|---|
-| 1–6   | 3347/3415 | 22.06 | 26.43 | **+4.37** |
-| 6–8   | 1956/2008 | 21.92 | 22.99 | +1.07 |
-| 8–11  | 2359/2368 | 21.72 | 22.79 | +1.07 |
-| 11–37 | 1874/1745 | 22.20 | 21.72 | **−0.48** |
+| 1–6   | 3347/3415/3347 | 22.06 | **26.43** | 22.41 |
+| 6–8   | 1956/2008/1956 | 21.92 | **22.99** | 20.06 |
+| 8–11  | 2359/2368/2359 | 21.72 | **22.79** | 20.48 |
+| 11–37 | 1874/1745/1874 | **22.20** | 21.72 | 20.44 |
 
-The gap is concentrated in the **shortest** expressions, not the longest. 95% bootstrap
-CIs: bucket 0 is clearly significant (PNP `[21.47, 22.64]` vs CTRL-O `[25.67, 27.15]`,
-no overlap); by the longest bucket the CIs overlap heavily and PNP's point estimate is
-nominally higher. **PNP is essentially length-invariant** (flat ~21.7–22.2 mIoU across
-all four buckets); **CTRL-O is the one that's length-sensitive**, strong on short/simple
-expressions and degrading monotonically as expressions lengthen, converging toward PNP's
-flat baseline.
+The PNP/CTRL-O gap is concentrated in the **shortest** expressions, not the longest — the
+opposite of the compositionality hypothesis. 95% bootstrap CIs: bucket 0 is clearly
+significant (PNP `[21.47, 22.64]` vs CTRL-O `[25.67, 27.15]`, no overlap); by the longest
+bucket the CIs overlap heavily and PNP's point estimate is nominally higher. **PNP is
+essentially length-invariant** (flat ~21.7–22.2 mIoU across all four buckets); **CTRL-O is
+length-sensitive**, strong on short/simple expressions and degrading monotonically toward
+PNP's flat baseline as expressions lengthen.
+
+SaG adds a third, different pattern: it's statistically tied with PNP only in the shortest
+bucket (CIs overlap heavily), then drops *below* PNP for every other bucket with mostly
+non-overlapping CIs (bucket 1: SaG `[19.32, 20.79]` vs PNP `[21.19, 22.62]`, no overlap at
+all) — and unlike CTRL-O, SaG never converges back toward PNP's level. **PNP is the most
+length-robust of the three independently-developed methods, and is not beaten by SaG (a
+real trained baseline, not an ablation) on anything but the shortest-expression bucket.**
 
 Reframed claim for the paper: CTRL-O's overall edge on Gref/val comes almost entirely
 from short, simple referring expressions (plausibly where slot-attention's object-centric
 decomposition has an easy single salient object to bind to) — on longer, more
-compositional expressions the two methods are statistically tied.
+compositional expressions PNP is statistically tied with CTRL-O and ahead of SaG.
 
 Note: a small residual noise source exists in the length metric itself — PNP's `.npz`
 batches store REFER's `sent` field (lowercased/punctuation-stripped), while CTRL-O's
 `inference_refer.py` uses REFER's `raw` field (original text) — a handful of sentences
 can land in a different length bucket between the two as a result, though totals match
-exactly (9536 examples each), so this is bucket-assignment noise, not a data problem.
+exactly (9536 examples each), so this is bucket-assignment noise, not a data problem. SaG
+uses PNP's own `.npz` `sent` field convention, so no equivalent noise there.
 
 **Artifacts**: `results/miou_vs_length/{per_example.csv, per_bucket.csv, miou_vs_length.png}`.
 
@@ -94,11 +109,22 @@ config incompatible with M1). Two bugs found and fixed during this run:
   sampling over every POS-tagged noun/adjective in the un-curated, NLTK-auto-extracted
   15,858-word vocab mostly surfaced typos/extraction artifacts (`jerysey`, `mountial`,
   `withred`) rather than usable example concepts.
+- `dedup_images()`'s dedup key was wrong: `ReferDataset.get_raw_item`'s "img_id" field is
+  actually parsed from the `.npz` filename's trailing number — a global per-*sentence*
+  batch counter from `build_batches.py` (`n_batch`), not a real per-image identifier — so
+  dedup on it was a no-op, letting the same photo appear multiple times in the retrieval
+  corpus (visible as back-to-back identical crops). Fixed to dedup on `im_name` (the
+  actual stable COCO-image identifier, already present in the same tuple, just unused).
 
-**Status**: Completed successfully after fixes (job `2818325`, using the corrected
-concept-suggestion filter). Output: `results/concept_retrieval/concept_retrieval_Gref_val.png`
-— not yet visually reviewed in this report; check the auto-suggested concept list in the
-job log and pull the PNG down to confirm quality before using it in the paper.
+Added `--n-concepts` (convenience total count) and `--separate-figures` (one PNG per
+concept instead of one tall combined grid); default sbatch invocation now requests 20
+concepts as separate files. Also dropped the per-crop `score=X.XXX` title text per request.
+
+**Status**: Ran once (job `2818325`) before the dedup fix — that output has the duplicate-
+image bug and should be discarded/regenerated, not used in the paper. Needs a re-run with
+the current script (`bash scripts/slurm_visualize_concept_retrieval.sh`) before visual
+review. Output: `results/concept_retrieval/concept_retrieval_<word>.png`, one file per
+concept.
 
 ## 4. CUB-200 concept-bottleneck classification (Label-free-CBM-style)
 
