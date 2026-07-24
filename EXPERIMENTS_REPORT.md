@@ -139,7 +139,26 @@ throughout and report ~79–87% top-1 on CUB.
 
 ## 5. Joint training with a CLIP-substituted sufficiency regularizer
 
-**Status: implemented, not yet run.**
+**Status: run, including the attribution ablation. Result: joint training helps a lot;
+the sufficiency term specifically does not.**
+
+| Run | Concepts | cls_coef | sufficiency_coef | Top-1 | Top-5 |
+|---|---|---|---|---|---|
+| Stage 2 (Sequential, §4 above) | 248 | — | — | 67.41% | 93.06% |
+| Joint, with sufficiency | 339 | 1.0 | 1.0 | 85.71% | 97.69% |
+| **Joint, sufficiency ablated off** | 339 | 1.0 | **0.0** | **85.67%** | **97.83%** |
+
+The with/without-sufficiency runs are statistically indistinguishable (the ablated run's
+top-5 is even marginally higher). **The ~18pt jump over Stage 2 comes from joint
+end-to-end fine-tuning itself (classification loss backpropagating through the whole
+concept encoder, not just a frozen-feature probe) — not from the CLIP-substituted
+sufficiency regularizer.** The honest conclusion from this experiment is "joint training
+beats sequential training on CUB," a real and useful result, but a more modest claim than
+"the paper's sufficiency mechanism helps," which is what originally motivated it. Note
+also the concept-count difference (339 vs. Stage 2's 248 — this run used the CLIP-cutoff-
+filtered vocab, not the further interpretability-cutoff-filtered one), so the comparison
+to Stage 2 isn't perfectly apples-to-apples on concept set, on top of the training-regime
+difference.
 
 Motivated by Espinosa Zarlenga, *"In Defense of Information Leakage in Concept-based
 Models"* (ICML 2026): Sequential/Independent CBM training (what Stage 2 above does) is
@@ -180,9 +199,9 @@ Run order: `bash scripts/slurm_train_cub_joint.sh` (defaults: `cls_coef=1.0
 sufficiency_coef=1.0`, override via `CLS_COEF=... SUFFICIENCY_COEF=...` env vars), then
 `bash scripts/slurm_eval_cub_sufficiency_curve.sh`.
 
-**Target comparison**: does Joint beat Stage 2's 67.41% top-1 / 93.06% top-5? — not yet
-run; update this section with results once it completes.
+**Next**: the sufficiency curve (`eval_cub_sufficiency_curve.py`) hasn't been checked yet
+on either checkpoint — worth running on both the with- and without-sufficiency runs to
+see whether the sufficiency term changed anything about the concept representation's
+robustness even without changing accuracy, before writing this off entirely.
 
 Full design/context: `C:\Users\preze\.claude\plans\golden-wondering-conway.md`.
-
-Target comparison once run: does Joint beat Stage 2's 67.41% top-1 / 93.06% top-5?
