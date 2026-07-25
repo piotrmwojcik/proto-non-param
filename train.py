@@ -1,526 +1,569 @@
-#!/usr/bin/env python3
-from html import parser
-import sys
-import logging
-from collections import defaultdict
-from logging import Logger
+from __future__ import annotations
+
+from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
-import numpy as np
-import math
-import random
-import os
-import nltk
-from nltk.stem import WordNetLemmatizer
-import open_clip
-from collections import defaultdict
+from typing import Any
 import argparse
-from sklearn.manifold import TSNE
-from PIL import Image, ImageDraw
-import matplotlib.pyplot as plt
+import importlib
+import os
+import random
 
-from vg_dataset import build_webdataset, collate_batch
-import wandb
-import lightning as L
 import torch
-from torch import nn, optim
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+import torch.nn as nn
+import wandb
 import torch.nn.functional as F
+from llm2vec import LLM2Vec
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
-from clip_dataset import CocoCLIPDataset, coco_clip_collate_fn
-from modeling.backbone import (
-    DINOv2Backbone,
-    DINOv2BackboneExpanded,
-    DINOBackboneExpanded,
-    CLIPBackbone,
+from modeling.pnp import PNP, PNPContrastiveCriterion
+from visual_genome_scene_graph_dataset import (
+    DEFAULT_VG_ROOT,
+    VisualGenomeSceneGraphDataset,
+    scene_graph_collate_fn,
 )
-from modeling.pnp import PNP, PNPCriterion
-from modeling.utils import print_parameters
+from llm2vec_utils import (
+    encode_pair_strings,
+    load_llm2vec,
+)
 
 
-CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
-CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
-
-
-def denorm_to_uint8(
-    x: torch.Tensor,
-    mean=CLIP_MEAN,
-    std=CLIP_STD,
-) -> np.ndarray:
-    x = x.detach().cpu()
-    mean_t = torch.tensor(mean)[:, None, None]
-    std_t = torch.tensor(std)[:, None, None]
-    x = (x * std_t + mean_t).clamp(0, 1)
-    x = (x * 255).byte().permute(1, 2, 0).numpy()
-    return x
-
-
-def overlay_heatmap(
-    img_uint8: np.ndarray, hm: torch.Tensor, alpha: float = 0.45
-) -> np.ndarray:
-    hm = hm.detach().cpu()
-    hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
-    hm = hm.numpy()
-
-    r = hm
-    g = np.clip(hm * 0.9 + 0.1, 0, 1)
-    b = np.clip(1.0 - hm * 0.8, 0, 1)
-    hm_rgb = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
-
-    out = alpha * hm_rgb.astype(np.float32) + (1 - alpha) * img_uint8.astype(np.float32)
-    return out.clip(0, 255).astype(np.uint8)
-
-
-def find_high_activation_crop(activation_map, percentile=95):
-    threshold = np.percentile(activation_map, percentile)
-    mask = activation_map >= threshold
-
-    ys, xs = np.where(mask)
-    if len(ys) == 0 or len(xs) == 0:
-        h, w = activation_map.shape
-        return 0, h, 0, w
-
-    lower_y, upper_y = ys.min(), ys.max() + 1
-    lower_x, upper_x = xs.min(), xs.max() + 1
-    return lower_y, upper_y, lower_x, upper_x
-
-
-def draw_rect_on_image(img_uint8, bbox, color=(255, 0, 0), width=3):
+def get_images(batch: Any) -> torch.Tensor:
     """
-    img_uint8: HxWx3 uint8 numpy array
-    bbox: (y0, y1, x0, x1)
+    Extract the image tensor from the Visual Genome collated batch.
+
+    Adjust the tuple index here if scene_graph_collate_fn returns a tuple
+    with images in a different position.
     """
-    y0, y1, x0, x1 = bbox
-    img_pil = Image.fromarray(img_uint8)
-    draw = ImageDraw.Draw(img_pil)
-    draw.rectangle([x0, y0, x1 - 1, y1 - 1], outline=color, width=width)
-    return np.array(img_pil)
+    if isinstance(batch, dict):
+        for key in ("images", "image", "pixel_values"):
+            value = batch.get(key)
 
+            if torch.is_tensor(value):
+                return value
 
-@torch.no_grad()
-def wandb_log_top_proto_heatmaps(
-    *,
-    model: nn.Module,
-    images: torch.Tensor,
-    outputs: dict,
-    step: int,
-    captions=None,
-    max_items: int = 48,
-    top_k: int = 5,
-    mean=CLIP_MEAN,
-    std=CLIP_STD,
-    log_key: str = "test/top_proto_heatmaps",
-    tsne_key: str = "test/proto_tsne",
-    tsne_max_points: int = 300,
-    log_tsne: bool = False,
-    crop_percentile: float = 95,
-):
-    """
-    Logs one grid image per sample:
-      - raw image
-      - top-k prototype heatmaps with prototype words / scores
-      - rectangle around high-activation region on each heatmap
-    """
-    patch_logits = outputs["patch_prototype_logits"]  # [B, N, V]
-    mix_weights = outputs["mixture_weights"]  # [B, V]
-
-    B, N, V = patch_logits.shape
-    H = W = int(math.sqrt(N))
-    _, _, Hi, Wi = images.shape
-
-    top_vals, top_idx = mix_weights.topk(k=top_k, dim=-1)  # [B, K]
-
-    sample_grids = []
-    B_log = min(B, max_items)
-
-    for b in range(B_log):
-        img_uint8 = denorm_to_uint8(images[b], mean=mean, std=std)
-        raw_caption = str(captions[b]) if captions is not None else ""
-
-        words = [model.vocab_words[j] for j in top_idx[b].tolist()]
-
-        panel_imgs = [img_uint8]
-        panel_titles = ["raw"]
-
-        for rank, proto_idx in enumerate(top_idx[b].tolist()):
-            hm = patch_logits[b, :, proto_idx].view(1, 1, H, W)
-            hm_up = F.interpolate(
-                hm, size=(Hi, Wi), mode="bilinear", align_corners=False
-            )[0, 0]
-
-            hm_np = hm_up.detach().cpu().numpy()
-
-            # find bounding box on the upsampled heatmap
-            bbox = find_high_activation_crop(hm_np, percentile=crop_percentile)
-
-            # draw rectangle on overlay
-            overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
-            overlay_box = draw_rect_on_image(overlay, bbox, color=(255, 0, 0), width=3)
-
-            word = model.vocab_words[proto_idx]
-            score = float(top_vals[b, rank].item())
-
-            panel_imgs.append(overlay_box)
-            panel_titles.append(f"top{rank+1}: {word}\n{score:.3f}")
-
-        n_panels = len(panel_imgs)
-        ncols = min(3, n_panels)
-        nrows = int(math.ceil(n_panels / ncols))
-
-        fig, axes = plt.subplots(
-            nrows=nrows,
-            ncols=ncols,
-            figsize=(4 * ncols, 4 * nrows),
-            dpi=120,
+        raise KeyError(
+            "Could not find images in the batch dictionary. "
+            "Expected one of: images, image, pixel_values."
         )
 
-        if not isinstance(axes, np.ndarray):
-            axes = np.array([axes])
-        axes = axes.flatten()
+    if isinstance(batch, (tuple, list)):
+        for value in batch:
+            if (
+                torch.is_tensor(value)
+                and value.ndim == 4
+                and value.shape[1] in (1, 3, 4)
+            ):
+                return value
 
-        for ax, im, title in zip(axes, panel_imgs, panel_titles):
-            ax.imshow(im)
-            ax.set_title(title, fontsize=10)
-            ax.axis("off")
+        raise ValueError(
+            "Could not find a [B, C, H, W] image tensor in the batch."
+        )
 
-        for ax in axes[len(panel_imgs) :]:
-            ax.axis("off")
-
-        suptitle = raw_caption
-        if words:
-            suptitle += f"\nTop words: {', '.join(words)}"
-
-        fig.suptitle(suptitle, fontsize=11)
-        plt.tight_layout(rect=[0, 0, 1, 0.92])
-
-        sample_grids.append(wandb.Image(fig, caption=f"sample={b}"))
-        plt.close(fig)
+    raise TypeError(
+        f"Unsupported batch type: {type(batch)!r}"
+    )
 
 
-        log_dict = {
-            "global_step": step,
-            log_key: sample_grids,
-        }
+def prepare_embeddings(
+    embeddings: torch.Tensor,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Move frozen LLM2Vec embeddings to the PNP device.
 
-        print(f"W&B logging {len(sample_grids)} heatmap image(s) to {log_key} at step={step}")
-        wandb.log(log_dict, step=step)
+    Embeddings remain detached because LLM2Vec is used only as the
+    fixed text-embedding generator.
+    """
+    if not torch.is_tensor(embeddings):
+        embeddings = torch.as_tensor(embeddings)
 
-def _slice_batch_outputs(outputs: dict, batch_idx: int, batch_size: int) -> dict:
-    sliced = {}
+    return embeddings.detach().to(
+        device=device,
+        dtype=dtype,
+        non_blocking=True,
+    )
 
-    for k, v in outputs.items():
-        if torch.is_tensor(v) and v.ndim > 0 and v.shape[0] == batch_size:
-            sliced[k] = v[batch_idx : batch_idx + 1]
-        else:
-            sliced[k] = v
 
-    return sliced
+def flatten_negative_embeddings(
+    embeddings: torch.Tensor,
+    *,
+    batch_size: int,
+) -> tuple[torch.Tensor, int]:
+    """
+    Convert negative embeddings to [B * K, D].
+
+    Supports:
+
+        [B, K, D]
+        [B * K, D]
+        [B, D]
+    """
+    if embeddings.ndim == 3:
+        if embeddings.shape[0] != batch_size:
+            raise ValueError(
+                "Negative embedding batch dimension does not match "
+                f"the image batch: {embeddings.shape[0]} versus "
+                f"{batch_size}"
+            )
+
+        negatives_per_positive = embeddings.shape[1]
+        embeddings = embeddings.reshape(
+            batch_size * negatives_per_positive,
+            embeddings.shape[-1],
+        )
+
+        return embeddings, negatives_per_positive
+
+    if embeddings.ndim == 2:
+        if embeddings.shape[0] % batch_size != 0:
+            raise ValueError(
+                "The number of negative embeddings must be divisible "
+                f"by the image batch size. Received "
+                f"{embeddings.shape[0]} embeddings for batch size "
+                f"{batch_size}."
+            )
+
+        negatives_per_positive = (
+            embeddings.shape[0] // batch_size
+        )
+
+        return embeddings, negatives_per_positive
+
+    raise ValueError(
+        "Negative embeddings must have shape [B, K, D] or "
+        f"[B * K, D], received {tuple(embeddings.shape)}"
+    )
+
+
+def repeat_images_for_negatives(
+    images: torch.Tensor,
+    negatives_per_positive: int,
+) -> torch.Tensor:
+    """
+    Match [B * K, D] negative embeddings with repeated images.
+
+    Ordering is:
+
+        image 0 negative 0
+        image 0 negative 1
+        ...
+        image 1 negative 0
+        image 1 negative 1
+        ...
+    """
+    return images.repeat_interleave(
+        negatives_per_positive,
+        dim=0,
+    )
+
+
+def validate_similarity_map(
+    similarity_map: torch.Tensor,
+    *,
+    batch_size: int,
+    name: str,
+) -> None:
+    if not torch.is_tensor(similarity_map):
+        raise TypeError(
+            f"{name} must be a torch.Tensor, "
+            f"but got {type(similarity_map)!r}"
+        )
+
+    if similarity_map.ndim != 4:
+        raise ValueError(
+            f"{name} must be a 4D similarity map with shape "
+            "[B, 1, H, W], "
+            f"but received shape {tuple(similarity_map.shape)}"
+        )
+
+    if similarity_map.shape[0] != batch_size:
+        raise ValueError(
+            f"{name} batch size mismatch: expected {batch_size}, "
+            f"got {similarity_map.shape[0]}"
+        )
+
+    if similarity_map.shape[1] != 1:
+        raise ValueError(
+            f"{name} channel dimension must be 1, "
+            f"but received {similarity_map.shape[1]}"
+        )
+
+    if similarity_map.shape[2] < 1 or similarity_map.shape[3] < 1:
+        raise ValueError(
+            f"{name} spatial dimensions must be positive, "
+            f"but received {tuple(similarity_map.shape[2:])}"
+        )
+
 
 def train(
-    model,
-    criterion,
-    dataloader,
-    optimizer,
-    logger,
-    device,
-    max_steps,
     *,
-    start_step=0,
-    vocab_to_idx=None,
-):
+    model: PNP,
+    llm2vec: LLM2Vec,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: PNPContrastiveCriterion,
+    device: torch.device,
+    epochs: int,
+    encode_batch_size: int = 32,
+    gradient_clip_norm: float | None = 1.0,
+    use_amp: bool = True,
+    checkpoint_dir: str | Path | None = None,
+    visualize_every_steps: int = 0,
+    visualize_samples: int = 1,
+    visualize_images_per_batch: int = 4,
+) -> None:
     model.train()
 
-    running_losses = defaultdict(float)
-    num_samples = 0
+    amp_enabled = (
+        use_amp
+        and device.type == "cuda"
+    )
 
-    for i, batch in enumerate(tqdm(dataloader)):
-        if i >= 10:
-            break
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=amp_enabled,
+    )
 
-        images, captions, target_dist, indices = batch
+    checkpoint_path = (
+        Path(checkpoint_dir)
+        if checkpoint_dir is not None
+        else None
+    )
 
-        bs = images.size(0)
-        num_samples += bs
-
-        images = images.to(device, non_blocking=True)
-        target_dist = target_dist.to(device, non_blocking=True)
-
-        words_sim_distribution = target_dist.clamp_min(1e-8)
-
-        if i % 200 == 0:
-            b = 0
-
-            raw_dist = target_dist[b]
-            dist = words_sim_distribution[b]
-
-            topk_vals, topk_idx = raw_dist.topk(10)
-
-            print("\nAll captions:")
-            for c in captions[b]:
-                print(" ", c)
-
-            print("\nDistribution stats:")
-            print(f"  shape:          {tuple(raw_dist.shape)}")
-            print(f"  raw sum:        {raw_dist.sum().item():.7f}")
-            print(f"  raw min:        {raw_dist.min().item():.7f}")
-            print(f"  raw max:        {raw_dist.max().item():.7f}")
-            print(f"  raw mean:       {raw_dist.mean().item():.7f}")
-            print(f"  raw nonzero:    {(raw_dist > 0).sum().item()} / {raw_dist.numel()}")
-            print(f"  clamped min:    {dist.min().item():.7f}")
-
-            print("\nTop-10 words:")
-            for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
-                word = model.vocab_words[idx]
-                print(f"  {idx:6d}  {word:20s}  {val:.7f}")
-
-            print("\nFull nonzero raw distribution:")
-            for idx, val in enumerate(raw_dist.tolist()):
-                if val > 0:
-                    word = model.vocab_words[idx]
-                    print(f"  {idx:6d}  {word:20s}  {val:.7f}")
-
-        outputs = model(images)
-
-        loss_dict = criterion(
-            outputs,
-            (images, words_sim_distribution, indices, captions),
-            model,
+    if checkpoint_path is not None:
+        checkpoint_path.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
-        loss = sum(v for k, v in loss_dict.items() if not k.startswith("_"))
+    global_step = 0
 
-        if not isinstance(loss, torch.Tensor):
-            raise ValueError("Loss is not a tensor")
-
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-
-        global_step = start_step + i
-
-        log_dict = {
-            "global_step": global_step,
-            "train/total_loss": loss.item(),
-        }
-
-        for k, v in loss_dict.items():
-            running_losses[k] += v.item() * bs
-            log_dict[f"train/{k}"] = v.item()
-
-        wandb.log(log_dict, step=global_step)
-
-    for k, v in running_losses.items():
-        loss_avg = v / max(1, num_samples)
-        logger.info(f"TRAIN {k}: {loss_avg:.4f}")
-
-@torch.inference_mode()
-def test(
-    model,
-    criterion,
-    dataloader,
-    logger,
-    device,
-    *,
-    global_step: int,
-    log_every: int = 50,
-):
-    model.eval()
-
-    running_losses = defaultdict(float)
-    num_samples = 0
-
-    print("\nSTARTING EVALUATION\n")
-
-    for i, batch in enumerate(tqdm(dataloader)):
-        images, captions, target_dist, indices = batch
-
-        images = images.to(device, non_blocking=True)
-        target_dist = target_dist.to(device, non_blocking=True)
-
-        words_sim_distribution = target_dist.clamp_min(1e-8)
-
-        outputs = model(images)
-
-        print("--!!! ", i)
-
-        loss_dict = criterion(
-            outputs,
-            (images, words_sim_distribution, indices, captions),
-            model,
+    for epoch in range(epochs):
+        progress = tqdm(
+            dataloader,
+            desc=f"Epoch {epoch + 1}/{epochs}",
         )
 
-        bs = images.size(0)
-        num_samples += bs
+        running_loss = 0.0
 
-        for k, v in loss_dict.items():
-            running_losses[k] += v.item() * bs
+        for batch_index, batch in enumerate(progress):
+            images = get_images(batch).to(
+                device=device,
+                non_blocking=True,
+            )
 
-        eval_step = global_step + i
+            batch_size = images.shape[0]
 
-        should_log_images = i == 0 or (log_every is not None and log_every > 0 and i % log_every == 0)
+            # LLM2Vec is a frozen embedding generator. This operation is
+            # outside autocast because the encoder may manage its own dtype.
+            with torch.no_grad():
+                pair_embeddings = encode_pair_strings(
+                    llm2vec=llm2vec,
+                    batch=batch,
+                    encode_batch_size=encode_batch_size,
+                )
 
-        print("!!! ", i, should_log_images)
+            positive_anchor_embeddings = prepare_embeddings(
+                pair_embeddings["positive_anchor_embeddings"],
+                device=device,
+                dtype=images.dtype,
+            )
+            positive_text_embeddings = prepare_embeddings(
+                pair_embeddings["positive_text_embeddings"],
+                device=device,
+                dtype=images.dtype,
+            )
+            negative_anchor_embeddings = prepare_embeddings(
+                pair_embeddings["negative_anchor_embeddings"],
+                device=device,
+                dtype=images.dtype,
+            )
+            negative_text_embeddings = prepare_embeddings(
+                pair_embeddings["negative_text_embeddings"],
+                device=device,
+                dtype=images.dtype,
+            )
 
-        if should_log_images:
-            b = random.randrange(bs)
+            if positive_anchor_embeddings.ndim != 2:
+                raise ValueError(
+                    "positive_anchor_embeddings must have shape "
+                    f"[B, D], received "
+                    f"{tuple(positive_anchor_embeddings.shape)}"
+                )
 
-            log_dict = {
-                "global_step": eval_step,
-                "eval/batch_idx": i,
-                "eval/sample_idx": b,
+            if positive_text_embeddings.ndim != 2:
+                raise ValueError(
+                    "positive_text_embeddings must have shape "
+                    f"[B, D], received "
+                    f"{tuple(positive_text_embeddings.shape)}"
+                )
+
+            if positive_anchor_embeddings.shape[0] != batch_size:
+                raise ValueError(
+                    "Positive anchor embedding count does not match "
+                    f"the image batch: "
+                    f"{positive_anchor_embeddings.shape[0]} versus "
+                    f"{batch_size}"
+                )
+
+            if positive_text_embeddings.shape[0] != batch_size:
+                raise ValueError(
+                    "Positive text embedding count does not match "
+                    f"the image batch: "
+                    f"{positive_text_embeddings.shape[0]} versus "
+                    f"{batch_size}"
+                )
+
+            negative_anchor_embeddings, anchor_negative_count = (
+                flatten_negative_embeddings(
+                    negative_anchor_embeddings,
+                    batch_size=batch_size,
+                )
+            )
+
+            negative_text_embeddings, text_negative_count = (
+                flatten_negative_embeddings(
+                    negative_text_embeddings,
+                    batch_size=batch_size,
+                )
+            )
+
+            if anchor_negative_count != text_negative_count:
+                raise ValueError(
+                    "Negative anchor and text counts differ: "
+                    f"{anchor_negative_count} versus "
+                    f"{text_negative_count}"
+                )
+
+            negatives_per_positive = anchor_negative_count
+
+            negative_images = repeat_images_for_negatives(
+                images,
+                negatives_per_positive,
+            )
+
+            optimizer.zero_grad(set_to_none=True)
+
+            autocast_context = (
+                torch.autocast(
+                    device_type="cuda",
+                    dtype=torch.float16,
+                )
+                if amp_enabled
+                else nullcontext()
+            )
+
+            with autocast_context:
+                # Positive maps: [B, 1, H, W]
+                positive_anchor_maps = model(
+                    images,
+                    positive_anchor_embeddings,
+                )
+                positive_text_maps = model(
+                    images,
+                    positive_text_embeddings,
+                )
+
+                # Negative maps: [B * K, 1, H, W]
+                negative_anchor_maps = model(
+                    negative_images,
+                    negative_anchor_embeddings,
+                )
+                negative_text_maps = model(
+                    negative_images,
+                    negative_text_embeddings,
+                )
+
+                loss_dict = criterion(
+                    positive_anchor_maps=positive_anchor_maps,
+                    positive_text_maps=positive_text_maps,
+                    negative_anchor_maps=negative_anchor_maps,
+                    negative_text_maps=negative_text_maps,
+                    batch_size=batch_size,
+                    negatives_per_positive=negatives_per_positive,
+                )
+
+                total_loss = sum(
+                    value
+                    for name, value in loss_dict.items()
+                    if name.startswith("l_")
+                )
+
+            if not torch.isfinite(total_loss):
+                raise FloatingPointError(
+                    "Non-finite loss encountered at "
+                    f"epoch={epoch}, batch={batch_index}: "
+                    f"{total_loss.detach().item()}"
+                )
+
+            scaler.scale(total_loss).backward()
+
+            if gradient_clip_norm is not None:
+                scaler.unscale_(optimizer)
+
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=gradient_clip_norm,
+                )
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            global_step += 1
+            running_loss += total_loss.detach().item()
+
+            average_loss = running_loss / (
+                batch_index + 1
+            )
+
+            progress.set_postfix(
+                loss=f"{total_loss.detach().item():.4f}",
+                average=f"{average_loss:.4f}",
+                positive=(
+                    f"{loss_dict['positive_similarity'].item():.3f}"
+                ),
+                negative=(
+                    f"{loss_dict['hardest_negative_similarity'].item():.3f}"
+                ),
+            )
+            wandb_metrics = {
+                "train/loss": total_loss.detach().item(),
+                "train/loss_avg": average_loss,
+                "train/epoch": epoch + 1,
             }
+            for name, value in loss_dict.items():
+                if torch.is_tensor(value) and value.numel() == 1:
+                    wandb_metrics[f"train/{name}"] = value.detach().item()
 
-            if "mixture_weights" in outputs:
-                topk_vals, topk_idx = outputs["mixture_weights"].topk(k=7, dim=-1)
-                words = [model.vocab_words[j] for j in topk_idx[b].tolist()]
-                log_dict["eval/top_words"] = ", ".join(words)
+            if wandb.run is not None:
+                wandb.log(wandb_metrics, step=global_step)
 
-            for k, v in loss_dict.items():
-                log_dict[f"eval/{k}"] = v.item()
+            if (
+                visualize_every_steps > 0
+                and global_step % visualize_every_steps == 0
+            ):
+                visualize_heatmaps(
+                    model=model,
+                    llm2vec=llm2vec,
+                    dataloader=dataloader,
+                    device=device,
+                    encode_batch_size=encode_batch_size,
+                    num_samples=visualize_samples,
+                    images_per_batch=visualize_images_per_batch,
+                    global_step=global_step,
+                )
 
-            print("LOGGING IMAGE TO WANDB")
-            print("outputs keys:", outputs.keys())
-            print("patch logits shape:", outputs["patch_prototype_logits"].shape)
-            print("image shape:", images[b : b + 1].shape)
-            print("eval_step:", eval_step)
-
-            sample_outputs = _slice_batch_outputs(
-                outputs=outputs,
-                batch_idx=b,
-                batch_size=bs,
+        if checkpoint_path is not None:
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scaler": scaler.state_dict(),
+                },
+                checkpoint_path
+                / f"pnp_epoch_{epoch + 1:03d}.pt",
             )
 
-            wandb_log_top_proto_heatmaps(
-                model=model,
-                images=images[b : b + 1],
-                outputs=sample_outputs,
-                step=eval_step,
-                captions=[captions[b]],
-                log_key="eval/top_proto_heatmaps",
-                log_tsne=False,
-            )
-
-            wandb.log(log_dict, step=eval_step)
-
-    avg_losses = {}
-
-    for k, v in running_losses.items():
-        avg_losses[k] = v / max(1, num_samples)
-        logger.info(f"TEST {k}: {avg_losses[k]:.4f}")
-
-    avg_losses["total_loss"] = sum(
-        v for k, v in avg_losses.items() if not k.startswith("_")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train dictionary-free PNP on Visual Genome."
     )
-
-    wandb.log(
-        {
-            "global_step": global_step,
-            **{f"test/{k}": v for k, v in avg_losses.items()},
-        },
-        step=global_step,
-    )
-
-    return avg_losses
-
-def build_backbone(args):
-    if "dinov2" in args.backbone:
-        if args.num_splits and args.num_splits > 0:
-            backbone = DINOv2BackboneExpanded(
-                name=args.backbone,
-                n_splits=args.num_splits,
-                mode="append",
-                freeze_norm_layer=True,
-            )
-        else:
-            backbone = DINOv2Backbone(name=args.backbone)
-
-        dim = backbone.dim
-
-    elif "dino" in args.backbone:
-        backbone = DINOBackboneExpanded(
-            name=args.backbone,
-            n_splits=args.num_splits,
-            mode="block_expansion",
-            freeze_norm_layer=True,
-        )
-        dim = backbone.dim
-    elif "clip" in args.backbone:
-        backbone = CLIPBackbone(name=args.backbone)
-        dim = backbone.dim
-    else:
-        raise NotImplementedError(f"Backbone {args.backbone} not implemented.")
-
-    # ---------------------------------------------------
-    # Freeze everything first
-    # ---------------------------------------------------
-    # for p in backbone.parameters():
-    #    p.requires_grad = False
-
-    return backbone, dim
-
-
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--log-dir", type=str, required=True)
-    parser.add_argument("--seed", type=int, default=42)
-
+    parser.add_argument("--backbone", default="dinov2_vitb14")
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default="coco_clip",
-        choices=["coco_clip", "cub_clip"],
+        "--backbone-module",
+        default="modeling.backbones",
+        help="Python module containing the backbone classes.",
     )
-    parser.add_argument(
-        "--coco-root", type=str, default="/data/pwojcik/UnGuide/coco30_bck/"
-    )
-    parser.add_argument("--coco-val-ratio", type=float, default=0.1)
-    parser.add_argument("--coco-clip-model-name", type=str, default="ViT-B-32")
-    parser.add_argument("--coco-clip-pretrained", type=str, default="openai")
-    parser.add_argument("--visual-coef", type=float, default=0.0)
-    parser.add_argument("--cover-coef", type=float, default=0.0)
-
-    parser.add_argument(
-        "--backbone",
-        type=str,
-        default="dinov2_vitb14",
-        choices=["dinov2_vitb14", "dinov2_vits14", "clip_vitb32", "dino_vitb16"],
-    )
-    parser.add_argument("--clip-model-name", type=str, default="ViT-L-14")
-    parser.add_argument("--clip-pretrained", type=str, default="openai")
-    parser.add_argument("--clip-patch-size", type=int, default=16)
-    parser.add_argument("--freeze-backbone", action="store_true", default=False)
-    parser.add_argument("--num-splits", type=int, default=1)
-    parser.add_argument(
-        "--unfreeze-last-blocks",
-        type=int,
-        default=0,
-        help="Number of last transformer blocks to unfreeze in the backbone",
-    )
-
-    parser.add_argument(
-        "--vocab-cache-path", type=str, default="vocab/mscoco_new_cache.pt"
-    )
-    parser.add_argument("--clip-text-dim", type=int, default=512)
-    parser.add_argument("--kl-coef", type=float, default=1.0)
-    parser.add_argument("--text-proj-hidden-dim", type=int, default=768)
-    parser.add_argument("--prototype-init-noise", type=float, default=0.01)
-    parser.add_argument("--eval-every-steps", type=int, default=1000)
-    parser.add_argument("--temperature", type=float, default=0.2)
-
+    parser.add_argument("--num-splits", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--bin-coef", type=float, default=0.1)
-    parser.add_argument("--backbone-lr", type=float, default=1.0e-5)
-    parser.add_argument("--text-proj-lr", type=float, default=1.0e-4)
-    parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--negatives-per-positive", type=int, default=4)
+    parser.add_argument("--encode-batch-size", type=int, default=32)
+    parser.add_argument("--text-dim", type=int, default=4096)
+    parser.add_argument("--log-dir", default="wandb")
+    parser.add_argument(
+        "--checkpoint-dir",
+        default="checkpoints/pnp_visual_genome",
+    )
+    parser.add_argument("--visualize-samples", type=int, default=1)
+    parser.add_argument(
+        "--visualize-every-steps",
+        type=int,
+        default=100,
+        help="Log heatmaps every N optimiser steps; set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--visualize-images-per-batch",
+        type=int,
+        default=4,
+    )
+    return parser.parse_args()
 
-    parser.add_argument("--cosine-coef", type=float, default=1.0)
-    parser.add_argument("--entropy-coef", type=float, default=0.0)
-    parser.add_argument("--max-steps", type=int, default=1000)
 
-    args = parser.parse_args()
+def build_backbone(args: argparse.Namespace):
+    try:
+        module = importlib.import_module(args.backbone_module)
+    except ImportError as exc:
+        raise ImportError(
+            f"Could not import backbone module {args.backbone_module!r}. "
+            "Pass --backbone-module with the module used by your project."
+        ) from exc
+
+    if "dinov2" in args.backbone:
+        if args.num_splits > 0:
+            cls_name = "DINOv2BackboneExpanded"
+            kwargs = {
+                "name": args.backbone,
+                "n_splits": args.num_splits,
+                "mode": "append",
+                "freeze_norm_layer": True,
+            }
+        else:
+            cls_name = "DINOv2Backbone"
+            kwargs = {"name": args.backbone}
+    elif "dino" in args.backbone:
+        cls_name = "DINOBackboneExpanded"
+        kwargs = {
+            "name": args.backbone,
+            "n_splits": args.num_splits,
+            "mode": "block_expansion",
+            "freeze_norm_layer": True,
+        }
+    elif "clip" in args.backbone:
+        cls_name = "CLIPBackbone"
+        kwargs = {"name": args.backbone}
+    else:
+        raise NotImplementedError(
+            f"Backbone {args.backbone!r} is not supported."
+        )
+
+    if not hasattr(module, cls_name):
+        raise ImportError(
+            f"{cls_name} was not found in {args.backbone_module!r}."
+        )
+
+    backbone = getattr(module, cls_name)(**kwargs)
+    if not hasattr(backbone, "dim"):
+        raise AttributeError(
+            f"{cls_name} must expose a 'dim' attribute."
+        )
+    return backbone, backbone.dim
+
+def main() -> None:
+    args = parse_args()
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
 
     wandb.init(
         entity=os.environ.get("WANDB_ENTITY"),
@@ -529,249 +572,295 @@ def main():
         dir=args.log_dir,
     )
 
-    wandb.define_metric("global_step")
-    wandb.define_metric("train/*", step_metric="global_step")
-    wandb.define_metric("test/*", step_metric="global_step")
-    wandb.define_metric("eval/*", step_metric="global_step")
-
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[%(asctime)s][%(name)s][%(levelname)s] - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.FileHandler((log_dir / "train.log").as_posix()),
-            logging.StreamHandler(sys.stdout),
-        ],
-        force=True,
-    )
-    logger = logging.getLogger(__name__)
-
-    L.seed_everything(args.seed)
-
-    logger.info("Train on COCO CLIP dataset")
-
-    cache = torch.load(args.vocab_cache_path, map_location="cpu")
-    vocab_words = list(cache.keys())
-    vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
-
-    print("Building datasets")
-
-    from glob import glob
-
-    shards = sorted(glob("/net/tscratch/people/plgpiotrwojcik/vg_coco/train/shard-*.tar"))
-
-    nltk.download("punkt", quiet=True)
-    nltk.download("averaged_perceptron_tagger", quiet=True)
-    nltk.download("wordnet", quiet=True)
-    nltk.download("omw-1.4", quiet=True)
-
-    # -------------------------
-    # Build datasets
-    # -------------------------
-    shards = sorted(glob("/net/tscratch/people/plgpiotrwojcik/vg_coco/train/shard-*.tar"))
-    if len(shards) == 0:
-        raise RuntimeError("No train shards found!")
-    dataset_train = build_webdataset(
-        shards=shards,
-        vocab_to_idx=vocab_to_idx,
-        train=True,
-        shardshuffle=True,
-        sample_shuffle=1000,
-    ).with_epoch(args.eval_every_steps * args.batch_size)
-
-    dataset_test = CocoCLIPDataset(
-        annotations_json="/net/tscratch/people/plgpiotrwojcik/coco_2014/annotations/captions_val2014.json",
-        coco_root="/net/tscratch/people/plgpiotrwojcik/coco_2014/val2014",
-        vocab_to_idx=vocab_to_idx,
-        train=False,
+    dataset = VisualGenomeSceneGraphDataset(
+        root=DEFAULT_VG_ROOT,
     )
 
-    print("Done with datasets")
-    print("Train shards:", len(shards))
-    print("Test:", len(dataset_test))
-
-    # -------------------------
-    # Build dataloaders
-    # -------------------------
-    dataloader_train = DataLoader(
-        dataset_train,
+    dataloader = DataLoader(
+        dataset,
         batch_size=args.batch_size,
+        shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_batch,
-        pin_memory=True,
-        persistent_workers=(args.num_workers > 0),
-        prefetch_factor=2 if args.num_workers > 0 else None,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+        collate_fn=partial(
+            scene_graph_collate_fn,
+            negatives_per_positive=args.negatives_per_positive,
+        ),
+        drop_last=True,
     )
 
-    dataloader_test = DataLoader(
-        dataset_test,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        collate_fn=coco_clip_collate_fn,
-        shuffle=False,
-        pin_memory=True,
+    llm2vec = load_llm2vec(
+        cache_dir=(
+            "/net/tscratch/people/"
+            "plgpiotrwojcik/model_cache"
+        )
     )
+
+    # The LLM2Vec encoder supplies fixed target embeddings. Only PNP is
+    # optimised by this training loop.
+    if hasattr(llm2vec, "model"):
+        llm2vec.model.eval()
+
+        for parameter in llm2vec.model.parameters():
+            parameter.requires_grad = False
+
 
     backbone, dim = build_backbone(args)
 
-    clip_model, _, _ = open_clip.create_model_and_transforms(
-        args.coco_clip_model_name,
-        pretrained=args.coco_clip_pretrained,
-    )
-    clip_model = clip_model.eval().to(device)
-
-    for p in clip_model.parameters():
-        p.requires_grad = False
-
-    net = PNP(
+    # Replace these values with the actual model construction used by
+    # your project.
+    model = PNP(
         backbone=backbone,
-        dim=dim,
-        temperature=args.temperature,
-        clip_text_dim=args.clip_text_dim,
-        text_proj_hidden_dim=args.text_proj_hidden_dim,
-        vocab_cache_path=args.vocab_cache_path,
-        prototype_init_noise=args.prototype_init_noise,
-        clip_model=clip_model,  # ← added
-    )
-    # freeze backbone first
-    # for p in net.backbone.parameters():
-    #    p.requires_grad = False
+        visual_dim=backbone.dim,
+        text_dim=args.text_dim,
+        projection_hidden_dim=1024,
+        temperature=0.2,
+    ).to(device)
 
-    bb = net.backbone
-    print("Backbone class:", type(bb))
-
-    if args.unfreeze_last_blocks > 0:
-        print("Backbone child modules:", list(bb._modules.keys()))
-
-        blocks = None
-
-        # common cases
-        if hasattr(bb, "model") and hasattr(bb.model, "blocks"):
-            blocks = bb.model.blocks
-        elif hasattr(bb, "blocks"):
-            blocks = bb.blocks
-        else:
-            # search one level deeper
-            for child_name, child in bb.named_children():
-                print(f"Inspect child: {child_name} -> {type(child)}")
-                if hasattr(child, "blocks"):
-                    blocks = child.blocks
-                    print(f"Found transformer blocks in bb.{child_name}.blocks")
-                    break
-                if hasattr(child, "model") and hasattr(child.model, "blocks"):
-                    blocks = child.model.blocks
-                    print(f"Found transformer blocks in bb.{child_name}.model.blocks")
-                    break
-
-        if blocks is None:
-            print("All backbone parameter names:")
-            for name, _ in bb.named_parameters():
-                print(name)
-            raise AttributeError("Could not find transformer blocks in net.backbone")
-
-        # n_blocks = len(blocks)
-        # start = max(0, n_blocks - args.unfreeze_last_blocks)
-
-        # for block in blocks[start:]:
-        #    for p in block.parameters():
-        #        p.requires_grad = True
-
-        # print(f"Unfroze last {args.unfreeze_last_blocks} transformer blocks")
-
-        for name, p in bb.named_parameters():
-            if p.requires_grad:
-                print("TRAINABLE BACKBONE:", name)
-
-    criterion = PNPCriterion(
-        kl_coef=args.kl_coef,
-        entropy_coef=args.entropy_coef,
-        visual_coef=args.visual_coef,
-        bin_coef=args.bin_coef,
-        cover_coef=args.cover_coef,
-        temperature=args.temperature,
+    criterion = PNPContrastiveCriterion(
+        infonce_coef=1.0,
+        ranking_coef=1.0,
+        consistency_coef=0.25,
+        entropy_coef=0.01,
+        temperature=0.07,
+        margin=0.2,
     )
 
-    net.to(device)
-
-    param_groups = [
-        {"params": net.text_projection_head.parameters(), "lr": args.text_proj_lr},
-    ]
-    # add backbone as separate group
-    backbone_params = [p for p in net.backbone.parameters() if p.requires_grad]
-    if backbone_params:
-        param_groups.append(
+    optimizer = AdamW(
+        [
             {
-                "params": backbone_params,
-                "lr": args.backbone_lr,
-            }
-        )
-
-    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
-
-    print_parameters(net=net, logger=logger)
-
-    cache = torch.load(args.vocab_cache_path, map_location="cpu")
-    vocab_words = list(cache.keys())
-    vocab_to_idx = {w: i for i, w in enumerate(vocab_words)}
-    noun_embeddings = torch.stack([cache[w] for w in vocab_words], dim=0)
-    noun_embeddings = F.normalize(noun_embeddings, dim=-1).to(device)
-
-    global_step = 0
-    best_test_loss = float("inf")
-
-    while global_step < args.max_steps:
-        steps_this_epoch = min(args.eval_every_steps, args.max_steps - global_step)
-
-        train(
-            model=net,
-            criterion=criterion,
-            dataloader=dataloader_train,
-            optimizer=optimizer,
-            logger=logger,
-            device=device,
-            max_steps=steps_this_epoch,
-            start_step=global_step,
-            vocab_to_idx=vocab_to_idx,
-        )
-
-        global_step += steps_this_epoch
-
-        test_metrics = test(
-            model=net,
-            criterion=criterion,
-            dataloader=dataloader_test,
-            logger=logger,
-            device=device,
-            global_step=global_step,
-        )
-
-        torch.save(
-            {
-                "state_dict": {
-                    k: v.detach().cpu() for k, v in net.state_dict().items()
-                },
-                "hparams": vars(args),
+                "params": model.text_projection_head.parameters(),
+                "lr": 1e-4,
             },
-            log_dir / "ckpt.pth",
+            {
+                "params": [
+                    parameter
+                    for parameter in model.backbone.parameters()
+                    if parameter.requires_grad
+                ],
+                "lr": 1e-5,
+            },
+        ],
+        weight_decay=1e-4,
+    )
+
+    train(
+        model=model,
+        llm2vec=llm2vec,
+        dataloader=dataloader,
+        optimizer=optimizer,
+        criterion=criterion,
+        device=device,
+        epochs=args.epochs,
+        encode_batch_size=args.encode_batch_size,
+        gradient_clip_norm=1.0,
+        use_amp=True,
+        checkpoint_dir=args.checkpoint_dir,
+        visualize_every_steps=args.visualize_every_steps,
+        visualize_samples=args.visualize_samples,
+        visualize_images_per_batch=args.visualize_images_per_batch,
+    )
+
+    if wandb.run is not None:
+        wandb.finish()
+
+
+def _description_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, dict):
+        for key in ("description", "text", "caption", "sentence"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+
+    if isinstance(value, (list, tuple)) and value:
+        return _description_to_text(random.choice(value))
+
+    raise ValueError(
+        f"Unsupported or empty description value: {type(value)!r}"
+    )
+
+
+def _encode_descriptions(
+    *,
+    llm2vec: LLM2Vec,
+    descriptions: list[str],
+    encode_batch_size: int,
+) -> torch.Tensor:
+    inputs = [["", description] for description in descriptions]
+    chunks: list[torch.Tensor] = []
+
+    for start in range(0, len(inputs), encode_batch_size):
+        encoded = llm2vec.encode(
+            inputs[start : start + encode_batch_size]
+        )
+        if not torch.is_tensor(encoded):
+            encoded = torch.as_tensor(encoded)
+        chunks.append(encoded)
+
+    if not chunks:
+        raise ValueError("No descriptions were available to encode.")
+
+    return torch.cat(chunks, dim=0)
+
+
+def visualize_heatmaps(
+    *,
+    model: PNP,
+    llm2vec: LLM2Vec,
+    dataloader: DataLoader,
+    device: torch.device,
+    encode_batch_size: int = 32,
+    num_samples: int = 1,
+    images_per_batch: int = 4,
+    global_step: int | None = None,
+) -> None:
+    """Encode descriptions, generate PNP heatmaps, and log them to W&B."""
+    import matplotlib.pyplot as plt
+
+    if wandb.run is None:
+        raise RuntimeError(
+            "visualize_heatmaps requires an active wandb run."
         )
 
-        logger.info(f"Checkpoint saved at step {global_step}")
+    was_training = model.training
+    model.eval()
+    iterator = iter(dataloader)
 
-        if test_metrics["total_loss"] < best_test_loss:
-            best_test_loss = test_metrics["total_loss"]
-            torch.save(
-                {
-                    "state_dict": {
-                        k: v.detach().cpu() for k, v in net.state_dict().items()
+    try:
+        with torch.no_grad():
+            for sample_idx in range(num_samples):
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    iterator = iter(dataloader)
+                    batch = next(iterator)
+
+                if not isinstance(batch, dict) or "descriptions" not in batch:
+                    raise KeyError(
+                        "scene_graph_collate_fn must return a dictionary "
+                        "containing a 'descriptions' entry."
+                    )
+
+                images = get_images(batch).to(
+                    device=device,
+                    non_blocking=True,
+                )
+                descriptions = [
+                    _description_to_text(value)
+                    for value in batch["descriptions"]
+                ]
+
+                if len(descriptions) != images.shape[0]:
+                    raise ValueError(
+                        "Description count does not match image batch size: "
+                        f"{len(descriptions)} versus {images.shape[0]}."
+                    )
+
+                text_embeddings = _encode_descriptions(
+                    llm2vec=llm2vec,
+                    descriptions=descriptions,
+                    encode_batch_size=encode_batch_size,
+                )
+                text_embeddings = F.normalize(
+                    text_embeddings.float(),
+                    dim=-1,
+                )
+                text_embeddings = prepare_embeddings(
+                    text_embeddings,
+                    device=device,
+                    dtype=images.dtype,
+                )
+
+                autocast_context = (
+                    torch.autocast(
+                        device_type="cuda",
+                        dtype=torch.float16,
+                    )
+                    if device.type == "cuda"
+                    else nullcontext()
+                )
+                with autocast_context:
+                    feature_maps = model(images, text_embeddings)
+
+                logged_images = []
+                count = min(images.shape[0], images_per_batch)
+
+                for img_idx in range(count):
+                    img = images[img_idx].detach().float().cpu()
+                    heatmap = feature_maps[
+                        img_idx, 0
+                    ].detach().float().cpu()
+
+                    img = (img - img.min()) / (
+                        img.max() - img.min() + 1e-8
+                    )
+                    heatmap = F.interpolate(
+                        heatmap[None, None],
+                        size=img.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )[0, 0]
+                    heatmap = (heatmap - heatmap.min()) / (
+                        heatmap.max() - heatmap.min() + 1e-8
+                    )
+
+                    display_image = (
+                        img.permute(1, 2, 0)
+                        if img.shape[0] == 3
+                        else img.squeeze()
+                    )
+
+                    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+                    axes[0].imshow(
+                        display_image,
+                        cmap=None if img.shape[0] == 3 else "gray",
+                    )
+                    axes[0].set_title("Original image")
+                    axes[0].axis("off")
+
+                    axes[1].imshow(
+                        display_image,
+                        cmap=None if img.shape[0] == 3 else "gray",
+                    )
+                    axes[1].imshow(heatmap, cmap="jet", alpha=0.5)
+                    axes[1].set_title(
+                        descriptions[img_idx],
+                        wrap=True,
+                    )
+                    axes[1].axis("off")
+                    fig.tight_layout()
+
+                    logged_images.append(
+                        wandb.Image(
+                            fig,
+                            caption=descriptions[img_idx],
+                        )
+                    )
+                    plt.close(fig)
+
+                log_kwargs = {}
+                if global_step is not None:
+                    log_kwargs["step"] = global_step
+                    log_kwargs["commit"] = sample_idx == num_samples - 1
+
+                wandb.log(
+                    {
+                        f"heatmaps/sample_{sample_idx}": logged_images,
+                        "heatmaps/global_step": (
+                            global_step
+                            if global_step is not None
+                            else sample_idx
+                        ),
                     },
-                    "hparams": vars(args),
-                },
-                log_dir / "best_ckpt.pth",
-            )
-            logger.info(f"Best checkpoint saved at step {global_step}")
+                    **log_kwargs,
+                )
+    finally:
+        model.train(was_training)
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 from math import isqrt
-from typing import Optional
+from typing import Optional, Any
 
 import torch
 import torch.nn.functional as F
@@ -8,38 +8,50 @@ from torch import nn
 
 class ProjectionHead(nn.Module):
     """
-    Project a word embedding into the visual feature space.
+    Project a 4096-dimensional LLM2Vec/LLaMA-3-8B embedding into the
+    visual feature space.
 
-    LayerNorm is used instead of BatchNorm so the module also works reliably
-    with a batch size of one.
+    LayerNorm is used instead of BatchNorm so the module works reliably
+    with small batches, including a batch size of one.
     """
 
     def __init__(
         self,
-        input_dim: int = 512,
+        input_dim: int = 4096,
         hidden_dim: int = 1024,
         output_dim: int = 768,
         normalize_output: bool = True,
+        dropout: float = 0.1,
     ) -> None:
         super().__init__()
 
+        self.input_dim = input_dim
+        self.output_dim = output_dim
         self.normalize_output = normalize_output
 
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: [..., input_dim]
+            x:
+                LLM2Vec embeddings with shape [..., 4096].
 
         Returns:
-            Projected tensor with shape [..., output_dim].
+            Projected embeddings with shape [..., output_dim].
         """
+        if x.shape[-1] != self.input_dim:
+            raise ValueError(
+                f"Expected input dimension {self.input_dim}, "
+                f"but received tensor with shape {tuple(x.shape)}."
+            )
+
         x = self.net(x)
 
         if self.normalize_output:
@@ -345,124 +357,205 @@ class PNP(nn.Module):
         return similarity_map
 
 
-class PNPCriterion(nn.Module):
+class PCPCriterion(nn.Module):
     """
-    Matches predicted noun distribution to the target noun distribution from the dataset.
-    Also optionally regularizes prototypes to stay visually aligned with image patches.
+    Contrastive criterion for positive and negative PNP pairs.
+
+    Expected outputs:
+        positive_anchor_embeddings: [B, D]
+        positive_text_embeddings:   [B, D]
+        negative_anchor_embeddings: [B, D]
+        negative_text_embeddings:   [B, D]
+
+    The loss contains:
+
+    1. Symmetric InfoNCE over positive anchor-text pairs.
+    2. Binary contrastive supervision:
+       - positive pair similarities should be high;
+       - negative pair similarities should be low.
+    3. Optional margin ranking:
+       positive similarity should exceed negative similarity by `margin`.
+
+    All embeddings are L2-normalized inside the criterion.
     """
+
     def __init__(
         self,
-        kl_coef: float = 1.0,
-        bin_coef: float = 0.1,
-        entropy_coef: float = 0.0,
-        visual_coef: float = 0.0,
-        cover_coef: float = 0.0,
+        infonce_coef: float = 1.0,
+        binary_coef: float = 1.0,
+        ranking_coef: float = 1.0,
         temperature: float = 0.07,
+        margin: float = 0.2,
     ) -> None:
         super().__init__()
-        self.kl_coef = kl_coef
-        self.bin_coef = bin_coef
-        self.entropy_coef = entropy_coef
-        self.visual_coef = visual_coef
-        self.cover_coef = cover_coef
+
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than zero.")
+
+        if margin < 0:
+            raise ValueError("margin must be non-negative.")
+
+        self.infonce_coef = infonce_coef
+        self.binary_coef = binary_coef
+        self.ranking_coef = ranking_coef
         self.temperature = temperature
+        self.margin = margin
 
-    def forward(self, outputs: dict[str, torch.Tensor], batch: tuple[torch.Tensor, ...], model):
-        vocab_logits = outputs["vocab_logits"]              # [B, V]
-        mixture_weights = outputs["mixture_weights"]        # [B, V]
-        patch_logits = outputs["patch_prototype_logits"]
-        target_dist = batch[1]
-        captions = batch[-1]
+    @staticmethod
+    def _normalize_embeddings(
+        embeddings: torch.Tensor,
+        name: str,
+    ) -> torch.Tensor:
+        if embeddings.ndim != 2:
+            raise ValueError(
+                f"{name} must have shape [B, D], "
+                f"but received {tuple(embeddings.shape)}."
+            )
 
-        loss_dict = {}
+        return F.normalize(embeddings.float(), dim=-1)
 
-        # 1) distribution matching: target noun distribution vs predicted noun distribution
-        target_dist = target_dist / (target_dist.sum(dim=-1, keepdim=True) + 1e-8)
-        pred_log_probs = F.log_softmax(vocab_logits / self.temperature, dim=-1)
+    def forward(
+        self,
+        outputs: dict[str, torch.Tensor],
+        batch: tuple[torch.Tensor, ...] | dict[str, Any] | None = None,
+        model: nn.Module | None = None,
+    ) -> dict[str, torch.Tensor]:
+        del batch, model
 
-        # b = 0
-        #
-        # target = target_dist[b]
-        # pred = pred_log_probs[b].exp()  # convert log-prob → prob
-        #
-        # # top tokens in target distribution
-        # topk_vals, topk_idx = target.topk(10)
-        #
-        # print("\n========== SAMPLE DEBUG ==========")
-        #
-        # print("\nAll captions:")
-        # for c in captions[b]:
-        #     print(" ", c)
-        #
-        # print("\nTop target tokens vs prediction:")
-        # print(f"{'token':15s} {'target':>10s} {'pred':>10s} {'diff':>10s}")
-        #
-        # for idx in topk_idx.tolist():
-        #     token = model.vocab_words[idx]
-        #     t = target[idx].item()
-        #     p = pred[idx].item()
-        #     diff = p - t
-        #
-        #     print(f"{token:15s} {t:10.6f} {p:10.6f} {diff:10.6f}")
-        #
-        # # also show model's top predictions
-        # pred_vals, pred_idx = pred.topk(10)
-        #
-        # print("\nTop predicted tokens:")
-        # print(f"{'token':15s} {'pred':>10s} {'target':>10s}")
-        #
-        # for idx in pred_idx.tolist():
-        #     token = model.vocab_words[idx]
-        #     p = pred[idx].item()
-        #     t = target[idx].item()
-        #
-        #     print(f"{token:15s} {p:10.6f} {t:10.6f}")
-        #
-        # print("==================================\n")
-
-        l_kl = F.kl_div(
-            pred_log_probs,
-            target_dist,
-            reduction="batchmean",
+        positive_anchor = self._normalize_embeddings(
+            outputs["positive_anchor_embeddings"],
+            "positive_anchor_embeddings",
         )
-        loss_dict["l_dist"] = self.kl_coef * l_kl
+        positive_text = self._normalize_embeddings(
+            outputs["positive_text_embeddings"],
+            "positive_text_embeddings",
+        )
+        negative_anchor = self._normalize_embeddings(
+            outputs["negative_anchor_embeddings"],
+            "negative_anchor_embeddings",
+        )
+        negative_text = self._normalize_embeddings(
+            outputs["negative_text_embeddings"],
+            "negative_text_embeddings",
+        )
 
-        # -----------------------------------
-        # binary supervision from target_dist
-        # -----------------------------------
-        #target_binary = (target_dist > 1e-6).float()
+        batch_size = positive_anchor.shape[0]
 
-        #l_bin = F.binary_cross_entropy_with_logits(
-        #    gate_logits,
-        #    target_binary,
-        #    reduction="mean",
-        #)
+        expected_shape = positive_anchor.shape
+        embedding_tensors = {
+            "positive_text_embeddings": positive_text,
+            "negative_anchor_embeddings": negative_anchor,
+            "negative_text_embeddings": negative_text,
+        }
 
-        #loss_dict["l_bin"] = self.bin_coef * l_bin
+        for name, tensor in embedding_tensors.items():
+            if tensor.shape != expected_shape:
+                raise ValueError(
+                    "All pair embeddings must have the same shape. "
+                    f"positive_anchor_embeddings has shape {expected_shape}, "
+                    f"but {name} has shape {tuple(tensor.shape)}."
+                )
 
-        # 2) optional entropy regularization on predicted distribution
-        if self.entropy_coef != 0:
-            entropy = -(mixture_weights * torch.log(mixture_weights + 1e-8)).sum(dim=-1).mean()
-            loss_dict["l_entropy"] = self.entropy_coef * entropy
+        loss_dict: dict[str, torch.Tensor] = {}
 
-        # 3) optional visual similarity: learned prototype mixture should match some patches
-        if self.visual_coef != 0:
-            patch_tokens = outputs["patch_tokens"]          # [B, N, D]
-            prototypes = outputs["prototypes"]              # [V, D]
+        # -------------------------------------------------------------
+        # 1) Symmetric InfoNCE over the positive anchor-text pairs.
+        #
+        # Row i should select positive_text[i].
+        # Column i should select positive_anchor[i].
+        # -------------------------------------------------------------
+        if self.infonce_coef != 0:
+            positive_logits = (
+                positive_anchor @ positive_text.transpose(0, 1)
+            ) / self.temperature
 
-            proto_mix = F.normalize(mixture_weights @ prototypes, dim=-1)   # [B, D]
-            patch_sims = torch.einsum("bd,bnd->bn", proto_mix, patch_tokens)  # [B, N]
+            labels = torch.arange(
+                batch_size,
+                device=positive_logits.device,
+            )
 
-            k = min(5, patch_sims.shape[1])
-            topk_vals = patch_sims.topk(k=k, dim=1).values
-            l_visual = 1.0 - topk_vals.mean()
+            anchor_to_text_loss = F.cross_entropy(
+                positive_logits,
+                labels,
+            )
+            text_to_anchor_loss = F.cross_entropy(
+                positive_logits.transpose(0, 1),
+                labels,
+            )
 
-            loss_dict["l_visual"] = self.visual_coef * l_visual
+            infonce_loss = 0.5 * (
+                anchor_to_text_loss + text_to_anchor_loss
+            )
 
-        # 4) optional coverage: selected prototype mixture should explain at least one patch well
-        if self.cover_coef != 0:
-            patch_scores = torch.einsum("bnv,bv->bn", patch_logits, mixture_weights)  # [B, N]
-            l_cover = -patch_scores.max(dim=1).values.mean()
-            loss_dict["l_cover"] = self.cover_coef * l_cover
+            loss_dict["l_infonce"] = (
+                self.infonce_coef * infonce_loss
+            )
+
+        # Pairwise cosine similarities.
+        positive_similarity = (
+            positive_anchor * positive_text
+        ).sum(dim=-1)
+
+        negative_similarity = (
+            negative_anchor * negative_text
+        ).sum(dim=-1)
+
+        # -------------------------------------------------------------
+        # 2) Binary contrastive supervision.
+        #
+        # Cosine similarity is converted into a logit by temperature.
+        # Positive pairs receive target 1 and negative pairs target 0.
+        # -------------------------------------------------------------
+        if self.binary_coef != 0:
+            pair_logits = torch.cat(
+                [
+                    positive_similarity,
+                    negative_similarity,
+                ],
+                dim=0,
+            ) / self.temperature
+
+            pair_targets = torch.cat(
+                [
+                    torch.ones_like(positive_similarity),
+                    torch.zeros_like(negative_similarity),
+                ],
+                dim=0,
+            )
+
+            binary_loss = F.binary_cross_entropy_with_logits(
+                pair_logits,
+                pair_targets,
+            )
+
+            loss_dict["l_binary"] = (
+                self.binary_coef * binary_loss
+            )
+
+        # -------------------------------------------------------------
+        # 3) Pairwise margin ranking.
+        #
+        # Enforces:
+        #     positive_similarity >= negative_similarity + margin
+        # -------------------------------------------------------------
+        if self.ranking_coef != 0:
+            ranking_loss = F.relu(
+                self.margin
+                - positive_similarity
+                + negative_similarity
+            ).mean()
+
+            loss_dict["l_ranking"] = (
+                self.ranking_coef * ranking_loss
+            )
+
+        # Detached statistics are useful for logging, but should not be
+        # included when blindly summing every value in loss_dict.
+        loss_dict["positive_similarity"] = (
+            positive_similarity.mean().detach()
+        )
+        loss_dict["negative_similarity"] = (
+            negative_similarity.mean().detach()
+        )
 
         return loss_dict
