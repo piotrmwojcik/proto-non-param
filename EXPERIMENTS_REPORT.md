@@ -387,12 +387,31 @@ random sample at `--seed 0`):
   corner of the space. Read this as "rare words get their own periphery," not "roost and
   information are related concepts." Same caveat applies to the steed/taxi/reef trio.
 - **Takeaway**: this run is consistent with a working, well-behaved embedding space (no
-  collapse, no POS-driven artifact structure) but is not a controlled test of semantic
-  clustering, since the query words weren't chosen for known relatedness. The `--groups-file`
-  mode (cat/lion/dog vs. furniture/chair/table) is the actual controlled version of this
-  question — group-colored t-SNE plus the intra-group-vs-random-baseline z-score in
-  `group_clustering.json` — and should be the version cited for a "related concepts cluster
-  together" claim, once reviewed.
+  collapse, no POS-driven artifact structure), but with only randomly-sampled, mutually
+  unrelated query words it can't directly test whether related concepts cluster — that's
+  what the `--groups-file` run below actually tests.
+
+**Result — semantic-group run** (`figures/prototype_tsne_close_concpets.png`, 2005 real
+words + groups `cat, lion, dog` / `furniture, chair, table`): this is the controlled test,
+and it confirms clustering directly — **`cat` and `dog` land essentially on top of each
+other**, and separately **`chair` and `table` land essentially on top of each other**, both
+clear, tight, visually unambiguous pairs against the gray background of unrelated vocabulary.
+This is a real signal, not a t-SNE coincidence like §8's random-word run: two independent
+pairs of everyday, frequently co-occurring objects each collapsed to the same point.
+
+One nuance worth keeping in the writeup rather than glossing over: the third word in each
+group did *not* join its pair — **`lion`** sits well away from `cat`/`dog`, and
+**`furniture`** sits well away from `chair`/`table`. Plausible reading: `cat`/`dog` and
+`chair`/`table` are both concrete, visually similar, commonly co-occurring VG objects, while
+`lion` (a rarer, wild animal in VG's largely domestic-scene captions) and `furniture` (an
+abstract category word rather than a concrete object) don't share that same tight
+visual/co-occurrence signal with their groupmates. So the finding is specifically "closely
+related *concrete, common* object pairs cluster tightly," not "every semantically-adjacent
+word clusters with its whole category."
+
+*(`group_clustering.json`'s intra-group-vs-random-baseline z-scores for this run weren't
+available when this section was written — add the exact numbers here once pulled from
+Athena, to back the visual read with the quantitative check the script computes.)*
 
 **Status**: implemented and run.
 `bash scripts/slurm_inspect_prototype_dictionary.sh` (override `WORDS` for custom flat query
