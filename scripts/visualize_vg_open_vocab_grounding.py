@@ -8,22 +8,27 @@ mechanism working directly on the model's own training-distribution images.
 
 Mechanism: identical to evaluate_pnp_refer.py's per-example scoring (CLIP-
 encode the phrase -> project through text_projection_head -> cosine
-similarity with DINOv2 patch tokens -> heatmap), just applied to VG images
-with hand-picked phrases instead of RefCOCOg's fixed test set + GT masks.
+similarity with DINOv2 patch tokens -> heatmap). Unlike
+visualize_concept_retrieval.py, this script does NOT call PNP.forward()
+(which unconditionally also runs the image through CLIP's own fixed-224px
+image encoder) -- it manually calls net.backbone(...) and
+net.clip_model.encode_text(...) separately, same as evaluate_pnp_refer.py's
+eval loop. So --img-size is free to be anything (e.g. 672px, M1's headline
+resolution), not locked to 224.
 
-Note on resolution: unlike visualize_concept_retrieval.py, this script does
-NOT call PNP.forward() (which unconditionally also runs the image through
-CLIP's own fixed-224px image encoder) -- it manually calls net.backbone(...)
-and net.clip_model.encode_text(...) separately, same as
-evaluate_pnp_refer.py's eval loop. So --img-size is free to be anything
-(e.g. 672px, M1's headline resolution), not locked to 224.
+Rendering: a thresholded SALIENCY MASK, not a bounding box -- a rectangle
+implies a precise, confident localization even when the true signal is
+diffuse or the concept is absent; a heat-colored mask (only pixels whose
+normalized activation clears --mask-threshold, same 0.5 default
+evaluate_pnp_refer.py uses for the actual segmentation decision, everything
+else dimmed) is more honest about what the model actually computed.
+
+Layout per image: original (no overlay) first, then one masked panel per
+phrase in --phrases.
 
 Images: sampled directly from the VG image shards (VG_100K/VG_100K_2) by
 globbing filenames -- no region_descriptions.json needed, since this is
 purely qualitative and doesn't use any VG annotations at all.
-
-For each sampled image, grounds every phrase in --phrases and saves one
-combined figure per image (one panel per phrase, heatmap + bbox overlay).
 
 Usage:
   python scripts/visualize_vg_open_vocab_grounding.py \
@@ -53,16 +58,13 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, SCRIPT_DIR)
 
 from evaluate_pnp_refer import build_model, build_img_transform  # noqa: E402
-from eval_retreive_concepts import (  # noqa: E402
-    find_high_activation_crop, draw_rect_on_image, overlay_heatmap,
-)
+from eval_retreive_concepts import overlay_heatmap  # noqa: E402
 
 DEFAULT_PHRASES = [
-    "a red car",
     "a person wearing a hat",
-    "a wooden table",
-    "the sky",
     "a dog",
+    "the sky",
+    "a smile",
 ]
 
 
@@ -75,6 +77,25 @@ def sample_vg_images(vg_root, n_images, seed):
     return rng.sample(paths, min(n_images, len(paths)))
 
 
+def saliency_mask_overlay(img_uint8, hm_up, threshold, alpha=0.6, dim_factor=0.35):
+    """Heat-colored overlay only on patches whose normalized activation
+    clears `threshold` (same min-max-normalize + threshold convention
+    evaluate_pnp_refer.py uses for the real segmentation decision) --
+    everywhere else is dimmed, not boxed. A bounding box implies a precise,
+    confident localization even when the model's true signal is diffuse or
+    the queried concept is absent from the image; a soft, thresholded mask
+    is a more honest rendering of what was actually computed."""
+    activation = hm_up.detach().cpu().numpy()
+    a_min, a_max = activation.min(), activation.max()
+    if a_max > a_min:
+        activation = (activation - a_min) / (a_max - a_min + 1e-8)
+    mask = activation >= threshold
+
+    heat = overlay_heatmap(img_uint8, hm_up, alpha=alpha)
+    dimmed = (img_uint8.astype(np.float32) * dim_factor).astype(np.uint8)
+    return np.where(mask[..., None], heat, dimmed).astype(np.uint8)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True)
@@ -85,6 +106,9 @@ def main():
     p.add_argument("--phrases-file", type=str, default=None,
                    help="One phrase per line; overrides --phrases if given. Safer than "
                         "passing multi-word phrases through shell/env-var quoting.")
+    p.add_argument("--mask-threshold", type=float, default=0.5,
+                   help="Same normalized-activation threshold evaluate_pnp_refer.py uses "
+                        "for the real segmentation decision")
     p.add_argument("--img-size", type=int, default=672)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
@@ -124,27 +148,28 @@ def main():
 
             img_display = np.array(pil_img.resize((args.img_size, args.img_size)))
 
-            n_phrases = len(args.phrases)
-            fig, axes = plt.subplots(1, n_phrases, figsize=(4 * n_phrases, 4.5), dpi=140)
-            if n_phrases == 1:
-                axes = [axes]
+            n_panels = 1 + len(args.phrases)
+            fig, axes = plt.subplots(1, n_panels, figsize=(4 * n_panels, 4.5), dpi=140)
 
-            for ax, phrase in zip(axes, args.phrases):
+            axes[0].imshow(img_display)
+            axes[0].axis("off")
+            axes[0].set_title("Original", fontsize=11, fontweight="bold")
+
+            for ax, phrase in zip(axes[1:], args.phrases):
                 scores = (patch_tokens * p_queries[phrase].unsqueeze(1)).sum(dim=-1)[0]  # [N]
                 H = W = int(math.sqrt(scores.shape[0]))
                 hm_up = F.interpolate(scores.view(1, 1, H, W), size=img_display.shape[:2],
                                       mode="bilinear", align_corners=False)[0, 0]
 
-                bbox = find_high_activation_crop(hm_up.cpu().numpy(), percentile=95)
-                overlay = overlay_heatmap(img_display, hm_up, alpha=0.45)
-                overlay_box = draw_rect_on_image(overlay, bbox)
+                masked = saliency_mask_overlay(img_display, hm_up, args.mask_threshold)
 
-                ax.imshow(overlay_box)
+                ax.imshow(masked)
                 ax.axis("off")
                 ax.set_title(f'"{phrase}"', fontsize=11)
 
-            fig.suptitle("Zero-shot open-vocabulary grounding (no ground truth, no training on these phrases)",
-                        fontsize=12)
+            fig.suptitle("Zero-shot open-vocabulary grounding (no ground truth, no training on these phrases) "
+                        "— heat = above threshold, dimmed = below",
+                        fontsize=11)
             fig.tight_layout(rect=[0, 0, 1, 0.93])
 
             base = os.path.splitext(os.path.basename(img_path))[0]

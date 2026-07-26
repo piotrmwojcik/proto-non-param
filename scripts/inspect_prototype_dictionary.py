@@ -15,14 +15,28 @@ Two views:
 2. t-SNE of the prototype space: scatter plot of a sampled subset of
    prototypes (real-word-filtered via nltk.corpus.words, same filter used in
    visualize_concept_retrieval.py, to avoid the vocab's un-curated typo tail
-   dominating the picture), colored by coarse POS (noun/adjective/other),
-   with the query words from --words annotated directly on the plot.
+   dominating the picture). Two coloring modes:
+   - default (--words only): colored by coarse POS (noun/adjective/other),
+     with the query words from --words annotated directly on the plot.
+   - --groups-file given: background points are gray, each semantic group
+     (e.g. "cat, lion, dog" vs. "furniture, chair, table") gets its own
+     color, to show visually whether related concepts land near each other
+     -- not just that unrelated ones scatter apart. Backed by a quantitative
+     check (mean intra-group cosine similarity vs. a random-subset
+     baseline of the same size), since t-SNE distance/density isn't
+     reliable on its own (it only preserves local neighborhoods).
 
 Usage:
   python scripts/inspect_prototype_dictionary.py \
     --ckpt $SCRATCH/train_logs/vg_contrastive/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth \
     --words dog car red running happy \
     --out-dir results/prototype_dictionary
+
+  # Semantic-group mode (one comma-separated group per line in the file):
+  #   cat,lion,dog
+  #   furniture,chair,table
+  python scripts/inspect_prototype_dictionary.py \
+    --ckpt ... --groups-file groups.txt --out-dir results/prototype_dictionary
 """
 
 import argparse
@@ -65,6 +79,14 @@ def main():
     p.add_argument("--words", type=str, nargs="*", default=None,
                    help="Query words for the nearest-neighbor comparison and t-SNE "
                         "annotation (default: 8 random real words from the vocab)")
+    p.add_argument("--groups-file", type=str, default=None,
+                   help="One comma-separated semantic group per line (e.g. 'cat,lion,dog'). "
+                        "When given, drives group-colored t-SNE + intra-group clustering "
+                        "stats instead of the flat --words/POS view. Words are also merged "
+                        "into the nearest-neighbor comparison.")
+    p.add_argument("--n-random-baselines", type=int, default=200,
+                   help="Number of random same-size subsets sampled to build the "
+                        "intra-group-similarity baseline distribution")
     p.add_argument("--k-neighbors", type=int, default=8)
     p.add_argument("--n-tsne-words", type=int, default=2000,
                    help="Random real-word subsample size for the t-SNE plot "
@@ -97,10 +119,23 @@ def main():
     print(f"{len(real_indices)}/{len(vocab_words)} vocab words pass the real-word filter")
 
     rng = random.Random(args.seed)
+
+    groups = []
+    if args.groups_file:
+        with open(args.groups_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    groups.append([w.strip() for w in line.split(",") if w.strip()])
+        print(f"Loaded {len(groups)} semantic groups from {args.groups_file}: {groups}")
+
     words = args.words
     if not words:
-        words = [vocab_words[i] for i in rng.sample(real_indices, min(8, len(real_indices)))]
-        print(f"No --words given, sampled: {words}")
+        if groups:
+            words = [w for g in groups for w in g]
+        else:
+            words = [vocab_words[i] for i in rng.sample(real_indices, min(8, len(real_indices)))]
+            print(f"No --words given, sampled: {words}")
 
     word_to_idx = {w: i for i, w in enumerate(vocab_words)}
     missing = [w for w in words if w not in word_to_idx]
@@ -128,6 +163,43 @@ def main():
         json.dump(nn_report, f, indent=2)
     print(f"Saved {os.path.join(args.out_dir, 'nearest_neighbor_shift.json')}")
 
+    # --- 1b. group clustering: intra-group similarity vs. random baseline ------
+    group_report = []
+    if groups:
+        print("\n=== Semantic-group clustering: intra-group cosine similarity vs. random baseline ===")
+
+        def mean_pairwise_sim(indices):
+            embs = prototypes_cpu[indices]
+            sims = embs @ embs.T
+            n = len(indices)
+            return float((sims.sum() - n) / (n * (n - 1)))  # exclude diagonal (self-sim=1)
+
+        for g in groups:
+            g_indices = [word_to_idx[w] for w in g]
+            if len(g_indices) < 2:
+                continue
+            group_sim = mean_pairwise_sim(g_indices)
+
+            baselines = []
+            pool = [i for i in real_indices if i not in g_indices]
+            for _ in range(args.n_random_baselines):
+                baselines.append(mean_pairwise_sim(rng.sample(pool, len(g_indices))))
+            baselines = np.array(baselines)
+            z_score = (group_sim - baselines.mean()) / (baselines.std() + 1e-8)
+
+            print(f"  {g}: intra-group sim={group_sim:.4f}  random baseline={baselines.mean():.4f}"
+                 f"+/-{baselines.std():.4f}  z={z_score:.2f}")
+            group_report.append({
+                "group": g, "intra_group_similarity": round(group_sim, 4),
+                "random_baseline_mean": round(float(baselines.mean()), 4),
+                "random_baseline_std": round(float(baselines.std()), 4),
+                "z_score": round(float(z_score), 2),
+            })
+
+        with open(os.path.join(args.out_dir, "group_clustering.json"), "w") as f:
+            json.dump(group_report, f, indent=2)
+        print(f"Saved {os.path.join(args.out_dir, 'group_clustering.json')}")
+
     # --- 2. t-SNE of the prototype space ----------------------------------------
     print(f"\nRunning t-SNE on {min(args.n_tsne_words, len(real_indices))} real-word prototypes ...")
     tsne_indices = rng.sample(real_indices, min(args.n_tsne_words, len(real_indices)))
@@ -142,40 +214,62 @@ def main():
     coords = TSNE(n_components=2, random_state=args.seed, init="pca",
                   perplexity=min(30, len(tsne_indices) - 1)).fit_transform(tsne_embs)
 
-    tagged = nltk.pos_tag([vocab_words[i] for i in tsne_indices])
-    pos_color = []
-    for _, pos in tagged:
-        if pos.startswith("NN"):
-            pos_color.append("#1f77b4")   # noun
-        elif pos.startswith("JJ"):
-            pos_color.append("#ff7f0e")   # adjective
-        else:
-            pos_color.append("#7f7f7f")   # other
-
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     fig, ax = plt.subplots(figsize=(10, 9), dpi=140)
-    ax.scatter(coords[:, 0], coords[:, 1], c=pos_color, s=8, alpha=0.5)
-    for w in words:
-        idx = word_to_idx[w]
-        pos_in_sample = tsne_indices.index(idx)
-        x, y = coords[pos_in_sample]
-        ax.scatter([x], [y], c="red", s=60, zorder=5, edgecolors="black")
-        ax.annotate(w, (x, y), fontsize=11, fontweight="bold", xytext=(5, 5),
-                   textcoords="offset points")
 
-    from matplotlib.lines import Line2D
-    legend_elems = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="#1f77b4", markersize=8, label="noun"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="#ff7f0e", markersize=8, label="adjective"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="#7f7f7f", markersize=8, label="other"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="red", markersize=10,
-              markeredgecolor="black", label="query words"),
-    ]
-    ax.legend(handles=legend_elems, loc="best")
-    ax.set_title(f"t-SNE of learned prototype space ({len(tsne_indices)} real words)")
+    if groups:
+        # Background: all sampled words in gray; each group gets its own color
+        # so related concepts (e.g. cat/lion/dog) can be seen to cluster
+        # together, not just that unrelated words scatter apart.
+        ax.scatter(coords[:, 0], coords[:, 1], c="#d3d3d3", s=8, alpha=0.5, zorder=1)
+        cmap = plt.get_cmap("tab10")
+        legend_elems = []
+        for gi, g in enumerate(groups):
+            color = cmap(gi % 10)
+            for w in g:
+                idx = word_to_idx[w]
+                pos_in_sample = tsne_indices.index(idx)
+                x, y = coords[pos_in_sample]
+                ax.scatter([x], [y], c=[color], s=70, zorder=5, edgecolors="black")
+                ax.annotate(w, (x, y), fontsize=10, fontweight="bold", xytext=(5, 5),
+                           textcoords="offset points")
+            legend_elems.append(Line2D([0], [0], marker="o", color="w", markerfacecolor=color,
+                                       markersize=9, markeredgecolor="black", label=", ".join(g)))
+        ax.legend(handles=legend_elems, loc="best")
+        ax.set_title(f"t-SNE of learned prototype space -- semantic groups ({len(tsne_indices)} real words)")
+    else:
+        tagged = nltk.pos_tag([vocab_words[i] for i in tsne_indices])
+        pos_color = []
+        for _, pos in tagged:
+            if pos.startswith("NN"):
+                pos_color.append("#1f77b4")   # noun
+            elif pos.startswith("JJ"):
+                pos_color.append("#ff7f0e")   # adjective
+            else:
+                pos_color.append("#7f7f7f")   # other
+
+        ax.scatter(coords[:, 0], coords[:, 1], c=pos_color, s=8, alpha=0.5)
+        for w in words:
+            idx = word_to_idx[w]
+            pos_in_sample = tsne_indices.index(idx)
+            x, y = coords[pos_in_sample]
+            ax.scatter([x], [y], c="red", s=60, zorder=5, edgecolors="black")
+            ax.annotate(w, (x, y), fontsize=11, fontweight="bold", xytext=(5, 5),
+                       textcoords="offset points")
+
+        legend_elems = [
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#1f77b4", markersize=8, label="noun"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#ff7f0e", markersize=8, label="adjective"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#7f7f7f", markersize=8, label="other"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="red", markersize=10,
+                  markeredgecolor="black", label="query words"),
+        ]
+        ax.legend(handles=legend_elems, loc="best")
+        ax.set_title(f"t-SNE of learned prototype space ({len(tsne_indices)} real words)")
     ax.set_xticks([])
     ax.set_yticks([])
     fig.tight_layout()
