@@ -365,7 +365,7 @@ the plot.
 (override `WORDS` env var for custom query words; defaults to 8 random real vocab words).
 Output: `results/prototype_dictionary/{nearest_neighbor_shift.json, prototype_tsne.png}`.
 
-## 9. Zero-shot open-vocabulary grounding demo on VG (planned, not yet run)
+## 9. Zero-shot open-vocabulary grounding demo on VG
 
 **Question**: Does the open-vocabulary grounding mechanism work qualitatively on arbitrary
 free-text phrases — not confined to RefCOCOg's referring-expression style or vocabulary —
@@ -377,11 +377,49 @@ no training. Images sampled directly from the VG shards by globbing filenames (n
 backbone+CLIP-text scoring pipeline (not the full `PNP.forward()` call) — unlike
 `visualize_concept_retrieval.py`, this means it's **not** locked to CLIP's fixed 224px image
 encoder, since it never touches `clip_model.encode_image`. Defaults to 672px (M1's headline
-resolution). For each sampled image, grounds every phrase in `--phrases` (default: a mix of
-color+object, person+attribute, material+object, a "stuff" class, and a bare noun) and saves
-one combined figure per image, one heatmap+bbox panel per phrase.
+resolution).
 
-**Status**: implemented, not run. `bash scripts/slurm_visualize_vg_open_vocab_grounding.sh`
-(override `N_IMAGES`; custom phrases via `PHRASES_FILE=<path, one phrase per line>` — kept
-file-based rather than an env-var list to avoid fragile shell-quoting of multi-word phrases
-through a `--wrap` string). Output: `results/vg_open_vocab_grounding/grounding_<image>.png`.
+**Rendering (redesigned after first review)**: the first version overlaid a bounding box
+around the top-5th-percentile-activation region per phrase (`find_high_activation_crop` +
+`draw_rect_on_image`). Reviewing the first batch of outputs showed a fundamental flaw: this
+box-drawing method has no calibrated "not found" state — it always draws a confident-looking
+box around *something*, even when the queried concept is entirely absent from the image, so
+every phrase's box tended to converge on whatever the single most salient object happened to
+be. Replaced with: panel 0 = plain original image (no overlay), then one panel per phrase
+showing a thresholded saliency mask — heat-colored only where the normalized per-patch
+activation clears `--mask-threshold` (default 0.5, the same convention
+`evaluate_pnp_refer.py` uses for the actual segmentation decision), everything else dimmed.
+Default phrases: `"a person wearing a hat"`, `"a dog"`, `"the sky"`, `"a smile"` (one concrete
+person query, one concrete-but-frequently-absent object, one "stuff" class, one abstract
+concept with no fixed visual extent).
+
+**Result (qualitative, 3 of 6 sampled VG images reviewed in detail)**: the mask rendering
+directly fixes the box version's blind spot — when a queried concept is genuinely absent, the
+mask can now show *almost nothing* above threshold, instead of always finding a confident box.
+- Beach photo (two people walking, seagull, ocean): `"a person wearing a hat"` and `"the sky"`
+  both localize tightly and correctly (people region / upper strip respectively); `"a smile"`
+  lands on the people's faces/heads, a sensible proxy for an abstract concept; `"a dog"`
+  (absent) diffuses across the two most salient objects (people + seagull) rather than
+  claiming one region with false confidence.
+- STOP-sign-in-snowy-field photo: `"the sky"` cleanly and correctly localizes to the actual
+  sky. The three absent-concept phrases (hat/dog/smile) now spread diffusely over the
+  trees/grass — a real change from the box version, where all of them (plus `"a red car"` in
+  the original default set) had converged specifically on the STOP sign via what looked like a
+  color-match shortcut.
+- Indoor couch photo (cat + teddy bear, no sky, no dog, no person): `"the sky"` shows almost
+  no highlighted region at all — the clearest evidence the mask has a working "not present"
+  state. `"a dog"` lands on the teddy bear (plausible stuffed-animal-shape confusion, not the
+  cat). `"a person wearing a hat"` spreads over wall decor/picture-frame area rather than
+  falsely boxing the cat.
+
+Still purely qualitative (no ground truth, no aggregate metric) — the deletion-faithfulness
+test in §7 is the quantitative counterpart. Two of the six downloaded PNGs arrived rotated
+90° locally (metadata showed `Microsoft Windows Photo Viewer` had touched them after
+download); confirmed cosmetic only, not a rendering bug — the files as produced on Athena are
+the expected 2800×630 landscape layout.
+
+**Status**: implemented and run (`bash scripts/slurm_visualize_vg_open_vocab_grounding.sh`;
+override `N_IMAGES`, `--mask-threshold`; custom phrases via `PHRASES_FILE=<path, one phrase
+per line>` on `$SCRATCH`/`$HOME`, not `/tmp` — `/tmp` is node-local and invisible to the
+compute node the sbatch job actually lands on). Output:
+`results/vg_open_vocab_grounding/grounding_<image>.png`.
