@@ -6,12 +6,14 @@
 #   bash scripts/slurm_inspect_prototype_dictionary.sh
 #   WORDS="dog car red running happy" bash scripts/slurm_inspect_prototype_dictionary.sh
 #
-#   # Semantic-group mode: one comma-separated group per line in a file
-#   cat > /tmp/groups.txt <<'EOF'
+#   # Semantic-group mode: one comma-separated group per line in a file.
+#   # NOTE: use $SCRATCH or $HOME, not /tmp -- /tmp is node-local and won't
+#   # be visible to the compute node the sbatch job actually lands on.
+#   cat > ${SCRATCH}/groups.txt <<'EOF'
 #   cat,lion,dog
 #   furniture,chair,table
 #   EOF
-#   GROUPS_FILE=/tmp/groups.txt bash scripts/slurm_inspect_prototype_dictionary.sh
+#   GROUPS_FILE=${SCRATCH}/groups.txt bash scripts/slurm_inspect_prototype_dictionary.sh
 
 set -e
 

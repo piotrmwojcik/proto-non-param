@@ -7,13 +7,15 @@
 #   N_IMAGES=10 bash scripts/slurm_visualize_vg_open_vocab_grounding.sh
 #
 #   # Custom phrases: one per line in a file (safer than shell-quoting
-#   # multi-word phrases through an env var):
-#   cat > /tmp/phrases.txt <<'EOF'
+#   # multi-word phrases through an env var).
+#   # NOTE: use $SCRATCH or $HOME, not /tmp -- /tmp is node-local and won't
+#   # be visible to the compute node the sbatch job actually lands on.
+#   cat > ${SCRATCH}/phrases.txt <<'EOF'
 #   a red car
 #   a person wearing a hat
 #   a wooden table
 #   EOF
-#   PHRASES_FILE=/tmp/phrases.txt bash scripts/slurm_visualize_vg_open_vocab_grounding.sh
+#   PHRASES_FILE=${SCRATCH}/phrases.txt bash scripts/slurm_visualize_vg_open_vocab_grounding.sh
 
 set -e
 

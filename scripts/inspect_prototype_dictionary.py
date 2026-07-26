@@ -140,7 +140,13 @@ def main():
     word_to_idx = {w: i for i, w in enumerate(vocab_words)}
     missing = [w for w in words if w not in word_to_idx]
     if missing:
-        raise ValueError(f"Words not in checkpoint vocab: {missing}")
+        print(f"WARNING: dropping words not in checkpoint vocab (VG's extracted vocab isn't "
+             f"curated, uncommon nouns can be absent): {missing}")
+        words = [w for w in words if w not in missing]
+        groups = [[w for w in g if w not in missing] for g in groups]
+        groups = [g for g in groups if len(g) >= 2]
+        if not words:
+            raise ValueError("All query words were missing from the checkpoint vocab -- nothing left to run")
 
     # --- 1. nearest-neighbor shift ---------------------------------------------
     print("\n=== Nearest-neighbor shift: CLIP text space vs. learned prototype space ===")
