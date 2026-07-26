@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 try:
     import ijson
@@ -29,6 +31,29 @@ except ImportError as exc:
 
 
 DEFAULT_VG_ROOT = Path("/net/tscratch/people/plgpiotrwojcik/vg")
+
+
+def build_default_image_transform(
+    image_size: int = 518,
+) -> Callable[[Image.Image], torch.Tensor]:
+    """Return the default DINOv2-compatible image preprocessing pipeline."""
+    if image_size <= 0:
+        raise ValueError("image_size must be positive")
+
+    return transforms.Compose(
+        [
+            transforms.Resize(
+                (image_size, image_size),
+                interpolation=transforms.InterpolationMode.BICUBIC,
+                antialias=True,
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
+        ]
+    )
 
 
 def clean_text(value: Any) -> str:
@@ -574,12 +599,17 @@ class VisualGenomeSceneGraphDataset(Dataset):
         self,
         root: str | Path = DEFAULT_VG_ROOT,
         transform: Callable[[Image.Image], Any] | None = None,
+        image_size: int = 518,
         image_ids: list[int] | None = None,
         database_path: str | Path | None = None,
         rebuild_database: bool = False,
     ) -> None:
         self.root = Path(root)
-        self.transform = transform
+        self.transform = (
+            transform
+            if transform is not None
+            else build_default_image_transform(image_size)
+        )
         self.archive_paths = (
             self.root / "images1.zip",
             self.root / "images2.zip",
@@ -804,20 +834,39 @@ def scene_graph_collate_fn(
     Set ``negatives_per_positive=None`` to use every valid negative object.
     """
 
-    import torch
-
     if negatives_per_positive is not None and negatives_per_positive < 0:
         raise ValueError("negatives_per_positive must be non-negative or None")
 
+    if not batch:
+        raise ValueError("Cannot collate an empty batch.")
+
     raw_images = [sample["image"] for sample in batch]
-    images: Any = raw_images
-    if raw_images and all(torch.is_tensor(image) for image in raw_images):
-        same_shape = all(
-            image.shape == raw_images[0].shape
-            for image in raw_images
+    if not all(torch.is_tensor(image) for image in raw_images):
+        image_types = sorted({type(image).__name__ for image in raw_images})
+        raise TypeError(
+            "Every dataset image must be a torch.Tensor before collation. "
+            f"Received element types: {image_types}."
         )
-        if same_shape:
-            images = torch.stack(raw_images)
+
+    invalid_shapes = [
+        tuple(image.shape)
+        for image in raw_images
+        if image.ndim != 3
+    ]
+    if invalid_shapes:
+        raise ValueError(
+            "Each image must have shape [C, H, W]. "
+            f"Invalid shapes: {invalid_shapes[:5]}"
+        )
+
+    shapes = {tuple(image.shape) for image in raw_images}
+    if len(shapes) != 1:
+        raise ValueError(
+            "Images must share one shape before stacking. "
+            f"Received shapes: {sorted(shapes)}"
+        )
+
+    images = torch.stack(raw_images, dim=0)
 
     positive_triples: list[PositiveTriple] = []
     for sample in batch:

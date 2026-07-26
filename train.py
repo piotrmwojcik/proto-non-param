@@ -1,70 +1,128 @@
-from __future__ import annotations
-
-from contextlib import nullcontext
-from functools import partial
-from pathlib import Path
-from typing import Any
 import argparse
 import importlib
 import os
 import random
+from contextlib import nullcontext
+from functools import partial
+from pathlib import Path
+from typing import Any
 
 import torch
-import torch.nn as nn
-import wandb
 import torch.nn.functional as F
 from llm2vec import LLM2Vec
+from torch import nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from modeling.pnp import PNP, PNPContrastiveCriterion
+import wandb
+from modeling.pnp import PNP
 from visual_genome_scene_graph_dataset import (
     DEFAULT_VG_ROOT,
     VisualGenomeSceneGraphDataset,
     scene_graph_collate_fn,
 )
-from llm2vec_utils import (
-    encode_pair_strings,
-    load_llm2vec,
-)
+
+
+def load_llm2vec(
+    *,
+    model_name: str,
+    peft_model_name: str | None,
+    cache_dir: str | Path | None,
+    device: torch.device,
+) -> LLM2Vec:
+    """Load and freeze the LLM2Vec text encoder."""
+    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
+    kwargs: dict[str, Any] = {
+        "cache_dir": str(cache_dir) if cache_dir is not None else None,
+        "device_map": str(device),
+        "torch_dtype": dtype,
+    }
+    if peft_model_name:
+        kwargs["peft_model_name_or_path"] = peft_model_name
+
+    encoder = LLM2Vec.from_pretrained(model_name, **kwargs)
+
+    if hasattr(encoder, "model"):
+        encoder.model.eval()
+        for parameter in encoder.model.parameters():
+            parameter.requires_grad_(False)
+
+    return encoder
+
+
+def _encode_texts(
+    *,
+    llm2vec: LLM2Vec,
+    texts: list[str],
+    encode_batch_size: int,
+) -> torch.Tensor:
+    """Encode strings in bounded chunks and return [N, D]."""
+    if encode_batch_size <= 0:
+        raise ValueError("encode_batch_size must be positive")
+    if not texts:
+        raise ValueError("Cannot encode an empty text list")
+
+    chunks: list[torch.Tensor] = []
+    for start in range(0, len(texts), encode_batch_size):
+        inputs = [["", text] for text in texts[start : start + encode_batch_size]]
+        encoded = llm2vec.encode(inputs)
+        if not torch.is_tensor(encoded):
+            encoded = torch.as_tensor(encoded)
+        if encoded.ndim != 2:
+            raise ValueError(
+                "LLM2Vec must return [N, D] embeddings, "
+                f"received {tuple(encoded.shape)}"
+            )
+        chunks.append(encoded)
+
+    return torch.cat(chunks, dim=0)
+
+
+def encode_pair_strings(
+    *,
+    llm2vec: LLM2Vec,
+    batch: dict[str, Any],
+    encode_batch_size: int,
+) -> dict[str, torch.Tensor]:
+    """Encode all positive and negative relationship strings."""
+    key_map = {
+        "positive_anchor_embeddings": "positive_anchor_texts",
+        "positive_text_embeddings": "positive_texts",
+        "negative_anchor_embeddings": "negative_anchor_texts",
+        "negative_text_embeddings": "negative_texts",
+    }
+
+    result: dict[str, torch.Tensor] = {}
+    for output_key, batch_key in key_map.items():
+        if batch_key not in batch:
+            raise KeyError(
+                f"scene_graph_collate_fn did not return {batch_key!r}. "
+                f"Available keys: {sorted(batch)}"
+            )
+        result[output_key] = _encode_texts(
+            llm2vec=llm2vec,
+            texts=[str(value) for value in batch[batch_key]],
+            encode_batch_size=encode_batch_size,
+        )
+
+    return result
 
 
 def get_images(batch: Any) -> torch.Tensor:
-    """
-    Extract the image tensor from the Visual Genome collated batch.
+    images = batch["image"]
 
-    Adjust the tuple index here if scene_graph_collate_fn returns a tuple
-    with images in a different position.
-    """
-    if isinstance(batch, dict):
-        for key in ("images", "image", "pixel_values"):
-            value = batch.get(key)
-
-            if torch.is_tensor(value):
-                return value
-
-        raise KeyError(
-            "Could not find images in the batch dictionary. "
-            "Expected one of: images, image, pixel_values."
+    if not torch.is_tensor(images):
+        raise TypeError(
+            f"Expected batch['image'] to be a tensor, got {type(images)!r}"
         )
 
-    if isinstance(batch, (tuple, list)):
-        for value in batch:
-            if (
-                torch.is_tensor(value)
-                and value.ndim == 4
-                and value.shape[1] in (1, 3, 4)
-            ):
-                return value
-
+    if images.ndim != 4:
         raise ValueError(
-            "Could not find a [B, C, H, W] image tensor in the batch."
+            f"Expected [B, C, H, W], got {tuple(images.shape)}"
         )
 
-    raise TypeError(
-        f"Unsupported batch type: {type(batch)!r}"
-    )
+    return images
 
 
 def prepare_embeddings(
@@ -200,6 +258,175 @@ def validate_similarity_map(
         )
 
 
+class PNPContrastiveCriterion(nn.Module):
+    """Contrast positive and negative PNP similarity maps."""
+
+    def __init__(
+        self,
+        infonce_coef: float = 1.0,
+        binary_coef: float = 1.0,
+        ranking_coef: float = 1.0,
+        temperature: float = 0.07,
+        margin: float = 0.2,
+    ) -> None:
+        super().__init__()
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than zero")
+        if margin < 0:
+            raise ValueError("margin must be non-negative")
+
+        self.infonce_coef = infonce_coef
+        self.binary_coef = binary_coef
+        self.ranking_coef = ranking_coef
+        self.temperature = temperature
+        self.margin = margin
+
+    @staticmethod
+    def _flatten_maps(
+        maps: torch.Tensor,
+        name: str,
+    ) -> torch.Tensor:
+        if maps.ndim != 4 or maps.shape[1] != 1:
+            raise ValueError(
+                f"{name} must have shape [N, 1, H, W], "
+                f"received {tuple(maps.shape)}."
+            )
+        return maps.flatten(start_dim=1).float()
+
+    def forward(
+        self,
+        *,
+        positive_anchor_maps: torch.Tensor,
+        positive_text_maps: torch.Tensor,
+        negative_anchor_maps: torch.Tensor,
+        negative_text_maps: torch.Tensor,
+        batch_size: int,
+        negatives_per_positive: int,
+    ) -> dict[str, torch.Tensor]:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if negatives_per_positive <= 0:
+            raise ValueError("negatives_per_positive must be positive")
+
+        expected_negatives = batch_size * negatives_per_positive
+        if positive_anchor_maps.shape[0] != batch_size:
+            raise ValueError(
+                "positive_anchor_maps count does not match batch_size: "
+                f"{positive_anchor_maps.shape[0]} versus {batch_size}."
+            )
+        if positive_text_maps.shape[0] != batch_size:
+            raise ValueError(
+                "positive_text_maps count does not match batch_size: "
+                f"{positive_text_maps.shape[0]} versus {batch_size}."
+            )
+        if negative_anchor_maps.shape[0] != expected_negatives:
+            raise ValueError(
+                "negative_anchor_maps count does not match "
+                "batch_size * negatives_per_positive: "
+                f"{negative_anchor_maps.shape[0]} versus {expected_negatives}."
+            )
+        if negative_text_maps.shape[0] != expected_negatives:
+            raise ValueError(
+                "negative_text_maps count does not match "
+                "batch_size * negatives_per_positive: "
+                f"{negative_text_maps.shape[0]} versus {expected_negatives}."
+            )
+
+        positive_anchor = self._flatten_maps(
+            positive_anchor_maps,
+            "positive_anchor_maps",
+        )
+        positive_text = self._flatten_maps(
+            positive_text_maps,
+            "positive_text_maps",
+        )
+        negative_anchor = self._flatten_maps(
+            negative_anchor_maps,
+            "negative_anchor_maps",
+        )
+        negative_text = self._flatten_maps(
+            negative_text_maps,
+            "negative_text_maps",
+        )
+
+        positive_anchor_normalized = F.normalize(positive_anchor, dim=-1)
+        positive_text_normalized = F.normalize(positive_text, dim=-1)
+        negative_anchor_normalized = F.normalize(negative_anchor, dim=-1)
+        negative_text_normalized = F.normalize(negative_text, dim=-1)
+
+        positive_similarity = (
+            positive_anchor_normalized * positive_text_normalized
+        ).sum(dim=-1)
+        negative_similarity = (
+            negative_anchor_normalized * negative_text_normalized
+        ).sum(dim=-1)
+        grouped_negative_similarity = negative_similarity.reshape(
+            batch_size,
+            negatives_per_positive,
+        )
+        hardest_negative_similarity = grouped_negative_similarity.max(dim=1).values
+
+        losses: dict[str, torch.Tensor] = {}
+
+        if self.infonce_coef != 0:
+            logits = (
+                positive_anchor_normalized
+                @ positive_text_normalized.transpose(0, 1)
+            ) / self.temperature
+            labels = torch.arange(batch_size, device=logits.device)
+            infonce = 0.5 * (
+                F.cross_entropy(logits, labels)
+                + F.cross_entropy(logits.transpose(0, 1), labels)
+            )
+            losses["l_infonce"] = self.infonce_coef * infonce
+
+        if self.binary_coef != 0:
+            pair_logits = torch.cat(
+                [positive_similarity, negative_similarity],
+                dim=0,
+            ) / self.temperature
+            targets = torch.cat(
+                [
+                    torch.ones_like(positive_similarity),
+                    torch.zeros_like(negative_similarity),
+                ],
+                dim=0,
+            )
+            losses["l_binary"] = self.binary_coef * (
+                F.binary_cross_entropy_with_logits(pair_logits, targets)
+            )
+
+        if self.ranking_coef != 0:
+            ranking = F.relu(
+                self.margin
+                - positive_similarity
+                + hardest_negative_similarity
+            ).mean()
+            losses["l_ranking"] = self.ranking_coef * ranking
+
+        losses["positive_similarity"] = (
+            positive_similarity.mean().detach()
+        )
+        losses["hardest_negative_similarity"] = (
+            hardest_negative_similarity.mean().detach()
+        )
+        return losses
+
+
+def get_triple_image_id(triple: Any) -> int:
+    """Extract the source image ID from a relationship record."""
+    if isinstance(triple, dict):
+        return int(triple["image_id"])
+
+    if hasattr(triple, "image_id"):
+        return int(triple.image_id)
+
+    raise TypeError(
+        "Each triple must contain an image_id field. "
+        f"Received {type(triple)!r}."
+    )
+
+
 def train(
     *,
     model: PNP,
@@ -216,30 +443,20 @@ def train(
     visualize_every_steps: int = 0,
     visualize_samples: int = 1,
     visualize_images_per_batch: int = 4,
+    max_steps: int = 0,
 ) -> None:
     model.train()
 
-    amp_enabled = (
-        use_amp
-        and device.type == "cuda"
-    )
-
-    scaler = torch.amp.GradScaler(
-        "cuda",
-        enabled=amp_enabled,
-    )
+    amp_enabled = use_amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     checkpoint_path = (
         Path(checkpoint_dir)
         if checkpoint_dir is not None
         else None
     )
-
     if checkpoint_path is not None:
-        checkpoint_path.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
 
     global_step = 0
 
@@ -248,19 +465,37 @@ def train(
             dataloader,
             desc=f"Epoch {epoch + 1}/{epochs}",
         )
-
         running_loss = 0.0
+        processed_batches = 0
 
         for batch_index, batch in enumerate(progress):
+            # images contains one tensor per unique image in the loader batch.
             images = get_images(batch).to(
                 device=device,
                 non_blocking=True,
             )
 
-            batch_size = images.shape[0]
+            positive_triples = batch["positive_triples"]
+            negative_triples = batch["negative_triples"]
+            num_positive_pairs = len(positive_triples)
+            num_negative_pairs = len(negative_triples)
 
-            # LLM2Vec is a frozen embedding generator. This operation is
-            # outside autocast because the encoder may manage its own dtype.
+            if num_positive_pairs == 0 or num_negative_pairs == 0:
+                continue
+
+            if num_negative_pairs % num_positive_pairs != 0:
+                raise ValueError(
+                    "The number of negative triples must be divisible by "
+                    "the number of positive triples. Received "
+                    f"{num_negative_pairs} negatives for "
+                    f"{num_positive_pairs} positives."
+                )
+
+            negatives_per_positive = (
+                num_negative_pairs // num_positive_pairs
+            )
+
+            # LLM2Vec is frozen and only generates text embeddings.
             with torch.no_grad():
                 pair_embeddings = encode_pair_strings(
                     llm2vec=llm2vec,
@@ -289,63 +524,98 @@ def train(
                 dtype=images.dtype,
             )
 
-            if positive_anchor_embeddings.ndim != 2:
-                raise ValueError(
-                    "positive_anchor_embeddings must have shape "
-                    f"[B, D], received "
-                    f"{tuple(positive_anchor_embeddings.shape)}"
+            # Accept [N, D] or [P, K, D] negatives and convert to [N, D].
+            if negative_anchor_embeddings.ndim == 3:
+                negative_anchor_embeddings = (
+                    negative_anchor_embeddings.flatten(0, 1)
+                )
+            if negative_text_embeddings.ndim == 3:
+                negative_text_embeddings = (
+                    negative_text_embeddings.flatten(0, 1)
                 )
 
-            if positive_text_embeddings.ndim != 2:
-                raise ValueError(
-                    "positive_text_embeddings must have shape "
-                    f"[B, D], received "
-                    f"{tuple(positive_text_embeddings.shape)}"
-                )
-
-            if positive_anchor_embeddings.shape[0] != batch_size:
-                raise ValueError(
-                    "Positive anchor embedding count does not match "
-                    f"the image batch: "
-                    f"{positive_anchor_embeddings.shape[0]} versus "
-                    f"{batch_size}"
-                )
-
-            if positive_text_embeddings.shape[0] != batch_size:
-                raise ValueError(
-                    "Positive text embedding count does not match "
-                    f"the image batch: "
-                    f"{positive_text_embeddings.shape[0]} versus "
-                    f"{batch_size}"
-                )
-
-            negative_anchor_embeddings, anchor_negative_count = (
-                flatten_negative_embeddings(
+            embedding_groups = {
+                "positive_anchor_embeddings": (
+                    positive_anchor_embeddings,
+                    num_positive_pairs,
+                ),
+                "positive_text_embeddings": (
+                    positive_text_embeddings,
+                    num_positive_pairs,
+                ),
+                "negative_anchor_embeddings": (
                     negative_anchor_embeddings,
-                    batch_size=batch_size,
-                )
-            )
-
-            negative_text_embeddings, text_negative_count = (
-                flatten_negative_embeddings(
+                    num_negative_pairs,
+                ),
+                "negative_text_embeddings": (
                     negative_text_embeddings,
-                    batch_size=batch_size,
-                )
-            )
+                    num_negative_pairs,
+                ),
+            }
 
-            if anchor_negative_count != text_negative_count:
+            for name, (embeddings, expected_count) in embedding_groups.items():
+                if embeddings.ndim != 2:
+                    raise ValueError(
+                        f"{name} must have shape [N, D], received "
+                        f"{tuple(embeddings.shape)}"
+                    )
+                if embeddings.shape[0] != expected_count:
+                    raise ValueError(
+                        f"{name} count does not match its relationship "
+                        f"records: {embeddings.shape[0]} versus "
+                        f"{expected_count}."
+                    )
+
+            embedding_dims = {
+                positive_anchor_embeddings.shape[1],
+                positive_text_embeddings.shape[1],
+                negative_anchor_embeddings.shape[1],
+                negative_text_embeddings.shape[1],
+            }
+            if len(embedding_dims) != 1:
                 raise ValueError(
-                    "Negative anchor and text counts differ: "
-                    f"{anchor_negative_count} versus "
-                    f"{text_negative_count}"
+                    "All positive and negative embeddings must have the "
+                    f"same dimension, received {sorted(embedding_dims)}."
                 )
 
-            negatives_per_positive = anchor_negative_count
+            batch_image_ids = batch["image_id"]
+            if len(batch_image_ids) != images.shape[0]:
+                raise ValueError(
+                    "Image ID count does not match the unique image batch: "
+                    f"{len(batch_image_ids)} versus {images.shape[0]}."
+                )
 
-            negative_images = repeat_images_for_negatives(
-                images,
-                negatives_per_positive,
-            )
+            image_id_to_batch_index = {
+                int(image_id): index
+                for index, image_id in enumerate(batch_image_ids)
+            }
+
+            try:
+                positive_image_indices = torch.tensor(
+                    [
+                        image_id_to_batch_index[
+                            get_triple_image_id(triple)
+                        ]
+                        for triple in positive_triples
+                    ],
+                    dtype=torch.long,
+                    device=device,
+                )
+                negative_image_indices = torch.tensor(
+                    [
+                        image_id_to_batch_index[
+                            get_triple_image_id(triple)
+                        ]
+                        for triple in negative_triples
+                    ],
+                    dtype=torch.long,
+                    device=device,
+                )
+            except KeyError as error:
+                raise ValueError(
+                    "A relationship triple refers to an image that is not "
+                    f"present in the current batch: {error.args[0]}."
+                ) from error
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -358,41 +628,78 @@ def train(
                 else nullcontext()
             )
 
-            with autocast_context:
-                # Positive maps: [B, 1, H, W]
-                positive_anchor_maps = model(
-                    images,
-                    positive_anchor_embeddings,
-                )
-                positive_text_maps = model(
-                    images,
-                    positive_text_embeddings,
+        with autocast_context:
+            positive_images = images.index_select(
+                dim=0,
+                index=positive_image_indices,
+            )
+            negative_images = images.index_select(
+                dim=0,
+                index=negative_image_indices,
+            )
+
+            positive_anchor_maps = model(
+                positive_images,
+                positive_anchor_embeddings,
+            )
+            positive_text_maps = model(
+                positive_images,
+                positive_text_embeddings,
+            )
+            negative_anchor_maps = model(
+                negative_images,
+                negative_anchor_embeddings,
+            )
+            negative_text_maps = model(
+                negative_images,
+                negative_text_embeddings,
+            )
+
+            validate_similarity_map(
+                positive_anchor_maps,
+                batch_size=num_positive_pairs,
+                name="positive_anchor_maps",
+            )
+            validate_similarity_map(
+                positive_text_maps,
+                batch_size=num_positive_pairs,
+                name="positive_text_maps",
+            )
+            validate_similarity_map(
+                negative_anchor_maps,
+                batch_size=num_negative_pairs,
+                name="negative_anchor_maps",
+            )
+            validate_similarity_map(
+                negative_text_maps,
+                batch_size=num_negative_pairs,
+                name="negative_text_maps",
+            )
+
+            loss_dict = criterion(
+                positive_anchor_maps=positive_anchor_maps,
+                positive_text_maps=positive_text_maps,
+                negative_anchor_maps=negative_anchor_maps,
+                negative_text_maps=negative_text_maps,
+                batch_size=num_positive_pairs,
+                negatives_per_positive=negatives_per_positive,
+            )
+
+            train_losses = [
+                value
+                for name, value in loss_dict.items()
+                if name.startswith("l_")
+            ]
+
+            if not train_losses:
+                raise ValueError(
+                    "The criterion returned no losses whose names start "
+                    "with 'l_'."
                 )
 
-                # Negative maps: [B * K, 1, H, W]
-                negative_anchor_maps = model(
-                    negative_images,
-                    negative_anchor_embeddings,
-                )
-                negative_text_maps = model(
-                    negative_images,
-                    negative_text_embeddings,
-                )
-
-                loss_dict = criterion(
-                    positive_anchor_maps=positive_anchor_maps,
-                    positive_text_maps=positive_text_maps,
-                    negative_anchor_maps=negative_anchor_maps,
-                    negative_text_maps=negative_text_maps,
-                    batch_size=batch_size,
-                    negatives_per_positive=negatives_per_positive,
-                )
-
-                total_loss = sum(
-                    value
-                    for name, value in loss_dict.items()
-                    if name.startswith("l_")
-                )
+            total_loss = torch.stack(
+                [loss.reshape(()) for loss in train_losses]
+            ).sum()
 
             if not torch.isfinite(total_loss):
                 raise FloatingPointError(
@@ -405,7 +712,6 @@ def train(
 
             if gradient_clip_norm is not None:
                 scaler.unscale_(optimizer)
-
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     max_norm=gradient_clip_norm,
@@ -415,30 +721,43 @@ def train(
             scaler.update()
 
             global_step += 1
+            if max_steps > 0 and global_step >= max_steps:
+                print(
+                    f"CPU smoke test completed after {global_step} step(s).",
+                    flush=True,
+                )
+                return
+            processed_batches += 1
             running_loss += total_loss.detach().item()
+            average_loss = running_loss / processed_batches
 
-            average_loss = running_loss / (
-                batch_index + 1
-            )
+            postfix = {
+                "loss": f"{total_loss.detach().item():.4f}",
+                "average": f"{average_loss:.4f}",
+            }
+            if "positive_similarity" in loss_dict:
+                postfix["positive"] = (
+                    f"{loss_dict['positive_similarity'].detach().item():.3f}"
+                )
+            if "hardest_negative_similarity" in loss_dict:
+                postfix["negative"] = (
+                    f"{loss_dict['hardest_negative_similarity'].detach().item():.3f}"
+                )
+            progress.set_postfix(**postfix)
 
-            progress.set_postfix(
-                loss=f"{total_loss.detach().item():.4f}",
-                average=f"{average_loss:.4f}",
-                positive=(
-                    f"{loss_dict['positive_similarity'].item():.3f}"
-                ),
-                negative=(
-                    f"{loss_dict['hardest_negative_similarity'].item():.3f}"
-                ),
-            )
             wandb_metrics = {
                 "train/loss": total_loss.detach().item(),
                 "train/loss_avg": average_loss,
                 "train/epoch": epoch + 1,
+                "train/positive_pairs": num_positive_pairs,
+                "train/negative_pairs": num_negative_pairs,
+                "train/negatives_per_positive": negatives_per_positive,
             }
             for name, value in loss_dict.items():
                 if torch.is_tensor(value) and value.numel() == 1:
-                    wandb_metrics[f"train/{name}"] = value.detach().item()
+                    wandb_metrics[f"train/{name}"] = (
+                        value.detach().item()
+                    )
 
             if wandb.run is not None:
                 wandb.log(wandb_metrics, step=global_step)
@@ -457,6 +776,7 @@ def train(
                     images_per_batch=visualize_images_per_batch,
                     global_step=global_step,
                 )
+                model.train()
 
         if checkpoint_path is not None:
             torch.save(
@@ -467,9 +787,31 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(),
                 },
-                checkpoint_path
-                / f"pnp_epoch_{epoch + 1:03d}.pt",
+                checkpoint_path / f"pnp_epoch_{epoch + 1:03d}.pt",
             )
+
+class MockLLM2Vec:
+    def __init__(self, embedding_dim: int = 4096) -> None:
+        self.embedding_dim = embedding_dim
+
+    def encode(self, inputs: list[list[str]]) -> torch.Tensor:
+        embeddings = []
+
+        for instruction, text in inputs:
+            seed = hash((instruction, text)) & 0x7FFFFFFF
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(seed)
+
+            embedding = torch.randn(
+                self.embedding_dim,
+                generator=generator,
+                dtype=torch.float32,
+            )
+            embedding = F.normalize(embedding, dim=0)
+            embeddings.append(embedding)
+
+        return torch.stack(embeddings, dim=0)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -478,8 +820,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", default="dinov2_vitb14")
     parser.add_argument(
         "--backbone-module",
-        default="modeling.backbones",
+        default="modeling.backbone",
         help="Python module containing the backbone classes.",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=Path(DEFAULT_VG_ROOT),
+        help="Visual Genome dataset root.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default="McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
+    )
+    parser.add_argument(
+        "--llm-peft-model",
+        default=(
+            "McGill-NLP/"
+            "LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-unsup-simcse"
+        ),
+    )
+    parser.add_argument(
+        "--llm-cache-dir",
+        type=Path,
+        default=Path(
+            "/net/tscratch/people/plgpiotrwojcik/model_cache"
+        ),
     )
     parser.add_argument("--num-splits", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -489,6 +855,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--encode-batch-size", type=int, default=32)
     parser.add_argument("--text-dim", type=int, default=4096)
     parser.add_argument("--log-dir", default="wandb")
+    parser.add_argument(
+        "--mock-text-embeddings",
+        action="store_true",
+        help="Use deterministic random text embeddings instead of loading LLM2Vec.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=0,
+        help="Stop after N optimiser steps; 0 means no limit.",
+    )
     parser.add_argument(
         "--checkpoint-dir",
         default="checkpoints/pnp_visual_genome",
@@ -573,7 +950,7 @@ def main() -> None:
     )
 
     dataset = VisualGenomeSceneGraphDataset(
-        root=DEFAULT_VG_ROOT,
+        root=args.dataset_root,
     )
 
     dataloader = DataLoader(
@@ -590,12 +967,19 @@ def main() -> None:
         drop_last=True,
     )
 
-    llm2vec = load_llm2vec(
-        cache_dir=(
-            "/net/tscratch/people/"
-            "plgpiotrwojcik/model_cache"
+    if args.mock_text_embeddings:
+        print(
+            "Using mock text embeddings; LLM2Vec will not be loaded.",
+            flush=True,
         )
-    )
+        llm2vec = MockLLM2Vec(embedding_dim=args.text_dim)
+    else:
+        llm2vec = load_llm2vec(
+            cache_dir=args.llm_cache_dir,
+            device=device,
+            model_name=args.llm_model,
+            peft_model_name=args.llm_peft_model,
+        )
 
     # The LLM2Vec encoder supplies fixed target embeddings. Only PNP is
     # optimised by this training loop.
@@ -606,7 +990,7 @@ def main() -> None:
             parameter.requires_grad = False
 
 
-    backbone, dim = build_backbone(args)
+    backbone, _ = build_backbone(args)
 
     # Replace these values with the actual model construction used by
     # your project.
@@ -620,13 +1004,11 @@ def main() -> None:
 
     criterion = PNPContrastiveCriterion(
         infonce_coef=1.0,
+        binary_coef=1.0,
         ranking_coef=1.0,
-        consistency_coef=0.25,
-        entropy_coef=0.01,
         temperature=0.07,
         margin=0.2,
     )
-
     optimizer = AdamW(
         [
             {
@@ -660,6 +1042,7 @@ def main() -> None:
         visualize_every_steps=args.visualize_every_steps,
         visualize_samples=args.visualize_samples,
         visualize_images_per_batch=args.visualize_images_per_batch,
+        max_steps=args.max_steps,
     )
 
     if wandb.run is not None:
@@ -671,7 +1054,7 @@ def _description_to_text(value: Any) -> str:
         return value
 
     if isinstance(value, dict):
-        for key in ("description", "text", "caption", "sentence"):
+        for key in ("phrase", "description", "text", "caption", "sentence"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
                 return candidate
