@@ -320,3 +320,68 @@ a real trade-off, not a clean win: **Joint gives +18pt accuracy over Sequential 
 have.** Worth deciding whether that trade-off is acceptable before treating Joint as the
 default going forward, and worth checking whether other classes have similar shortcuts
 before concluding this is an isolated case.
+
+## 7. Deletion faithfulness test (planned, not yet run)
+
+**Question**: Are the patches PNP's activation map highlights actually load-bearing for the
+prediction, or just decorative? Turns "faithful" from an adjective into a number.
+
+**Setup**: `scripts/eval_deletion_faithfulness.py`, inference-only, on RefCOCOg. Per
+example: compute the baseline per-patch cosine-similarity map (same mechanism as
+`evaluate_pnp_refer.py`), zero the patch-token vectors for the top `--delete-frac` (default
+20%) of patches by raw score, recompute IoU ("top-k deleted"); separately zero the same
+count of *randomly* chosen patches, recompute IoU ("random-k deleted", the control).
+Token-level masking is a deliberate cheap simplification (one backbone pass per image, no
+re-encoding) — it doesn't fully simulate "the image never had this content" (ViT
+self-attention already mixed information across patches in the single forward pass), but it
+directly tests whether the final similarity/threshold step depends on these specific patch
+representations, which is the thing "faithful" needs to be true about.
+
+**Metric**: faithfulness gap = mean(drop_topk − drop_random) across a random sample of test
+examples (default 300, keeps cost low), with a paired bootstrap CI. Positive and CI
+excluding 0 ⇒ real evidence of faithfulness; CI including 0 ⇒ no better than random.
+
+**Status**: implemented, not run. `bash scripts/slurm_eval_deletion_faithfulness.sh`
+(override `DATASET`/`SPLIT`/`N_SAMPLES`/`DELETE_FRAC` via env vars). Output:
+`results/deletion_faithfulness_<dataset>_<split>/{summary.json, per_example.csv,
+deletion_faithfulness.png}`.
+
+## 8. Prototype dictionary inspection (planned, not yet run)
+
+**Question**: Does the projection head that maps frozen CLIP text embeddings into visual
+space preserve CLIP's own semantic neighborhoods, or reshape them? What does the learned
+prototype space look like as a whole?
+
+**Setup**: `scripts/inspect_prototype_dictionary.py`, pure vocabulary-embedding analysis —
+no images, no GPU forward pass over data, cheap. Two views: (a) for a handful of query
+words, k-nearest-neighbor word lists compared side by side in CLIP's original text space vs.
+the learned projected prototype space, with neighbor-set overlap reported; (b) a t-SNE
+scatter of a real-word-filtered vocab subset (avoids the un-curated vocab's typo tail
+dominating the picture, same `nltk.corpus.words` filter as `visualize_concept_retrieval.py`),
+colored by coarse POS (noun/adjective/other), with the query words annotated directly on
+the plot.
+
+**Status**: implemented, not run. `bash scripts/slurm_inspect_prototype_dictionary.sh`
+(override `WORDS` env var for custom query words; defaults to 8 random real vocab words).
+Output: `results/prototype_dictionary/{nearest_neighbor_shift.json, prototype_tsne.png}`.
+
+## 9. Zero-shot open-vocabulary grounding demo on VG (planned, not yet run)
+
+**Question**: Does the open-vocabulary grounding mechanism work qualitatively on arbitrary
+free-text phrases — not confined to RefCOCOg's referring-expression style or vocabulary —
+directly on the model's own training-distribution images? Analogous to CTRL-O's Fig. 3.
+
+**Setup**: `scripts/visualize_vg_open_vocab_grounding.py`, qualitative only, no ground truth,
+no training. Images sampled directly from the VG shards by globbing filenames (no
+`region_descriptions.json` needed at all). Reuses `evaluate_pnp_refer.py`'s *manual*
+backbone+CLIP-text scoring pipeline (not the full `PNP.forward()` call) — unlike
+`visualize_concept_retrieval.py`, this means it's **not** locked to CLIP's fixed 224px image
+encoder, since it never touches `clip_model.encode_image`. Defaults to 672px (M1's headline
+resolution). For each sampled image, grounds every phrase in `--phrases` (default: a mix of
+color+object, person+attribute, material+object, a "stuff" class, and a bare noun) and saves
+one combined figure per image, one heatmap+bbox panel per phrase.
+
+**Status**: implemented, not run. `bash scripts/slurm_visualize_vg_open_vocab_grounding.sh`
+(override `N_IMAGES`; custom phrases via `PHRASES_FILE=<path, one phrase per line>` — kept
+file-based rather than an env-var list to avoid fragile shell-quoting of multi-word phrases
+through a `--wrap` string). Output: `results/vg_open_vocab_grounding/grounding_<image>.png`.
