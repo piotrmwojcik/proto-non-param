@@ -346,7 +346,7 @@ excluding 0 ⇒ real evidence of faithfulness; CI including 0 ⇒ no better than
 `results/deletion_faithfulness_<dataset>_<split>/{summary.json, per_example.csv,
 deletion_faithfulness.png}`.
 
-## 8. Prototype dictionary inspection (planned, not yet run)
+## 8. Prototype dictionary inspection
 
 **Question**: Does the projection head that maps frozen CLIP text embeddings into visual
 space preserve CLIP's own semantic neighborhoods, or reshape them? What does the learned
@@ -357,13 +357,49 @@ no images, no GPU forward pass over data, cheap. Two views: (a) for a handful of
 words, k-nearest-neighbor word lists compared side by side in CLIP's original text space vs.
 the learned projected prototype space, with neighbor-set overlap reported; (b) a t-SNE
 scatter of a real-word-filtered vocab subset (avoids the un-curated vocab's typo tail
-dominating the picture, same `nltk.corpus.words` filter as `visualize_concept_retrieval.py`),
-colored by coarse POS (noun/adjective/other), with the query words annotated directly on
-the plot.
+dominating the picture, same `nltk.corpus.words` filter as `visualize_concept_retrieval.py`).
+Two coloring modes: default, colored by coarse POS (noun/adjective/other) with query words
+annotated directly on the plot; or `--groups-file` (comma-separated semantic groups per
+line, e.g. `cat,lion,dog`), which instead colors each group distinctly against a gray
+background and adds a quantitative check — mean intra-group cosine similarity vs. a
+random-subset baseline of the same size (`group_clustering.json`) — since t-SNE proximity
+alone only reflects *local* neighbor structure, not a reliable global "these are related"
+signal on its own.
 
-**Status**: implemented, not run. `bash scripts/slurm_inspect_prototype_dictionary.sh`
-(override `WORDS` env var for custom query words; defaults to 8 random real vocab words).
-Output: `results/prototype_dictionary/{nearest_neighbor_shift.json, prototype_tsne.png}`.
+**Result — default (POS-colored, random query words) run**
+(`figures/prototype_tsne_random_concepts.png`, 2007 real words + 8 query words: pretzel,
+market, belly, roost, information, steed, taxi, reef — the default's deterministic 8-word
+random sample at `--seed 0`):
+- Nouns and adjectives are thoroughly intermixed across the whole space with no visible
+  macro-clustering by part of speech — expected, since POS is a syntactic category and the
+  prototype space encodes visual/semantic similarity, not grammatical class.
+- None of the 8 query words landed in the dense central mass; all sit either at its edge or
+  in one of several small, sparse satellite clusters peeling off the main cloud (upper area:
+  pretzel, market; right: belly; far left: roost, information; bottom: steed, taxi, reef).
+  This is consistent with these being lower-frequency/less-central vocabulary items in VG's
+  caption distribution rather than evidence of mutual relatedness — the 8 words were sampled
+  *randomly*, not chosen as a related/unrelated pair, so this run doesn't by itself test
+  "do related concepts cluster."
+- The one striking proximity — **roost** and **information** landing right next to each
+  other in the same small isolated cluster — is almost certainly coincidental rather than
+  semantic: the two words share no obvious meaning, and a more likely explanation is that
+  both are comparably rare tokens that the projection pushes into the same sparse, low-density
+  corner of the space. Read this as "rare words get their own periphery," not "roost and
+  information are related concepts." Same caveat applies to the steed/taxi/reef trio.
+- **Takeaway**: this run is consistent with a working, well-behaved embedding space (no
+  collapse, no POS-driven artifact structure) but is not a controlled test of semantic
+  clustering, since the query words weren't chosen for known relatedness. The `--groups-file`
+  mode (cat/lion/dog vs. furniture/chair/table) is the actual controlled version of this
+  question — group-colored t-SNE plus the intra-group-vs-random-baseline z-score in
+  `group_clustering.json` — and should be the version cited for a "related concepts cluster
+  together" claim, once reviewed.
+
+**Status**: implemented and run.
+`bash scripts/slurm_inspect_prototype_dictionary.sh` (override `WORDS` for custom flat query
+words, or `GROUPS_FILE=<path on $SCRATCH/$HOME>` for semantic-group mode — not `/tmp`, which
+isn't visible to the compute node the job lands on). Output:
+`results/prototype_dictionary/{nearest_neighbor_shift.json, prototype_tsne.png,
+group_clustering.json (group mode only)}`.
 
 ## 9. Zero-shot open-vocabulary grounding demo on VG
 
