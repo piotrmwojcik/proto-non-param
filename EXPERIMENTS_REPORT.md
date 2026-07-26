@@ -276,9 +276,47 @@ Worth trying a standardized version of the avg-activation ranking (same basis th
 classifier uses) as a fairer comparison before treating the zero-overlap finding as fully
 explained — it might show partial overlap instead of none.
 
-**Status**: seed/class-count made configurable (`--seed`, `--n-random-classes`,
-`SEED`/`N_RANDOM_CLASSES` env vars on the sbatch wrapper) so more examples can be pulled
-without overwriting prior runs (`results/cub_explain_joint/seed<N>/`). Only run against
-the Joint checkpoint so far — Stage 2 (Sequential) needs its own pass (`fit_sparse_cub_probe.py`
-re-run first to produce the now-added `.joblib` model file, then `--mode sequential`) to
-see whether the same zero-overlap pattern holds for the sparse classifier too.
+Seed/class-count made configurable (`--seed`, `--n-random-classes`, `SEED`/`N_RANDOM_CLASSES`
+env vars on the sbatch wrapper) so more examples can be pulled without overwriting prior
+runs (`results/cub_explain_joint/seed<N>/`).
+
+### 6b. Label-free-CBM-style per-image contribution decomposition — a concrete leakage case study
+
+Added a third view, verified against Label-free-CBM's actual `plots.py`/`evaluate_cbm.ipynb`
+on GitHub rather than assumed: for one specific image, `standardized_activation[concept] *
+weight[predicted_class, concept]`, ranked by `|contribution|` — decomposes that image's own
+predicted logit into per-concept summands (sum of contributions + bias == the logit,
+checked at runtime). This is a genuinely different thing from both views above: it's
+per-image and classifier-weighted, not class-averaged or activation-only.
+
+**Finding**: sampling images across multiple seeds (25+ images spanning ~20 different
+species) surfaced a recurring, class-inappropriate concept: **"a loud caw"** (and other
+crow-family concepts — "large black bird," "a slimmer body than most crows") shows up
+repeatedly as a top-5 contributor for **Acadian_Flycatcher** predictions on the **Joint**
+checkpoint — a small olive/gray songbird, not a corvid. Ruled out as a sampling artifact by
+testing (a) a genuinely random cross-species sample (15 random test images spanning ~14
+species): the crow-concept leak appeared in exactly 1/15, and it was Acadian_Flycatcher
+again; (b) within actual American_Crow images, the same crow concepts are completely
+legitimate and correctly discriminative — the leak is specific to this one class showing up
+outside its legitimate domain, not a global default.
+
+**Decisive comparison**: re-ran the same class on the **Sequential (Stage 2)** classifier
+(`fit_sparse_cub_probe.py`, re-run to produce the previously-missing `.joblib` model file
+via a small addition to that script) — **zero crow-concept leakage**, in either the
+per-image contributions (3/3 images checked) or the per-class weight top-5. Every surfaced
+concept for Acadian_Flycatcher on Sequential is visually appropriate ("a small,
+greenish-gray bird," "gray upperparts," "a green tail with a white edge").
+
+**Conclusion**: the crow-concept shortcut is an artifact of joint training specifically —
+letting the classification loss backpropagate through the whole concept encoder (Joint)
+apparently let the encoder develop a spurious concept association that never emerges when
+the encoder is trained separately from the classifier (Sequential). This is a concrete,
+reproducible instance of exactly the "malign leakage" risk that motivated caution about
+joint training in the first place (Espinosa Zarlenga et al.'s paper argues most leakage is
+*benign*, but doesn't claim *all* of it is). Combined with §5's finding that the paper's own
+sufficiency regularizer didn't move accuracy at all, the fuller picture for this project is
+a real trade-off, not a clean win: **Joint gives +18pt accuracy over Sequential (85.71% vs
+67.41%) but has at least one demonstrated spurious concept shortcut that Sequential doesn't
+have.** Worth deciding whether that trade-off is acceptable before treating Joint as the
+default going forward, and worth checking whether other classes have similar shortcuts
+before concluding this is an isolated case.
