@@ -112,22 +112,23 @@ def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, ou
     if image_path is not None:
         ax_img.imshow(Image.open(image_path).convert("RGB"))
     ax_img.axis("off")
-    ax_img.set_title(f"Class: {class_name.replace('_', ' ')}", fontsize=13,
+    ax_img.set_title(f"Class: {class_name.replace('_', ' ')}", fontsize=17,
                      fontweight="bold", loc="left")
 
     y = np.arange(len(names))
     ax_bar.barh(y, values, color=colors)
     ax_bar.set_yticks(y)
-    ax_bar.set_yticklabels(names)
+    ax_bar.set_yticklabels(names, fontsize=13)
     ax_bar.invert_yaxis()  # highest |score| at top
     for yi, v in zip(y, values):
         ha = "right" if v >= 0 else "left"
         ax_bar.text(v * 0.98, yi, f"{v:.3f}", va="center", ha=ha,
-                    color="white", fontweight="bold", fontsize=9)
+                    color="white", fontweight="bold", fontsize=12)
     if signed:
         ax_bar.axvline(0, color="black", linewidth=0.8)
-    ax_bar.set_xlabel("Concept Score")
-    ax_bar.set_title(title_suffix, fontsize=13, fontweight="bold")
+    ax_bar.set_xlabel("Concept Score", fontsize=13)
+    ax_bar.tick_params(axis="x", labelsize=11)
+    ax_bar.set_title(title_suffix, fontsize=16, fontweight="bold")
     for spine in ("top", "right"):
         ax_bar.spines[spine].set_visible(False)
 

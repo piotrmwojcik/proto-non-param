@@ -121,7 +121,8 @@ def collect_patch_logits(net, images, img_transform, device, concept_indices, ba
     return torch.cat(all_logits, dim=0), pil_images
 
 
-def _draw_concept_row(axes_row, concept, topk_values, topk_indices, patch_logits_col, pil_images):
+def _draw_concept_row(axes_row, concept, topk_values, topk_indices, patch_logits_col, pil_images,
+                       show_box=True, label_fontsize=20):
     """Draw one concept's top-k crops into a pre-made row of axes. Shared by both
     the combined-grid and one-file-per-concept output modes below."""
     for col, (score, global_idx) in enumerate(zip(topk_values.tolist(), topk_indices.tolist())):
@@ -134,18 +135,20 @@ def _draw_concept_row(axes_row, concept, topk_values, topk_indices, patch_logits
         hm_up = F.interpolate(hm.view(1, 1, H, W), size=img_uint8.shape[:2],
                                mode="bilinear", align_corners=False)[0, 0]
 
-        bbox = find_high_activation_crop(hm_up.numpy(), percentile=95)
         overlay = overlay_heatmap(img_uint8, hm_up, alpha=0.45)
-        overlay_box = draw_rect_on_image(overlay, bbox)
+        if show_box:
+            bbox = find_high_activation_crop(hm_up.numpy(), percentile=95)
+            overlay = draw_rect_on_image(overlay, bbox)
 
-        ax.imshow(overlay_box)
+        ax.imshow(overlay)
         ax.axis("off")
     # ax.axis("off") hides a normal ylabel, so annotate with text instead
-    axes_row[0].text(-0.1, 0.5, concept, transform=axes_row[0].transAxes,
-                     rotation=90, va="center", ha="center", fontsize=12)
+    axes_row[0].text(-0.12, 0.5, concept, transform=axes_row[0].transAxes,
+                     rotation=90, va="center", ha="center",
+                     fontsize=label_fontsize, fontweight="bold")
 
 
-def make_figure(concepts, concept_word_to_score_and_patch, pil_images, topk, out_path):
+def make_figure(concepts, concept_word_to_score_and_patch, pil_images, topk, out_path, show_box=True):
     """Combined grid: one figure, one row per concept."""
     n_concepts = len(concepts)
     fig, axes = plt.subplots(n_concepts, topk, figsize=(3 * topk, 3 * n_concepts), dpi=140)
@@ -154,7 +157,8 @@ def make_figure(concepts, concept_word_to_score_and_patch, pil_images, topk, out
 
     for row, concept in enumerate(concepts):
         topk_values, topk_indices, patch_logits_col = concept_word_to_score_and_patch[concept]
-        _draw_concept_row(axes[row], concept, topk_values, topk_indices, patch_logits_col, pil_images)
+        _draw_concept_row(axes[row], concept, topk_values, topk_indices, patch_logits_col, pil_images,
+                           show_box=show_box)
 
     fig.suptitle("Concept retrieval: top-activating regions per vocabulary word", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
@@ -162,16 +166,20 @@ def make_figure(concepts, concept_word_to_score_and_patch, pil_images, topk, out
     plt.close(fig)
 
 
-def make_separate_figures(concepts, concept_word_to_score_and_patch, pil_images, topk, out_dir):
+def make_separate_figures(concepts, concept_word_to_score_and_patch, pil_images, topk, out_dir, show_box=True):
     """One file per concept: results/concept_retrieval_<word>.png, easier to
-    skim/share individually than a single tall grid when requesting many concepts."""
+    skim/share individually than a single tall grid when requesting many concepts.
+
+    No on-image title: the word is already given by the rotated row label, and
+    the "concept retrieval" framing belongs in the paper's own figure caption,
+    not duplicated here."""
     paths = []
     for concept in concepts:
         topk_values, topk_indices, patch_logits_col = concept_word_to_score_and_patch[concept]
         fig, axes = plt.subplots(1, topk, figsize=(3 * topk, 3), dpi=140)
-        _draw_concept_row(axes, concept, topk_values, topk_indices, patch_logits_col, pil_images)
-        fig.suptitle(f"Concept retrieval: {concept}", fontsize=12)
-        fig.tight_layout(rect=[0, 0, 1, 0.90])
+        _draw_concept_row(axes, concept, topk_values, topk_indices, patch_logits_col, pil_images,
+                           show_box=show_box)
+        fig.tight_layout()
         out_path = os.path.join(out_dir, f"concept_retrieval_{concept}.png")
         fig.savefig(out_path)
         plt.close(fig)
@@ -209,6 +217,10 @@ def main():
                    help="Save one PNG per concept (concept_retrieval_<word>.png) "
                         "instead of a single combined grid — easier to skim/share "
                         "when requesting many concepts.")
+    p.add_argument("--no-box", action="store_true",
+                   help="Skip drawing the red high-activation bounding box; show "
+                        "only the heatmap overlay. Useful for comparing both "
+                        "renderings before picking one for the paper.")
     p.add_argument("--topk", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--device", type=str, default="cuda")
@@ -262,13 +274,15 @@ def main():
         topk_values, topk_indices = torch.topk(img_scores, k=k)
         concept_word_to_score_and_patch[concept] = (topk_values, topk_indices, col_logits)
 
+    show_box = not args.no_box
     if args.separate_figures:
         paths = make_separate_figures(concepts, concept_word_to_score_and_patch, pil_images,
-                                      args.topk, args.out_dir)
+                                      args.topk, args.out_dir, show_box=show_box)
         print(f"Saved {len(paths)} figures to {args.out_dir}/")
     else:
         out_path = os.path.join(args.out_dir, f"concept_retrieval_{args.dataset}_{args.split}.png")
-        make_figure(concepts, concept_word_to_score_and_patch, pil_images, args.topk, out_path)
+        make_figure(concepts, concept_word_to_score_and_patch, pil_images, args.topk, out_path,
+                    show_box=show_box)
         print(f"Saved {out_path}")
 
 

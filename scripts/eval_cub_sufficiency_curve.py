@@ -174,10 +174,11 @@ def main():
     fracs = [r["fraction"] * 100 for r in results]
     top1s = [r["top1_acc"] for r in results]
     ax.plot(fracs, top1s, marker="o")
-    ax.set_xlabel("Concepts CLIP-substituted (%)")
-    ax.set_ylabel("Top-1 accuracy (%)")
+    ax.set_xlabel("Concepts CLIP-substituted (%)", fontsize=13)
+    ax.set_ylabel("Top-1 accuracy (%)", fontsize=13)
+    ax.tick_params(axis="both", labelsize=11)
     ax.set_title("CLIP-substituted pseudo-intervention curve\n"
-                  "(NOT ground-truth concept labels)", fontsize=10)
+                  "(NOT ground-truth concept labels)", fontsize=13)
     fig.tight_layout()
     fig_path = os.path.join(args.out_dir, "sufficiency_curve.png")
     fig.savefig(fig_path)

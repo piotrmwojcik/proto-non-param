@@ -153,7 +153,7 @@ def main():
 
             axes[0].imshow(img_display)
             axes[0].axis("off")
-            axes[0].set_title("Original", fontsize=11, fontweight="bold")
+            axes[0].set_title("Original", fontsize=16, fontweight="bold")
 
             for ax, phrase in zip(axes[1:], args.phrases):
                 scores = (patch_tokens * p_queries[phrase].unsqueeze(1)).sum(dim=-1)[0]  # [N]
@@ -165,12 +165,11 @@ def main():
 
                 ax.imshow(masked)
                 ax.axis("off")
-                ax.set_title(f'"{phrase}"', fontsize=11)
+                ax.set_title(f'"{phrase}"', fontsize=16, fontweight="bold")
 
-            fig.suptitle("Zero-shot open-vocabulary grounding (no ground truth, no training on these phrases) "
-                        "— heat = above threshold, dimmed = below",
-                        fontsize=11)
-            fig.tight_layout(rect=[0, 0, 1, 0.93])
+            # No on-image suptitle: the "zero-shot, no ground truth, heat vs.
+            # dimmed" framing already lives in the paper's own figure caption.
+            fig.tight_layout()
 
             base = os.path.splitext(os.path.basename(img_path))[0]
             out_path = os.path.join(args.out_dir, f"grounding_{base}.png")

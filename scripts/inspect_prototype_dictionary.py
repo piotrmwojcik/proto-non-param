@@ -241,12 +241,13 @@ def main():
                 pos_in_sample = tsne_indices.index(idx)
                 x, y = coords[pos_in_sample]
                 ax.scatter([x], [y], c=[color], s=70, zorder=5, edgecolors="black")
-                ax.annotate(w, (x, y), fontsize=10, fontweight="bold", xytext=(5, 5),
+                ax.annotate(w, (x, y), fontsize=14, fontweight="bold", xytext=(5, 5),
                            textcoords="offset points")
             legend_elems.append(Line2D([0], [0], marker="o", color="w", markerfacecolor=color,
                                        markersize=9, markeredgecolor="black", label=", ".join(g)))
-        ax.legend(handles=legend_elems, loc="best")
-        ax.set_title(f"t-SNE of learned prototype space -- semantic groups ({len(tsne_indices)} real words)")
+        ax.legend(handles=legend_elems, loc="best", fontsize=12)
+        ax.set_title(f"t-SNE of learned prototype space -- semantic groups ({len(tsne_indices)} real words)",
+                    fontsize=15)
     else:
         tagged = nltk.pos_tag([vocab_words[i] for i in tsne_indices])
         pos_color = []
@@ -264,7 +265,7 @@ def main():
             pos_in_sample = tsne_indices.index(idx)
             x, y = coords[pos_in_sample]
             ax.scatter([x], [y], c="red", s=60, zorder=5, edgecolors="black")
-            ax.annotate(w, (x, y), fontsize=11, fontweight="bold", xytext=(5, 5),
+            ax.annotate(w, (x, y), fontsize=14, fontweight="bold", xytext=(5, 5),
                        textcoords="offset points")
 
         legend_elems = [
@@ -274,8 +275,8 @@ def main():
             Line2D([0], [0], marker="o", color="w", markerfacecolor="red", markersize=10,
                   markeredgecolor="black", label="query words"),
         ]
-        ax.legend(handles=legend_elems, loc="best")
-        ax.set_title(f"t-SNE of learned prototype space ({len(tsne_indices)} real words)")
+        ax.legend(handles=legend_elems, loc="best", fontsize=12)
+        ax.set_title(f"t-SNE of learned prototype space ({len(tsne_indices)} real words)", fontsize=15)
     ax.set_xticks([])
     ax.set_yticks([])
     fig.tight_layout()

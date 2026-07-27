@@ -11,6 +11,7 @@
 #   CONCEPTS="dog red wooden" bash scripts/slurm_visualize_concept_retrieval.sh   # explicit words
 #   N_CONCEPTS=30 bash scripts/slurm_visualize_concept_retrieval.sh               # more concepts
 #   SEPARATE_FIGURES=0 bash scripts/slurm_visualize_concept_retrieval.sh          # one combined grid instead
+#   NO_BOX=1 bash scripts/slurm_visualize_concept_retrieval.sh                    # heatmap only, no red box
 
 set -e
 
@@ -21,6 +22,7 @@ DATA_ROOT="${DATA_ROOT:-${SCRATCH}/data/refcoco}"
 IMG_SIZE="${IMG_SIZE:-224}"
 N_CONCEPTS="${N_CONCEPTS:-20}"
 SEPARATE_FIGURES="${SEPARATE_FIGURES:-1}"
+NO_BOX="${NO_BOX:-0}"
 
 PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"
@@ -45,6 +47,11 @@ fi
 SEPARATE_ARG=""
 if [ "${SEPARATE_FIGURES}" = "1" ]; then
     SEPARATE_ARG="--separate-figures"
+fi
+
+NO_BOX_ARG=""
+if [ "${NO_BOX}" = "1" ]; then
+    NO_BOX_ARG="--no-box"
 fi
 
 JOB=$(sbatch --parsable \
@@ -74,7 +81,8 @@ python scripts/visualize_concept_retrieval.py \
   --img-size ${IMG_SIZE} \
   --out-dir ${OUT_DIR} \
   ${CONCEPTS_ARG} \
-  ${SEPARATE_ARG}
+  ${SEPARATE_ARG} \
+  ${NO_BOX_ARG}
 ")
 echo "Submitted: ${JOB}"
 if [ "${SEPARATE_FIGURES}" = "1" ]; then
