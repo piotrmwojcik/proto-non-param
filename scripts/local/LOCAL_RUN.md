@@ -168,14 +168,18 @@ $dedupFiles = ssh $ATHENA 'cd ~/proto-non-param && python scripts/local/list_gre
 (progress/counts print to stderr and show in the console; `$dedupFiles`
 only captures the filename list from stdout.)
 
-Batched over a single connection using `sftp -b` (batch mode: a scripted
-sequence of `get` commands run over one persistent session, bundled with
-the same Windows OpenSSH package as `ssh`/`scp`) instead of one `scp` per
-file. (A `tar cf - | tar xf -` live pipe was tried first — Windows
-PowerShell 5.1's pipeline for two native processes isn't built for
-multi-GB *binary* streams and throws an internal buffer-capacity
-exception partway through; `sftp -b` avoids that entirely since it writes
-straight to local files, no PowerShell-mediated pipe involved.)
+Batched over a single connection using `sftp` fed a scripted sequence of
+`get` commands over stdin (bundled with the same Windows OpenSSH package
+as `ssh`/`scp`) instead of one `scp` per file. (A `tar cf - | tar xf -`
+live pipe was tried first — Windows PowerShell 5.1's pipeline for two
+native processes isn't built for multi-GB *binary* streams and throws an
+internal buffer-capacity exception partway through; `sftp` writes straight
+to local files instead, no PowerShell-mediated pipe involved. Note: the
+`-b batchfile` flag looks like the obvious way to script `sftp`, but it
+forces `BatchMode=yes` internally, which disables password prompts
+entirely and fails with "Permission denied" before even trying one --
+piping the same commands into plain `sftp`'s stdin instead keeps
+interactive password auth working.)
 ```powershell
 New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
 
@@ -184,7 +188,7 @@ $batchLines = @("cd ${SCRATCH_PATH}/data/refcoco/Gref/val_batch",
               ($dedupFiles | ForEach-Object { "get $_" })
 [System.IO.File]::WriteAllText("$PWD\local_run\assets\sftp_batch.txt", ($batchLines -join "`n") + "`n")
 
-sftp -b local_run\assets\sftp_batch.txt $ATHENA
+Get-Content local_run\assets\sftp_batch.txt | sftp $ATHENA
 
 (Get-ChildItem local_run\assets\refcoco_local\Gref\val_batch).Count   # should match $dedupFiles.Count
 ```
