@@ -69,10 +69,19 @@ This writes `ckpt_vg_m1_local.pth` / `ckpt_cub_joint_local.pth` — use
 
 ## 2. Prototype dictionary inspection — cheapest, zero images
 
+Create a groups file (edit the words, one comma-separated group per line —
+`<`/`>` placeholders break PowerShell, so this uses a real example instead):
+```powershell
+@"
+cat,lion,dog
+furniture,chair,table
+"@ | Set-Content -Encoding utf8 local_run\assets\groups.txt
+```
+
 ```powershell
 & $PY scripts\inspect_prototype_dictionary.py `
   --ckpt local_run\assets\ckpt_vg_m1_local.pth `
-  --groups-file <your groups file> `
+  --groups-file local_run\assets\groups.txt `
   --out-dir results\prototype_dictionary
 ```
 
@@ -170,6 +179,8 @@ foreach ($f in $dedupFiles) {
 & $PY scripts\visualize_concept_retrieval.py `
   --ckpt local_run\assets\ckpt_vg_m1_local.pth `
   --data-root local_run\assets\refcoco_local `
-  --concepts <your new concept words> `
+  --concepts umbrella bicycle striped wooden `
   --out-dir results\concept_retrieval
 ```
+(swap `umbrella bicycle striped wooden` for the words you actually want —
+space-separated, `--concepts` takes `nargs="+"`; no `<`/`>` around them.)
