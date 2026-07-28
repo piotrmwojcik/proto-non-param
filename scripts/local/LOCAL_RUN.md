@@ -1,44 +1,64 @@
-# Running the 6 stuck-on-Athena visualizations locally
+# Running the remaining visualizations locally
 
-Athena's `plgrid-gpu-a100` partition is short on capacity right now (see
-`hpc-grants`/`squeue`/`sinfo` — grant allocation is fine, it's queue
-congestion). This machine has a usable GPU, so run these locally instead of
-waiting. `athena` below is a placeholder SSH alias — adjust to whatever's in
-your `~/.ssh/config`.
+Athena's `plgrid-gpu-a100` partition is short on capacity right now (grant
+allocation is fine per `hpc-grants` — it's queue congestion, see
+`squeue`/`sinfo`). This machine has a usable GPU, so run these locally
+instead of waiting.
 
-All commands assume the venv python and repo root:
-```
-PY = C:\Users\preze\PycharmProjects\proto-VLM\venv\Scripts\python.exe
+**All commands below are PowerShell**, matching the actual working shell
+(not git-bash) — two gotchas that bit the first attempt, fixed here for
+good:
+1. PowerShell doesn't understand bash's `\$VAR` escaping inside double
+   quotes — `"...\$SCRATCH..."` sends a literal empty string, not `$SCRATCH`.
+   Use **single quotes** for any remote command that needs `$SCRATCH`
+   expanded *by the remote shell* (`ssh $ATHENA 'cmd with $SCRATCH'`).
+2. Modern `scp` defaults to the SFTP protocol, which does **not** invoke a
+   remote shell at all — `$SCRATCH` in an `scp` remote path never expands,
+   correct quoting or not. Every `scp` below uses the resolved literal path
+   instead.
+
+Set these once per shell session:
+```powershell
+$ATHENA = "plgabedychaj@login01.athena.cyfronet.pl"
+$SCRATCH_PATH = "/net/tscratch/people/plgabedychaj"   # literal value of Athena's $SCRATCH
+$PY = "C:\Users\preze\PycharmProjects\proto-VLM\venv\Scripts\python.exe"
 cd C:\Users\preze\PycharmProjects\proto-VLM\proto-non-param
 ```
 
 ## 0. One-time setup
 
-```
+```powershell
 & $PY scripts\local\setup_local_env.py
 ```
 
-Then set `PYTHONPATH` in every shell you run these from (setup prints the
-exact line; PowerShell shown, bash equivalent in the script's own output):
-```
+Then (setup prints this too):
+```powershell
 $env:PYTHONPATH = "C:\Users\preze\PycharmProjects\proto-VLM\local_run\deps\dinov2;$env:PYTHONPATH"
 ```
 
-## 1. Checkpoints + vocab caches (shared across all 6 experiments)
+## 1. Checkpoints + vocab caches (shared across all remaining experiments)
 
-Check sizes first, then pull:
+Check sizes first:
+```powershell
+ssh $ATHENA 'ls -lh $SCRATCH/train_logs/vg_contrastive/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth $SCRATCH/train_logs/cub_joint/ckpt.pth $SCRATCH/vocab/vg_cache.pt $SCRATCH/vocab/cub_clip_scores.pt $SCRATCH/vocab/cub_clip_scores_vocab_filtered.pt'
 ```
-ssh athena "ls -lh \$SCRATCH/train_logs/vg_contrastive/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth \$SCRATCH/train_logs/cub_joint/ckpt.pth \$SCRATCH/vocab/vg_cache.pt \$SCRATCH/vocab/cub_clip_scores.pt \$SCRATCH/vocab/cub_clip_scores_vocab_filtered.pt"
 
-scp athena:'$SCRATCH/train_logs/vg_contrastive/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth' local_run\assets\ckpt_vg_m1.pth
-scp athena:'$SCRATCH/train_logs/cub_joint/ckpt.pth' local_run\assets\ckpt_cub_joint.pth
-scp athena:'$SCRATCH/vocab/vg_cache.pt' local_run\assets\vg_cache.pt
-scp athena:'$SCRATCH/vocab/cub_clip_scores.pt' local_run\assets\cub_clip_scores.pt
-scp athena:'$SCRATCH/vocab/cub_clip_scores_vocab_filtered.pt' local_run\assets\cub_clip_scores_vocab_filtered.pt
+Pull them (`New-Item` first so the destination folder exists):
+```powershell
+New-Item -ItemType Directory -Force local_run\assets | Out-Null
+
+scp "${ATHENA}:${SCRATCH_PATH}/train_logs/vg_contrastive/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth" local_run\assets\ckpt_vg_m1.pth
+scp "${ATHENA}:${SCRATCH_PATH}/train_logs/cub_joint/ckpt.pth" local_run\assets\ckpt_cub_joint.pth
+scp "${ATHENA}:${SCRATCH_PATH}/vocab/vg_cache.pt" local_run\assets\vg_cache.pt
+scp "${ATHENA}:${SCRATCH_PATH}/vocab/cub_clip_scores.pt" local_run\assets\cub_clip_scores.pt
+scp "${ATHENA}:${SCRATCH_PATH}/vocab/cub_clip_scores_vocab_filtered.pt" local_run\assets\cub_clip_scores_vocab_filtered.pt
 ```
+(`${ATHENA}:` with braces, not `$ATHENA:` — PowerShell parses a bare
+`$var:` as a scope-qualified variable reference and won't expand it the way
+you'd expect.)
 
 Patch both checkpoints' baked-in Athena vocab path so they load locally:
-```
+```powershell
 & $PY scripts\local\patch_checkpoint_paths.py --ckpt local_run\assets\ckpt_vg_m1.pth --vocab-cache-path local_run\assets\vg_cache.pt
 & $PY scripts\local\patch_checkpoint_paths.py --ckpt local_run\assets\ckpt_cub_joint.pth --vocab-cache-path local_run\assets\cub_clip_scores_vocab_filtered.pt
 ```
@@ -49,7 +69,7 @@ This writes `ckpt_vg_m1_local.pth` / `ckpt_cub_joint_local.pth` — use
 
 ## 2. Prototype dictionary inspection — cheapest, zero images
 
-```
+```powershell
 & $PY scripts\inspect_prototype_dictionary.py `
   --ckpt local_run\assets\ckpt_vg_m1_local.pth `
   --groups-file <your groups file> `
@@ -58,19 +78,17 @@ This writes `ckpt_vg_m1_local.pth` / `ckpt_cub_joint_local.pth` — use
 
 ## 3. VG open-vocab grounding — needs ~10 arbitrary VG images
 
+```powershell
+$files = ssh $ATHENA 'ls $SCRATCH/vg/VG_100K | shuf -n 10'
+New-Item -ItemType Directory -Force local_run\assets\vg_images\VG_100K | Out-Null
+foreach ($f in $files) {
+  scp "${ATHENA}:${SCRATCH_PATH}/vg/VG_100K/$f" local_run\assets\vg_images\VG_100K\
+}
 ```
-ssh athena "ls \$SCRATCH/vg/VG_100K | shuf -n 10"
-```
-scp those 10 filenames into `local_run\assets\vg_images\` (any VG images
-work — this is qualitative, exact files don't matter):
-```
-scp athena:'$SCRATCH/vg/VG_100K/<file1>' athena:'$SCRATCH/vg/VG_100K/<file2>' ... local_run\assets\vg_images\
-```
-The script expects `VG_100K/` and/or `VG_100K_2/` subfolders under
-`--vg-root`, so put the downloaded jpgs in
-`local_run\assets\vg_images\VG_100K\`.
+Any VG images work — this is qualitative, exact files don't matter. The
+script expects `VG_100K/` and/or `VG_100K_2/` subfolders under `--vg-root`.
 
-```
+```powershell
 & $PY scripts\visualize_vg_open_vocab_grounding.py `
   --ckpt local_run\assets\ckpt_vg_m1_local.pth `
   --vg-root local_run\assets\vg_images `
@@ -80,13 +98,13 @@ The script expects `VG_100K/` and/or `VG_100K_2/` subfolders under
 
 ## 4. CUB explain (joint) — CUB comes from the public archive, not Athena
 
-```
+```powershell
 & $PY scripts\download_cub200.py --output-dir local_run\assets\cub200 --seed 42
 ```
 (~1.1GB one-time download from Caltech's public dataset host — unrelated to
 Athena, no scp needed. Builds `train/val/test/<class>/*.jpg` automatically.)
 
-```
+```powershell
 & $PY scripts\explain_cub_concepts.py `
   --mode joint `
   --ckpt local_run\assets\ckpt_cub_joint_local.pth `
@@ -110,7 +128,7 @@ Uses the same `local_run\assets\cub200\` from step 4 (full test split, no
 extra download). Watch VRAM (only ~4GB free per `nvidia-smi` last checked —
 close other GPU apps first); drop `--batch-size` if it OOMs.
 
-```
+```powershell
 & $PY scripts\eval_cub_sufficiency_curve.py `
   --ckpt local_run\assets\ckpt_cub_joint_local.pth `
   --cub-root local_run\assets\cub200 `
@@ -121,24 +139,34 @@ close other GPU apps first); drop `--batch-size` if it OOMs.
 
 ## 7. Concept retrieval — needs the ~600 deduped images, not all 9536
 
-First, on Athena's **login node** (no sbatch, no GPU, no queue wait — pure
+`list_gref_dedup_images.py` needs to exist on Athena too first — either
+push this branch and pull it there:
+```powershell
+git push origin local/conference-viz
+ssh $ATHENA 'cd ~/proto-non-param && git fetch origin && git checkout local/conference-viz && git pull'
+```
+or `scp` just that one file up if you'd rather not touch Athena's checkout:
+```powershell
+scp scripts\local\list_gref_dedup_images.py "${ATHENA}:${SCRATCH_PATH}/list_gref_dedup_images.py"
+```
+(adjust the `cd`/script path below accordingly if you use this route).
+
+Then, on Athena's **login node** (no sbatch, no GPU, no queue wait — pure
 IO/CPU, takes a couple minutes over the full `val_batch/` dir):
+```powershell
+$dedupFiles = ssh $ATHENA 'cd ~/proto-non-param && python scripts/local/list_gref_dedup_images.py --data-root $SCRATCH/data/refcoco --dataset Gref --split val'
 ```
-ssh athena "cd ~/proto-non-param && python scripts/local/list_gref_dedup_images.py --data-root \$SCRATCH/data/refcoco --dataset Gref --split val > \$HOME/gref_dedup_files.txt"
-scp athena:'$HOME/gref_dedup_files.txt' local_run\assets\gref_dedup_files.txt
-```
-(`list_gref_dedup_images.py` needs to exist on Athena too — either `git
-push` this branch and `git pull` there, or `scp` just that one file up
-first.)
+(progress/counts print to stderr and show in the console; `$dedupFiles`
+only captures the filename list from stdout.)
 
-Then scp the listed files into `local_run\assets\refcoco_local\Gref\val_batch\`
-(loop locally over `gref_dedup_files.txt`, e.g. in git-bash: `while read f; do
-scp "athena:\$SCRATCH/data/refcoco/Gref/val_batch/$f" local_run/assets/refcoco_local/Gref/val_batch/;
-done < local_run/assets/gref_dedup_files.txt`). `ReferDataset` just globs
-whatever npz files are present under that folder, so this is the only
-downloader that needs to populate it now that step 5 is skipped.
-
+```powershell
+New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
+foreach ($f in $dedupFiles) {
+  scp "${ATHENA}:${SCRATCH_PATH}/data/refcoco/Gref/val_batch/$f" local_run\assets\refcoco_local\Gref\val_batch\
+}
 ```
+
+```powershell
 & $PY scripts\visualize_concept_retrieval.py `
   --ckpt local_run\assets\ckpt_vg_m1_local.pth `
   --data-root local_run\assets\refcoco_local `
