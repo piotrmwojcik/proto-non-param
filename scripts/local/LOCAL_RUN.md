@@ -176,7 +176,7 @@ past Windows' ~32K command-line length limit (`ProcessFailedToStart:
 "Nazwa pliku lub jej rozszerzenie są za długie"` / "filename or extension
 too long"):
 ```powershell
-$dedupFiles | Set-Content -Encoding ascii local_run\assets\gref_dedup_files.txt
+[System.IO.File]::WriteAllText("$PWD\local_run\assets\gref_dedup_files.txt", ($dedupFiles -join "`n") + "`n")
 scp local_run\assets\gref_dedup_files.txt "${ATHENA}:${SCRATCH_PATH}/gref_dedup_files.txt"
 
 New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
@@ -184,10 +184,11 @@ ssh $ATHENA "tar cf - -C ${SCRATCH_PATH}/data/refcoco/Gref/val_batch -T ${SCRATC
 
 (Get-ChildItem local_run\assets\refcoco_local\Gref\val_batch).Count   # should match $dedupFiles.Count
 ```
-(`-Encoding ascii`, not `utf8` — Windows PowerShell's `utf8` writes a BOM
-that would corrupt the first filename in the list, same bug hit earlier
-with the groups file. Filenames here are plain ASCII, so `ascii` is exact
-and BOM-free.)
+(Not `Set-Content` — it writes Windows `\r\n` line endings even with
+`-Encoding ascii`/`utf8`, and GNU tar's `-T` doesn't strip the trailing
+`\r`, so every filename comes out as e.g. `Gref_val_0.npz\r` and fails to
+stat. `[System.IO.File]::WriteAllText` with explicit `` `n `` joins gives
+LF-only line endings and no BOM in one shot.)
 
 ```powershell
 & $PY scripts\visualize_concept_retrieval.py `
