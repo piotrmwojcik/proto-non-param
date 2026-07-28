@@ -168,11 +168,16 @@ $dedupFiles = ssh $ATHENA 'cd ~/proto-non-param && python scripts/local/list_gre
 (progress/counts print to stderr and show in the console; `$dedupFiles`
 only captures the filename list from stdout.)
 
+Batched over a single SSH connection (tar streamed remote-to-local) instead
+of one `scp` per file — Windows 10+ ships `tar.exe` natively, no install
+needed:
 ```powershell
 New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
-foreach ($f in $dedupFiles) {
-  scp "${ATHENA}:${SCRATCH_PATH}/data/refcoco/Gref/val_batch/$f" local_run\assets\refcoco_local\Gref\val_batch\
-}
+
+$fileListStr = $dedupFiles -join ' '
+ssh $ATHENA "cd ${SCRATCH_PATH}/data/refcoco/Gref/val_batch && tar cf - $fileListStr" | tar xf - -C local_run\assets\refcoco_local\Gref\val_batch
+
+(Get-ChildItem local_run\assets\refcoco_local\Gref\val_batch).Count   # should match $dedupFiles.Count
 ```
 
 ```powershell
