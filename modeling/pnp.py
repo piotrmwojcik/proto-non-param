@@ -18,7 +18,7 @@ class ProjectionHead(nn.Module):
     def __init__(
         self,
         input_dim: int = 4096,
-        hidden_dim: int = 1024,
+        hidden_dim: int = 256,
         output_dim: int = 768,
         normalize_output: bool = True,
         dropout: float = 0.1,

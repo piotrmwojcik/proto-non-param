@@ -1,14 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=pnp_vg
-#SBATCH --account=plgunhype-gpu-a100
+##SBATCH --account=plgunhype-gpu-a100
+#SBATCH --account=plgtabcfs-gpu-a100
 #SBATCH --partition=plgrid-gpu-a100
+
 
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=128G
-#SBATCH --time=24:00:00
+#SBATCH --time=02:00:00
 
 #SBATCH --output=/net/people/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.out
 #SBATCH --error=/net/people/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.err
@@ -30,6 +32,8 @@ RUN_ROOT="${SCRATCH_ROOT}/pnp_vg"
 
 WANDB_DIR="${RUN_ROOT}/wandb"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
+
+mkdir -p "${WANDB_DIR}" "${CHECKPOINT_DIR}"
 
 TORCH_CACHE="/net/people/plgrid/plgpiotrwojcik/.cache/torch"
 HF_CACHE="${SCRATCH_ROOT}/model_cache"
@@ -149,7 +153,7 @@ python -u "${TRAIN_SCRIPT}" \
     --dataset-root "${VG_ROOT}" \
     --llm-cache-dir "${HF_CACHE}" \
     --num-splits 0 \
-    --batch-size 2 \
+    --batch-size 1 \
     --epochs 20 \
     --num-workers 4 \
     --negatives-per-positive 4 \

@@ -448,15 +448,22 @@ def train(
     model.train()
 
     amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=amp_enabled,
+    )
 
     checkpoint_path = (
         Path(checkpoint_dir)
         if checkpoint_dir is not None
         else None
     )
+
     if checkpoint_path is not None:
-        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
     global_step = 0
 
@@ -465,11 +472,12 @@ def train(
             dataloader,
             desc=f"Epoch {epoch + 1}/{epochs}",
         )
+
         running_loss = 0.0
         processed_batches = 0
 
         for batch_index, batch in enumerate(progress):
-            # images contains one tensor per unique image in the loader batch.
+            # One image tensor per unique image in the loader batch.
             images = get_images(batch).to(
                 device=device,
                 non_blocking=True,
@@ -477,6 +485,7 @@ def train(
 
             positive_triples = batch["positive_triples"]
             negative_triples = batch["negative_triples"]
+
             num_positive_pairs = len(positive_triples)
             num_negative_pairs = len(negative_triples)
 
@@ -508,27 +517,31 @@ def train(
                 device=device,
                 dtype=images.dtype,
             )
+
             positive_text_embeddings = prepare_embeddings(
                 pair_embeddings["positive_text_embeddings"],
                 device=device,
                 dtype=images.dtype,
             )
+
             negative_anchor_embeddings = prepare_embeddings(
                 pair_embeddings["negative_anchor_embeddings"],
                 device=device,
                 dtype=images.dtype,
             )
+
             negative_text_embeddings = prepare_embeddings(
                 pair_embeddings["negative_text_embeddings"],
                 device=device,
                 dtype=images.dtype,
             )
 
-            # Accept [N, D] or [P, K, D] negatives and convert to [N, D].
+            # Convert [P, K, D] negative embeddings to [P * K, D].
             if negative_anchor_embeddings.ndim == 3:
                 negative_anchor_embeddings = (
                     negative_anchor_embeddings.flatten(0, 1)
                 )
+
             if negative_text_embeddings.ndim == 3:
                 negative_text_embeddings = (
                     negative_text_embeddings.flatten(0, 1)
@@ -553,12 +566,16 @@ def train(
                 ),
             }
 
-            for name, (embeddings, expected_count) in embedding_groups.items():
+            for name, (
+                embeddings,
+                expected_count,
+            ) in embedding_groups.items():
                 if embeddings.ndim != 2:
                     raise ValueError(
                         f"{name} must have shape [N, D], received "
-                        f"{tuple(embeddings.shape)}"
+                        f"{tuple(embeddings.shape)}."
                     )
+
                 if embeddings.shape[0] != expected_count:
                     raise ValueError(
                         f"{name} count does not match its relationship "
@@ -572,6 +589,7 @@ def train(
                 negative_anchor_embeddings.shape[1],
                 negative_text_embeddings.shape[1],
             }
+
             if len(embedding_dims) != 1:
                 raise ValueError(
                     "All positive and negative embeddings must have the "
@@ -579,6 +597,7 @@ def train(
                 )
 
             batch_image_ids = batch["image_id"]
+
             if len(batch_image_ids) != images.shape[0]:
                 raise ValueError(
                     "Image ID count does not match the unique image batch: "
@@ -601,6 +620,7 @@ def train(
                     dtype=torch.long,
                     device=device,
                 )
+
                 negative_image_indices = torch.tensor(
                     [
                         image_id_to_batch_index[
@@ -611,6 +631,7 @@ def train(
                     dtype=torch.long,
                     device=device,
                 )
+
             except KeyError as error:
                 raise ValueError(
                     "A relationship triple refers to an image that is not "
@@ -628,90 +649,102 @@ def train(
                 else nullcontext()
             )
 
-        with autocast_context:
-            positive_images = images.index_select(
-                dim=0,
-                index=positive_image_indices,
-            )
-            negative_images = images.index_select(
-                dim=0,
-                index=negative_image_indices,
-            )
-
-            positive_anchor_maps = model(
-                positive_images,
-                positive_anchor_embeddings,
-            )
-            positive_text_maps = model(
-                positive_images,
-                positive_text_embeddings,
-            )
-            negative_anchor_maps = model(
-                negative_images,
-                negative_anchor_embeddings,
-            )
-            negative_text_maps = model(
-                negative_images,
-                negative_text_embeddings,
-            )
-
-            validate_similarity_map(
-                positive_anchor_maps,
-                batch_size=num_positive_pairs,
-                name="positive_anchor_maps",
-            )
-            validate_similarity_map(
-                positive_text_maps,
-                batch_size=num_positive_pairs,
-                name="positive_text_maps",
-            )
-            validate_similarity_map(
-                negative_anchor_maps,
-                batch_size=num_negative_pairs,
-                name="negative_anchor_maps",
-            )
-            validate_similarity_map(
-                negative_text_maps,
-                batch_size=num_negative_pairs,
-                name="negative_text_maps",
-            )
-
-            loss_dict = criterion(
-                positive_anchor_maps=positive_anchor_maps,
-                positive_text_maps=positive_text_maps,
-                negative_anchor_maps=negative_anchor_maps,
-                negative_text_maps=negative_text_maps,
-                batch_size=num_positive_pairs,
-                negatives_per_positive=negatives_per_positive,
-            )
-
-            train_losses = [
-                value
-                for name, value in loss_dict.items()
-                if name.startswith("l_")
-            ]
-
-            if not train_losses:
-                raise ValueError(
-                    "The criterion returned no losses whose names start "
-                    "with 'l_'."
+            # This block must remain inside the DataLoader loop.
+            with autocast_context:
+                positive_images = images.index_select(
+                    dim=0,
+                    index=positive_image_indices,
                 )
 
-            total_loss = torch.stack(
-                [loss.reshape(()) for loss in train_losses]
-            ).sum()
+                negative_images = images.index_select(
+                    dim=0,
+                    index=negative_image_indices,
+                )
+
+                positive_anchor_maps = model(
+                    positive_images,
+                    positive_anchor_embeddings,
+                )
+
+                positive_text_maps = model(
+                    positive_images,
+                    positive_text_embeddings,
+                )
+
+                negative_anchor_maps = model(
+                    negative_images,
+                    negative_anchor_embeddings,
+                )
+
+                negative_text_maps = model(
+                    negative_images,
+                    negative_text_embeddings,
+                )
+
+                validate_similarity_map(
+                    positive_anchor_maps,
+                    batch_size=num_positive_pairs,
+                    name="positive_anchor_maps",
+                )
+
+                validate_similarity_map(
+                    positive_text_maps,
+                    batch_size=num_positive_pairs,
+                    name="positive_text_maps",
+                )
+
+                validate_similarity_map(
+                    negative_anchor_maps,
+                    batch_size=num_negative_pairs,
+                    name="negative_anchor_maps",
+                )
+
+                validate_similarity_map(
+                    negative_text_maps,
+                    batch_size=num_negative_pairs,
+                    name="negative_text_maps",
+                )
+
+                loss_dict = criterion(
+                    positive_anchor_maps=positive_anchor_maps,
+                    positive_text_maps=positive_text_maps,
+                    negative_anchor_maps=negative_anchor_maps,
+                    negative_text_maps=negative_text_maps,
+                    batch_size=num_positive_pairs,
+                    negatives_per_positive=negatives_per_positive,
+                )
+
+                train_losses = [
+                    value
+                    for name, value in loss_dict.items()
+                    if name.startswith("l_")
+                ]
+
+                if not train_losses:
+                    raise ValueError(
+                        "The criterion returned no losses whose names "
+                        "start with 'l_'."
+                    )
+
+                total_loss = torch.stack(
+                    [
+                        loss.reshape(())
+                        for loss in train_losses
+                    ]
+                ).sum()
 
             if not torch.isfinite(total_loss):
                 raise FloatingPointError(
                     "Non-finite loss encountered at "
                     f"epoch={epoch}, batch={batch_index}: "
-                    f"{total_loss.detach().item()}"
+                    f"{total_loss.detach().item()}."
                 )
 
             scaler.scale(total_loss).backward()
 
             if gradient_clip_norm is not None:
                 scaler.unscale_(optimizer)
+
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     max_norm=gradient_clip_norm,
@@ -721,38 +754,38 @@ def train(
             scaler.update()
 
             global_step += 1
-            if max_steps > 0 and global_step >= max_steps:
-                print(
-                    f"CPU smoke test completed after {global_step} step(s).",
-                    flush=True,
-                )
-                return
             processed_batches += 1
-            running_loss += total_loss.detach().item()
+
+            loss_value = total_loss.detach().item()
+            running_loss += loss_value
             average_loss = running_loss / processed_batches
 
             postfix = {
-                "loss": f"{total_loss.detach().item():.4f}",
+                "loss": f"{loss_value:.4f}",
                 "average": f"{average_loss:.4f}",
             }
+
             if "positive_similarity" in loss_dict:
                 postfix["positive"] = (
-                    f"{loss_dict['positive_similarity'].detach().item():.3f}"
+                    f"{loss_dict['positive_similarity'].item():.3f}"
                 )
+
             if "hardest_negative_similarity" in loss_dict:
                 postfix["negative"] = (
-                    f"{loss_dict['hardest_negative_similarity'].detach().item():.3f}"
+                    f"{loss_dict['hardest_negative_similarity'].item():.3f}"
                 )
+
             progress.set_postfix(**postfix)
 
             wandb_metrics = {
-                "train/loss": total_loss.detach().item(),
+                "train/loss": loss_value,
                 "train/loss_avg": average_loss,
                 "train/epoch": epoch + 1,
                 "train/positive_pairs": num_positive_pairs,
                 "train/negative_pairs": num_negative_pairs,
                 "train/negatives_per_positive": negatives_per_positive,
             }
+
             for name, value in loss_dict.items():
                 if torch.is_tensor(value) and value.numel() == 1:
                     wandb_metrics[f"train/{name}"] = (
@@ -760,7 +793,10 @@ def train(
                     )
 
             if wandb.run is not None:
-                wandb.log(wandb_metrics, step=global_step)
+                wandb.log(
+                    wandb_metrics,
+                    step=global_step,
+                )
 
             if (
                 visualize_every_steps > 0
@@ -776,9 +812,45 @@ def train(
                     images_per_batch=visualize_images_per_batch,
                     global_step=global_step,
                 )
+
                 model.train()
 
+            if max_steps > 0 and global_step >= max_steps:
+                if checkpoint_path is not None:
+                    smoke_checkpoint = (
+                        checkpoint_path
+                        / f"pnp_step_{global_step:08d}.pt"
+                    )
+
+                    torch.save(
+                        {
+                            "epoch": epoch + 1,
+                            "global_step": global_step,
+                            "model": model.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "scaler": scaler.state_dict(),
+                        },
+                        smoke_checkpoint,
+                    )
+
+                    print(
+                        f"Saved checkpoint to {smoke_checkpoint}",
+                        flush=True,
+                    )
+
+                print(
+                    f"Training stopped after {global_step} optimiser steps.",
+                    flush=True,
+                )
+                return
+
+        # Save one checkpoint after each completed epoch.
         if checkpoint_path is not None:
+            epoch_checkpoint = (
+                checkpoint_path
+                / f"pnp_epoch_{epoch + 1:03d}.pt"
+            )
+
             torch.save(
                 {
                     "epoch": epoch + 1,
@@ -787,8 +859,14 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(),
                 },
-                checkpoint_path / f"pnp_epoch_{epoch + 1:03d}.pt",
+                epoch_checkpoint,
             )
+
+            print(
+                f"Saved checkpoint to {epoch_checkpoint}",
+                flush=True,
+            )
+
 
 class MockLLM2Vec:
     def __init__(self, embedding_dim: int = 4096) -> None:
@@ -998,7 +1076,7 @@ def main() -> None:
         backbone=backbone,
         visual_dim=backbone.dim,
         text_dim=args.text_dim,
-        projection_hidden_dim=1024,
+        projection_hidden_dim=512,
         temperature=0.2,
     ).to(device)
 
