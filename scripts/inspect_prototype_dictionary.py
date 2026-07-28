@@ -122,7 +122,7 @@ def main():
 
     groups = []
     if args.groups_file:
-        with open(args.groups_file) as f:
+        with open(args.groups_file, encoding="utf-8-sig") as f:
             for line in f:
                 line = line.strip()
                 if line:
