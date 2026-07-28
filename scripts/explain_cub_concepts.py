@@ -98,8 +98,10 @@ def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, ou
                         signed=False):
     """Example image (left) + horizontal bar chart of concept scores (right),
     highest |score| at top -- mirrors the standard Label-free-CBM-style figure.
-    signed=True colors negative bars red (contributions arguing against the
-    class) instead of uniform green."""
+    Concept names are drawn inside each bar (near its base) rather than as a
+    separate y-axis label column, so long concept phrases don't force a wide
+    label gutter. signed=True colors negative bars red (contributions
+    arguing against the class) instead of uniform green."""
     names = [n for n, _ in concept_scores]
     values = [v for _, v in concept_scores]
     colors = ["#4C9F70" if v >= 0 else "#C0392B" for v in values] if signed else "#4C9F70"
@@ -112,18 +114,21 @@ def plot_class_concepts(class_name, image_path, concept_scores, title_suffix, ou
     if image_path is not None:
         ax_img.imshow(Image.open(image_path).convert("RGB"))
     ax_img.axis("off")
-    ax_img.set_title(f"Class: {class_name.replace('_', ' ')}", fontsize=17,
+    ax_img.set_title(f"Class - {class_name.replace('_', ' ')}", fontsize=17,
                      fontweight="bold", loc="left")
 
     y = np.arange(len(names))
     ax_bar.barh(y, values, color=colors)
-    ax_bar.set_yticks(y)
-    ax_bar.set_yticklabels(names, fontsize=13)
+    ax_bar.set_yticks([])
     ax_bar.invert_yaxis()  # highest |score| at top
-    for yi, v in zip(y, values):
+    x_pad = 0.02 * max(abs(v) for v in values)
+    for yi, v, name in zip(y, values, names):
         ha = "right" if v >= 0 else "left"
         ax_bar.text(v * 0.98, yi, f"{v:.3f}", va="center", ha=ha,
                     color="white", fontweight="bold", fontsize=12)
+        name_ha = "left" if v >= 0 else "right"
+        ax_bar.text(x_pad if v >= 0 else -x_pad, yi, name, va="center", ha=name_ha,
+                    color="white", fontweight="bold", fontsize=13)
     if signed:
         ax_bar.axvline(0, color="black", linewidth=0.8)
     ax_bar.set_xlabel("Concept Score", fontsize=13)
@@ -390,7 +395,7 @@ def main():
         contrib_plot_path = os.path.join(plot_dir, f"image{idx}_contributions.png")
         plot_class_concepts(
             pred_name, img_path, contrib_top,
-            f"Most Strongly Contributing Concepts\n(predicted: {pred_name.replace('_', ' ')})",
+            "Most Contribution Concepts",
             contrib_plot_path, signed=True,
         )
 
@@ -423,12 +428,12 @@ def main():
 
         weight_plot_path = os.path.join(plot_dir, f"{cname}_by_weight.png")
         plot_class_concepts(cname, example_path, weight_top,
-                            "Most Strongly Contributing Concepts\n(by classifier weight)",
+                            "Most Contribution Concepts",
                             weight_plot_path)
         if avg_top is not None:
             avg_plot_path = os.path.join(plot_dir, f"{cname}_by_avg_activation.png")
             plot_class_concepts(cname, example_path, avg_top,
-                                "Most Strongly Contributing Concepts\n(by average activation)",
+                                "Most Contribution Concepts",
                                 avg_plot_path)
 
         report["per_class"].append({
