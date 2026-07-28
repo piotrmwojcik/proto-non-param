@@ -20,9 +20,17 @@ ASSETS_DIR = LOCAL_RUN_DIR / "assets"
 # `float | None`-style union-type annotations to dinov2/layers/attention.py,
 # which Python evaluates eagerly at class-definition time and which raises
 # `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'` on
-# Python <3.10 (this venv is 3.9, matching Athena's). Pin to the last commit
-# before that change.
-DINOV2_PIN_COMMIT = "81b2b64"
+# Python <3.10 (this venv is 3.9, matching Athena's).
+#
+# The obvious fix -- pin to 81b2b64, the commit right before the license
+# update that predates 12592a9 -- turned out to be too far back: it also
+# predates 9c7e324 ("Add new backbones trained with registers (#282)"),
+# and this checkpoint's config needs num_register_tokens (it loads
+# dinov2_vitl14_reg4_pretrain.pth). 112792f is the last commit before the
+# float | None-breaking pair (b48308a/12592a9) that still has register
+# support and the positional-embedding interpolation fix (e1277af,
+# relevant since we run at non-224 --img-size).
+DINOV2_PIN_COMMIT = "112792f"
 
 
 def main():
