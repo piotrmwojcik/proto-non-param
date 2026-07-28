@@ -116,7 +116,7 @@ def main():
     args = p.parse_args()
 
     if args.phrases_file:
-        with open(args.phrases_file) as f:
+        with open(args.phrases_file, encoding="utf-8-sig") as f:
             args.phrases = [line.strip() for line in f if line.strip()]
 
     os.makedirs(args.out_dir, exist_ok=True)
