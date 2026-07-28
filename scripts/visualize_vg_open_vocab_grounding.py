@@ -35,6 +35,12 @@ Usage:
     --ckpt $SCRATCH/train_logs/vg_contrastive/run_M1_vitl14_sk10_koleo01_30ep/ckpt.pth \
     --vg-root $SCRATCH/vg --n-images 6 --img-size 672 \
     --out-dir results/vg_open_vocab_grounding
+
+  # One specific hand-picked image (e.g. a paper teaser) instead of a
+  # random sample -- --vg-root not needed in this mode:
+  python scripts/visualize_vg_open_vocab_grounding.py \
+    --ckpt ... --image path/to/2365136.jpg --phrases "a person wearing a hat" "the sky" \
+    --out-dir results/teaser
 """
 
 import argparse
@@ -99,7 +105,11 @@ def saliency_mask_overlay(img_uint8, hm_up, threshold, alpha=0.6, dim_factor=0.3
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True)
-    p.add_argument("--vg-root", required=True, help="Contains VG_100K/ and VG_100K_2/ shards")
+    p.add_argument("--vg-root", default=None, help="Contains VG_100K/ and VG_100K_2/ shards; "
+                   "required unless --image is given")
+    p.add_argument("--image", type=str, default=None,
+                   help="Use this exact image file instead of randomly sampling from "
+                        "--vg-root -- for a specific hand-picked figure (e.g. a paper teaser).")
     p.add_argument("--n-images", type=int, default=6)
     p.add_argument("--phrases", type=str, nargs="*", default=DEFAULT_PHRASES,
                    help="Arbitrary free-text phrases, grounded independently on every sampled image")
@@ -119,6 +129,9 @@ def main():
         with open(args.phrases_file, encoding="utf-8-sig") as f:
             args.phrases = [line.strip() for line in f if line.strip()]
 
+    if not args.image and not args.vg_root:
+        p.error("either --image or --vg-root is required")
+
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     assert args.img_size % 14 == 0, "--img-size must be a multiple of the ViT patch size (14)"
@@ -127,8 +140,12 @@ def main():
     net, tokenizer, _ = build_model(args.ckpt, device)
     img_transform = build_img_transform(args.img_size)
 
-    image_paths = sample_vg_images(args.vg_root, args.n_images, args.seed)
-    print(f"Sampled {len(image_paths)} VG images")
+    if args.image:
+        image_paths = [args.image]
+        print(f"Using single image: {args.image}")
+    else:
+        image_paths = sample_vg_images(args.vg_root, args.n_images, args.seed)
+        print(f"Sampled {len(image_paths)} VG images")
 
     with torch.inference_mode():
         # Encode every phrase once, reused across all images.
