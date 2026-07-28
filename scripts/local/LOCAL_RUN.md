@@ -97,25 +97,12 @@ Athena, no scp needed. Builds `train/val/test/<class>/*.jpg` automatically.)
   --out-dir results\cub_explain_joint
 ```
 
-## 5. Deletion faithfulness — needs a small random subset of Gref/val_batch
+## 5. Deletion faithfulness — SKIP, already done on Athena
 
-```
-ssh athena "ls \$SCRATCH/data/refcoco/Gref/val_batch | shuf -n 200 > \$HOME/gref_subset.txt"
-scp athena:'$HOME/gref_subset.txt' local_run\assets\gref_subset.txt
-```
-Then scp just those 200 files (loop locally over the downloaded list —
-e.g. in git-bash: `while read f; do scp "athena:\$SCRATCH/data/refcoco/Gref/val_batch/$f" local_run/assets/refcoco_local/Gref/val_batch/; done < local_run/assets/gref_subset.txt`).
-
-```
-& $PY scripts\eval_deletion_faithfulness.py `
-  --ckpt local_run\assets\ckpt_vg_m1_local.pth `
-  --data_root local_run\assets\refcoco_local `
-  --n-samples 200 `
-  --out-dir results\deletion_faithfulness_Gref_val
-```
-(`--n-samples 200` matches however many you actually downloaded — doesn't
-need to match Athena's exact seeded 300, any random subset gives a valid
-faithfulness-gap figure.)
+Job `2825594` completed on Athena before local setup was finished:
+`faithfulness_gap = -8.41` (CI excludes 0, but negative — the opposite of
+what "faithful" needs). Dropped from the paper per
+`EXPERIMENTS_REPORT.md` §7 — no local run needed for this one.
 
 ## 6. CUB sufficiency curve — heaviest, but compute-bound not download-bound
 
@@ -144,11 +131,12 @@ scp athena:'$HOME/gref_dedup_files.txt' local_run\assets\gref_dedup_files.txt
 push` this branch and `git pull` there, or `scp` just that one file up
 first.)
 
-Then scp the listed files (same loop pattern as step 5, but pull the
-target list from `gref_dedup_files.txt`) into the **same**
-`local_run\assets\refcoco_local\Gref\val_batch\` folder used in step 5 —
-`ReferDataset` just globs whatever's present, no harm in the two file sets
-overlapping/coexisting there.
+Then scp the listed files into `local_run\assets\refcoco_local\Gref\val_batch\`
+(loop locally over `gref_dedup_files.txt`, e.g. in git-bash: `while read f; do
+scp "athena:\$SCRATCH/data/refcoco/Gref/val_batch/$f" local_run/assets/refcoco_local/Gref/val_batch/;
+done < local_run/assets/gref_dedup_files.txt`). `ReferDataset` just globs
+whatever npz files are present under that folder, so this is the only
+downloader that needs to populate it now that step 5 is skipped.
 
 ```
 & $PY scripts\visualize_concept_retrieval.py `
