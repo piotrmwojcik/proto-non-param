@@ -321,7 +321,7 @@ have.** Worth deciding whether that trade-off is acceptable before treating Join
 default going forward, and worth checking whether other classes have similar shortcuts
 before concluding this is an isolated case.
 
-## 7. Deletion faithfulness test (planned, not yet run)
+## 7. Deletion faithfulness test — run, result negative, dropped from the paper
 
 **Question**: Are the patches PNP's activation map highlights actually load-bearing for the
 prediction, or just decorative? Turns "faithful" from an adjective into a number.
@@ -341,8 +341,40 @@ representations, which is the thing "faithful" needs to be true about.
 examples (default 300, keeps cost low), with a paired bootstrap CI. Positive and CI
 excluding 0 ⇒ real evidence of faithfulness; CI including 0 ⇒ no better than random.
 
-**Status**: implemented, not run. `bash scripts/slurm_eval_deletion_faithfulness.sh`
-(override `DATASET`/`SPLIT`/`N_SAMPLES`/`DELETE_FRAC` via env vars). Output:
+**Result** (job `2825594`, Gref/val, n=300, delete_frac=0.2, threshold=0.5):
+
+| | mean IoU |
+|---|---|
+| baseline | 20.93 |
+| top-k deleted | 18.96 (drop 1.96) |
+| random-k deleted | 10.56 (drop 10.37) |
+
+`faithfulness_gap = -8.41`, 95% CI `[-9.65, -7.20]` — confidently **negative**, i.e. the
+opposite of what "faithful" needs: deleting the top-activating patches hurt IoU *less* than
+deleting a random 20%, not more. Read this precisely — the CI excluding 0 here is evidence
+*against* faithfulness by this test's own definition, not evidence for it; a superficial
+"CI excludes 0" read would get the conclusion backwards.
+
+Plausible (unconfirmed) mechanistic explanation, not an excuse: deletion here is post-hoc
+token zeroing *after* the single backbone forward pass (the cheap simplification noted
+above), so self-attention has already mixed each deleted patch's information into its
+neighbors before deletion happens; top-activating patches are also typically spatially
+clustered on the object, so zeroing them leaves the bilinear-upsampled mask's interpolation
+neighborhoods mostly intact elsewhere, while a uniformly scattered random 20% disrupts
+interpolation broadly across the whole grid. A fairer control (spatially-contiguous random
+blocks matched to the top-k region's size/shape, rather than uniformly scattered points)
+would be needed to separate "genuinely not faithful" from "this specific cheap test design
+confounds clustering with deletion location" — not attempted, out of scope for this
+deadline.
+
+**Decision**: dropped from the paper. The negative result doesn't support the claim, and
+there wasn't time before the deadline to redesign the test with a proper spatially-matched
+control. Left documented here (rather than deleted from the repo) so the script/result
+aren't silently rediscovered and re-added without this context.
+
+**Status**: implemented and run; **not included in the submission**.
+`bash scripts/slurm_eval_deletion_faithfulness.sh` (override
+`DATASET`/`SPLIT`/`N_SAMPLES`/`DELETE_FRAC` via env vars) if revisiting later. Output:
 `results/deletion_faithfulness_<dataset>_<split>/{summary.json, per_example.csv,
 deletion_faithfulness.png}`.
 
