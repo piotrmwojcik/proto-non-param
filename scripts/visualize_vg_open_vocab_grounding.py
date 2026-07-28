@@ -102,6 +102,22 @@ def saliency_mask_overlay(img_uint8, hm_up, threshold, alpha=0.6, dim_factor=0.3
     return np.where(mask[..., None], heat, dimmed).astype(np.uint8)
 
 
+def jet_heatmap_overlay(img_uint8, hm_up, alpha=0.5):
+    """Classic Grad-CAM-style continuous overlay: full 'jet' colormap
+    (blue=low activation, red=high) alpha-blended over the whole image,
+    no thresholding or dimming. Punchier/more standard-looking than
+    saliency_mask_overlay, at the cost of that style's explicit "below
+    threshold, don't trust this" signal -- use for hero/teaser figures,
+    not the honesty-focused main experimental ones."""
+    activation = hm_up.detach().cpu().numpy()
+    a_min, a_max = activation.min(), activation.max()
+    if a_max > a_min:
+        activation = (activation - a_min) / (a_max - a_min + 1e-8)
+    heat_rgb = (plt.get_cmap("jet")(activation)[..., :3] * 255).astype(np.uint8)
+    out = alpha * heat_rgb.astype(np.float32) + (1 - alpha) * img_uint8.astype(np.float32)
+    return out.clip(0, 255).astype(np.uint8)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True)
@@ -118,7 +134,14 @@ def main():
                         "passing multi-word phrases through shell/env-var quoting.")
     p.add_argument("--mask-threshold", type=float, default=0.5,
                    help="Same normalized-activation threshold evaluate_pnp_refer.py uses "
-                        "for the real segmentation decision")
+                        "for the real segmentation decision (--style mask only)")
+    p.add_argument("--style", choices=("mask", "jet"), default="mask",
+                   help="'mask' (default): thresholded saliency mask, dimmed below "
+                        "--mask-threshold -- honest about 'not found', used for the main "
+                        "experimental figures. 'jet': continuous Grad-CAM-style jet-colormap "
+                        "overlay, no thresholding -- punchier, for hero/teaser figures.")
+    p.add_argument("--overlay-alpha", type=float, default=None,
+                   help="Overlay blend strength; defaults to 0.6 for mask style, 0.5 for jet")
     p.add_argument("--img-size", type=int, default=672)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
@@ -178,7 +201,11 @@ def main():
                 hm_up = F.interpolate(scores.view(1, 1, H, W), size=img_display.shape[:2],
                                       mode="bilinear", align_corners=False)[0, 0]
 
-                masked = saliency_mask_overlay(img_display, hm_up, args.mask_threshold)
+                if args.style == "jet":
+                    masked = jet_heatmap_overlay(img_display, hm_up, alpha=args.overlay_alpha or 0.5)
+                else:
+                    masked = saliency_mask_overlay(img_display, hm_up, args.mask_threshold,
+                                                   alpha=args.overlay_alpha or 0.6)
 
                 ax.imshow(masked)
                 ax.axis("off")
