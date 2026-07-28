@@ -46,6 +46,7 @@ Usage:
 import argparse
 import math
 import os
+import re
 import random
 import sys
 from glob import glob
@@ -118,6 +119,22 @@ def jet_heatmap_overlay(img_uint8, hm_up, alpha=0.5):
     return out.clip(0, 255).astype(np.uint8)
 
 
+def _slug(text):
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def save_single_panel(img_array, title, out_path, fontsize=18):
+    """One image, caption only -- no axes/frame, for dropping straight into a
+    LaTeX figure with subcaptions instead of only having the combined grid."""
+    fig, ax = plt.subplots(figsize=(4.5, 5), dpi=140)
+    ax.imshow(img_array)
+    ax.axis("off")
+    ax.set_title(title, fontsize=fontsize, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", required=True)
@@ -142,6 +159,10 @@ def main():
                         "overlay, no thresholding -- punchier, for hero/teaser figures.")
     p.add_argument("--overlay-alpha", type=float, default=None,
                    help="Overlay blend strength; defaults to 0.6 for mask style, 0.5 for jet")
+    p.add_argument("--save-panels", action="store_true",
+                   help="Additionally save each panel (original + each phrase) as its own "
+                        "file with just a caption -- for dropping individual images into a "
+                        "LaTeX figure, alongside the combined grid.")
     p.add_argument("--img-size", type=int, default=672)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
@@ -187,6 +208,7 @@ def main():
             patch_tokens = F.normalize(patch_tokens, dim=-1)  # [1, N, D]
 
             img_display = np.array(pil_img.resize((args.img_size, args.img_size)))
+            base = os.path.splitext(os.path.basename(img_path))[0]
 
             n_panels = 1 + len(args.phrases)
             fig, axes = plt.subplots(1, n_panels, figsize=(4 * n_panels, 4.5), dpi=140)
@@ -194,6 +216,9 @@ def main():
             axes[0].imshow(img_display)
             axes[0].axis("off")
             axes[0].set_title("Original", fontsize=16, fontweight="bold")
+            if args.save_panels:
+                save_single_panel(img_display, "Original",
+                                  os.path.join(args.out_dir, f"grounding_{base}_original.png"))
 
             for ax, phrase in zip(axes[1:], args.phrases):
                 scores = (patch_tokens * p_queries[phrase].unsqueeze(1)).sum(dim=-1)[0]  # [N]
@@ -210,12 +235,14 @@ def main():
                 ax.imshow(masked)
                 ax.axis("off")
                 ax.set_title(f'"{phrase}"', fontsize=16, fontweight="bold")
+                if args.save_panels:
+                    save_single_panel(masked, f'"{phrase}"',
+                                      os.path.join(args.out_dir, f"grounding_{base}_{_slug(phrase)}.png"))
 
             # No on-image suptitle: the "zero-shot, no ground truth, heat vs.
             # dimmed" framing already lives in the paper's own figure caption.
             fig.tight_layout()
 
-            base = os.path.splitext(os.path.basename(img_path))[0]
             out_path = os.path.join(args.out_dir, f"grounding_{base}.png")
             fig.savefig(out_path)
             plt.close(fig)
