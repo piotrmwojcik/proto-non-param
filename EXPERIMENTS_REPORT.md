@@ -113,8 +113,10 @@ config incompatible with M1). Two bugs found and fixed during this run:
   unrelated to what this script needs.
 - Must slice `patch_prototype_logits` down to the requested concept columns *before*
   accumulating across the corpus, not after — the full-vocabulary tensor (`V` ≈ 15,858
-  VG words) OOMs even at a 32G allocation over ~600 images; eval_retreive_concepts.py's
-  original code already did this correctly, the port initially didn't.
+  VG words) OOMs even at a 32G allocation over the corpus size; eval_retreive_concepts.py's
+  original code already did this correctly, the port initially didn't. (The corpus is
+  4,650 images once `dedup_images()`'s key bug below is fixed — 9,536 Gref/val sentences
+  at ≈2.05 expressions/image — not the ~600 an earlier stale estimate here claimed.)
 - Concept auto-suggestion needed a real-word filter (`nltk.corpus.words`) — uniform
   sampling over every POS-tagged noun/adjective in the un-curated, NLTK-auto-extracted
   15,858-word vocab mostly surfaced typos/extraction artifacts (`jerysey`, `mountial`,
