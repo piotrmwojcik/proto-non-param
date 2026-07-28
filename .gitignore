@@ -1,0 +1,12 @@
+# Local-run assets (checkpoints, cloned deps, downloaded data) -- never commit these
+local_run/
+results/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Model weights / caches
+*.pth
+*.pt
