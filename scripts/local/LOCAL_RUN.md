@@ -168,27 +168,30 @@ $dedupFiles = ssh $ATHENA 'cd ~/proto-non-param && python scripts/local/list_gre
 (progress/counts print to stderr and show in the console; `$dedupFiles`
 only captures the filename list from stdout.)
 
-Batched over a single SSH connection (tar streamed remote-to-local) instead
-of one `scp` per file — Windows 10+ ships `tar.exe` natively, no install
-needed. The file list travels as an uploaded file, not command-line
-arguments — at ~4650 filenames, joining them into one `ssh` argument blows
-past Windows' ~32K command-line length limit (`ProcessFailedToStart:
-"Nazwa pliku lub jej rozszerzenie są za długie"` / "filename or extension
-too long"):
+Batched over a single connection using `sftp -b` (batch mode: a scripted
+sequence of `get` commands run over one persistent session, bundled with
+the same Windows OpenSSH package as `ssh`/`scp`) instead of one `scp` per
+file. (A `tar cf - | tar xf -` live pipe was tried first — Windows
+PowerShell 5.1's pipeline for two native processes isn't built for
+multi-GB *binary* streams and throws an internal buffer-capacity
+exception partway through; `sftp -b` avoids that entirely since it writes
+straight to local files, no PowerShell-mediated pipe involved.)
 ```powershell
-[System.IO.File]::WriteAllText("$PWD\local_run\assets\gref_dedup_files.txt", ($dedupFiles -join "`n") + "`n")
-scp local_run\assets\gref_dedup_files.txt "${ATHENA}:${SCRATCH_PATH}/gref_dedup_files.txt"
-
 New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
-ssh $ATHENA "tar cf - -C ${SCRATCH_PATH}/data/refcoco/Gref/val_batch -T ${SCRATCH_PATH}/gref_dedup_files.txt" | tar xf - -C local_run\assets\refcoco_local\Gref\val_batch
+
+$batchLines = @("cd ${SCRATCH_PATH}/data/refcoco/Gref/val_batch",
+               "lcd local_run\assets\refcoco_local\Gref\val_batch") +
+              ($dedupFiles | ForEach-Object { "get $_" })
+[System.IO.File]::WriteAllText("$PWD\local_run\assets\sftp_batch.txt", ($batchLines -join "`n") + "`n")
+
+sftp -b local_run\assets\sftp_batch.txt $ATHENA
 
 (Get-ChildItem local_run\assets\refcoco_local\Gref\val_batch).Count   # should match $dedupFiles.Count
 ```
-(Not `Set-Content` — it writes Windows `\r\n` line endings even with
-`-Encoding ascii`/`utf8`, and GNU tar's `-T` doesn't strip the trailing
-`\r`, so every filename comes out as e.g. `Gref_val_0.npz\r` and fails to
-stat. `[System.IO.File]::WriteAllText` with explicit `` `n `` joins gives
-LF-only line endings and no BOM in one shot.)
+(`[System.IO.File]::WriteAllText` with explicit `` `n `` joins, not
+`Set-Content` — same BOM/CRLF pitfalls as the groups file and the earlier
+`-T` attempt apply here too; `sftp`'s batch-file parser is just as
+sensitive to a stray `\r` or BOM as `tar -T` was.)
 
 ```powershell
 & $PY scripts\visualize_concept_retrieval.py `
