@@ -170,15 +170,24 @@ only captures the filename list from stdout.)
 
 Batched over a single SSH connection (tar streamed remote-to-local) instead
 of one `scp` per file — Windows 10+ ships `tar.exe` natively, no install
-needed:
+needed. The file list travels as an uploaded file, not command-line
+arguments — at ~4650 filenames, joining them into one `ssh` argument blows
+past Windows' ~32K command-line length limit (`ProcessFailedToStart:
+"Nazwa pliku lub jej rozszerzenie są za długie"` / "filename or extension
+too long"):
 ```powershell
-New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
+$dedupFiles | Set-Content -Encoding ascii local_run\assets\gref_dedup_files.txt
+scp local_run\assets\gref_dedup_files.txt "${ATHENA}:${SCRATCH_PATH}/gref_dedup_files.txt"
 
-$fileListStr = $dedupFiles -join ' '
-ssh $ATHENA "cd ${SCRATCH_PATH}/data/refcoco/Gref/val_batch && tar cf - $fileListStr" | tar xf - -C local_run\assets\refcoco_local\Gref\val_batch
+New-Item -ItemType Directory -Force local_run\assets\refcoco_local\Gref\val_batch | Out-Null
+ssh $ATHENA "tar cf - -C ${SCRATCH_PATH}/data/refcoco/Gref/val_batch -T ${SCRATCH_PATH}/gref_dedup_files.txt" | tar xf - -C local_run\assets\refcoco_local\Gref\val_batch
 
 (Get-ChildItem local_run\assets\refcoco_local\Gref\val_batch).Count   # should match $dedupFiles.Count
 ```
+(`-Encoding ascii`, not `utf8` — Windows PowerShell's `utf8` writes a BOM
+that would corrupt the first filename in the list, same bug hit earlier
+with the groups file. Filenames here are plain ASCII, so `ascii` is exact
+and BOM-free.)
 
 ```powershell
 & $PY scripts\visualize_concept_retrieval.py `
