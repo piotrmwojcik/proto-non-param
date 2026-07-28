@@ -16,6 +16,14 @@ LOCAL_RUN_DIR = PROTO_VLM_ROOT / "local_run"
 DINOV2_DIR = LOCAL_RUN_DIR / "deps" / "dinov2"
 ASSETS_DIR = LOCAL_RUN_DIR / "assets"
 
+# dinov2's HEAD (commit 12592a9, "dino.txt inference code (#528)") added
+# `float | None`-style union-type annotations to dinov2/layers/attention.py,
+# which Python evaluates eagerly at class-definition time and which raises
+# `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'` on
+# Python <3.10 (this venv is 3.9, matching Athena's). Pin to the last commit
+# before that change.
+DINOV2_PIN_COMMIT = "81b2b64"
+
 
 def main():
     print("== Installing open_clip_torch ==")
@@ -27,6 +35,9 @@ def main():
     else:
         DINOV2_DIR.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "https://github.com/facebookresearch/dinov2", str(DINOV2_DIR)], check=True)
+
+    print(f"  Pinning to {DINOV2_PIN_COMMIT} (Python 3.9-compatible)")
+    subprocess.run(["git", "-C", str(DINOV2_DIR), "checkout", DINOV2_PIN_COMMIT], check=True)
 
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
