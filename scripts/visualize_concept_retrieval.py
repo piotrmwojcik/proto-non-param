@@ -121,6 +121,19 @@ def collect_patch_logits(net, images, img_transform, device, concept_indices, ba
     return torch.cat(all_logits, dim=0), pil_images
 
 
+def _center_crop_square(img):
+    """Center-crop to a square so every grid cell displays at the same
+    aspect ratio -- matplotlib's imshow preserves each image's native
+    aspect ratio inside its (equal-sized) subplot cell rather than
+    stretching to fill it, so a portrait source photo next to landscape
+    ones left uneven whitespace and made rows look misaligned."""
+    h, w = img.shape[:2]
+    side = min(h, w)
+    top = (h - side) // 2
+    left = (w - side) // 2
+    return img[top:top + side, left:left + side]
+
+
 def _draw_concept_row(axes_row, concept, topk_values, topk_indices, patch_logits_col, pil_images,
                        show_box=True, label_fontsize=20):
     """Draw one concept's top-k crops into a pre-made row of axes. Shared by both
@@ -140,7 +153,7 @@ def _draw_concept_row(axes_row, concept, topk_values, topk_indices, patch_logits
             bbox = find_high_activation_crop(hm_up.numpy(), percentile=95)
             overlay = draw_rect_on_image(overlay, bbox)
 
-        ax.imshow(overlay)
+        ax.imshow(_center_crop_square(overlay))
         ax.axis("off")
     # ax.axis("off") hides a normal ylabel, so annotate with text instead
     axes_row[0].text(-0.12, 0.5, concept, transform=axes_row[0].transAxes,
@@ -160,7 +173,7 @@ def make_figure(concepts, concept_word_to_score_and_patch, pil_images, topk, out
         _draw_concept_row(axes[row], concept, topk_values, topk_indices, patch_logits_col, pil_images,
                            show_box=show_box)
 
-    fig.suptitle("Concept retrieval: top-activating regions per vocabulary word", fontsize=13)
+    fig.suptitle("Concept Retrieval", fontsize=26, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(out_path)
     plt.close(fig)
