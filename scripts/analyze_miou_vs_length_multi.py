@@ -10,16 +10,28 @@ since RefCOCO and RefCOCO+ each have three splits (val/testA/testB) that
 need combining into one length distribution per dataset, the same
 granularity as the existing Gref table (tab:length in the appendix).
 
-Follows the same eval-file naming convention as compare_ris_results.py:
-  PNP    — {eval_dir}/pnp_refer/{dataset}_{split}.json
-  SaG    — {eval_dir}/sag_refseg/{dataset}_{split}.json
-  CTRL-O — {eval_dir}/ctrlo/{ctrlo_name}_metrics.json  (per_sentence key,
-           already covers all splits for that dataset in one file)
+Directory layout on disk (confirmed against the actual eval_results/ tree,
+NOT the flat single-eval-dir layout an earlier version of this script
+assumed): ctrlo/ is a single top-level directory shared across every PNP
+checkpoint (CTRL-O doesn't depend on which PNP run you're comparing
+against), while pnp_refer/ lives nested inside a specific checkpoint's own
+run directory. So this takes two separate directory args, not one:
+  PNP    — {pnp-run-dir}/pnp_refer/{dataset}_{split}.json
+           e.g. eval_results/vg_contrastive/contr_M1_res672 -- this is the
+           run whose Gref/val mIoU (21.98) matches Table 1's published 22.0;
+           don't assume any other run directory matches without checking.
+  SaG    — {sag-dir}/{dataset}_{split}.json (optional; omit --sag-dir if you
+           haven't located where sag_refseg's eval output lives -- it's a
+           module in the outer proto-VLM repo, not this one, so it may not
+           be under proto-non-param/eval_results/ at all)
+  CTRL-O — {ctrlo-dir}/{ctrlo_name}_metrics.json  (per_sentence key, already
+           covers all splits for that dataset in one file)
 
 Usage:
   python scripts/analyze_miou_vs_length_multi.py \
     --data-root $SCRATCH/data/refcoco \
-    --eval-dir $SCRATCH/eval_results \
+    --pnp-run-dir ~/proto-non-param/eval_results/vg_contrastive/contr_M1_res672 \
+    --ctrlo-dir ~/proto-non-param/eval_results/ctrlo \
     --out-dir results/miou_vs_length_multi
 
 Produces, per dataset (unc=RefCOCO, unc+=RefCOCO+):
@@ -84,30 +96,36 @@ def write_latex_table(dataset_label, per_bucket_rows, models, out_path):
         f.write("\n".join(lines) + "\n")
 
 
-def run_one_dataset(dataset, data_root, eval_dir, out_dir, n_buckets, n_bootstrap, seed):
+def run_one_dataset(dataset, data_root, pnp_run_dir, ctrlo_dir, sag_dir, out_dir,
+                     n_buckets, n_bootstrap, seed):
+    missing = []
     pnp_examples, sag_examples, ctrlo_examples = [], [], []
     for split in SPLITS:
-        pnp_json = os.path.join(eval_dir, "pnp_refer", f"{dataset}_{split}.json")
-        sag_json = os.path.join(eval_dir, "sag_refseg", f"{dataset}_{split}.json")
+        pnp_json = os.path.join(pnp_run_dir, "pnp_refer", f"{dataset}_{split}.json")
         if os.path.exists(pnp_json):
             pnp_examples += load_pnp_examples(pnp_json, data_root, dataset, split)
         else:
-            print(f"  WARNING: missing {pnp_json}, skipping split {split} for PNP")
-        if os.path.exists(sag_json):
-            sag_examples += load_sag_examples(sag_json, data_root, dataset, split)
-        else:
-            print(f"  WARNING: missing {sag_json}, skipping split {split} for SaG")
+            missing.append(pnp_json)
+        if sag_dir:
+            sag_json = os.path.join(sag_dir, f"{dataset}_{split}.json")
+            if os.path.exists(sag_json):
+                sag_examples += load_sag_examples(sag_json, data_root, dataset, split)
+            else:
+                print(f"  WARNING: missing {sag_json}, skipping split {split} for SaG (optional)")
 
     ctrlo_name = SAG_TO_CTRLO[dataset]
-    ctrlo_json = os.path.join(eval_dir, "ctrlo", f"{ctrlo_name}_metrics.json")
+    ctrlo_json = os.path.join(ctrlo_dir, f"{ctrlo_name}_metrics.json")
     if os.path.exists(ctrlo_json):
         ctrlo_examples = load_ctrlo_examples(ctrlo_json)
     else:
-        print(f"  WARNING: missing {ctrlo_json}, CTRL-O column will be empty")
+        missing.append(ctrlo_json)
 
-    if not pnp_examples:
-        print(f"  No PNP examples found for {dataset} — skipping.")
-        return
+    if missing:
+        raise FileNotFoundError(
+            f"Required eval file(s) missing for dataset '{dataset}' -- fix --eval-dir "
+            f"and rerun rather than silently skipping this dataset:\n  "
+            + "\n  ".join(missing)
+        )
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -180,7 +198,13 @@ def run_one_dataset(dataset, data_root, eval_dir, out_dir, n_buckets, n_bootstra
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-root", required=True, help="e.g. $SCRATCH/data/refcoco")
-    p.add_argument("--eval-dir", required=True, help="e.g. $SCRATCH/eval_results")
+    p.add_argument("--pnp-run-dir", required=True,
+                   help="e.g. eval_results/vg_contrastive/contr_M1_res672 -- must be the "
+                        "run whose Gref/val mIoU matches Table 1 (21.98 -> 22.0), verify "
+                        "with: python -c \"import json; print(json.load(open('<dir>/pnp_refer/Gref_val.json'))['summary'])\"")
+    p.add_argument("--ctrlo-dir", required=True, help="e.g. eval_results/ctrlo")
+    p.add_argument("--sag-dir", default=None,
+                   help="optional; omit if sag_refseg's eval output location isn't known yet")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--n-buckets", type=int, default=4)
     p.add_argument("--n-bootstrap", type=int, default=2000)
@@ -190,7 +214,7 @@ def main():
     for dataset in ["unc", "unc+"]:
         print(f"=== {dataset} (val+testA+testB pooled) ===")
         run_one_dataset(
-            dataset, args.data_root, args.eval_dir,
+            dataset, args.data_root, args.pnp_run_dir, args.ctrlo_dir, args.sag_dir,
             os.path.join(args.out_dir, dataset),
             args.n_buckets, args.n_bootstrap, args.seed,
         )

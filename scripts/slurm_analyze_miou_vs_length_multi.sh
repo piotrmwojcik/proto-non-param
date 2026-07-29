@@ -8,14 +8,23 @@
 #
 # Usage:
 #   bash scripts/slurm_analyze_miou_vs_length_multi.sh
-#   EVAL_DIR=$SCRATCH/eval_results bash scripts/slurm_analyze_miou_vs_length_multi.sh
+#   PNP_RUN_DIR=~/proto-non-param/eval_results/vg_contrastive/contr_M1_res672 \
+#     bash scripts/slurm_analyze_miou_vs_length_multi.sh
+#
+# PNP_RUN_DIR must be the run whose Gref/val mIoU matches Table 1 (21.98 ->
+# 22.0) -- verified against contr_M1_res672, do NOT assume any other run
+# directory (e.g. contr_M1-RC-k3, whose Gref/val mIoU is 20.32, matching the
+# native-resolution numbers instead) without checking summary.mIoU yourself:
+#   python3 -c "import json; print(json.load(open('<dir>/pnp_refer/Gref_val.json'))['summary'])"
 
 set -e
 
 SCRATCH="${SCRATCH:-/net/tscratch/people/plgabedychaj}"
 REPO=~/proto-non-param
 DATA_ROOT="${DATA_ROOT:-${SCRATCH}/data/refcoco}"
-EVAL_DIR="${EVAL_DIR:-${SCRATCH}/eval_results}"
+PNP_RUN_DIR="${PNP_RUN_DIR:-${REPO}/eval_results/vg_contrastive/contr_M1_res672}"
+CTRLO_DIR="${CTRLO_DIR:-${REPO}/eval_results/ctrlo}"
+SAG_DIR="${SAG_DIR:-}"
 
 PARTITION="plgrid-gpu-a100"
 ACCOUNT="plgunhype-gpu-a100"
@@ -43,7 +52,9 @@ cd ${REPO}
 
 python scripts/analyze_miou_vs_length_multi.py \
   --data-root ${DATA_ROOT} \
-  --eval-dir ${EVAL_DIR} \
+  --pnp-run-dir ${PNP_RUN_DIR} \
+  --ctrlo-dir ${CTRLO_DIR} \
+  ${SAG_DIR:+--sag-dir ${SAG_DIR}} \
   --out-dir ${OUT_DIR}
 ")
 echo "Submitted: ${JOB}"
