@@ -5,11 +5,11 @@ import random
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+import open_clip
 import torch
 import torch.nn.functional as F
-from llm2vec import LLM2Vec
 from torch import nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -24,36 +24,80 @@ from visual_genome_scene_graph_dataset import (
 )
 
 
-def load_llm2vec(
+class TextEncoder(Protocol):
+    embedding_dim: int
+
+    def encode(self, texts: list[str]) -> torch.Tensor:
+        ...
+
+
+class OpenCLIPTextEncoder:
+    """Frozen OpenCLIP text tower used as the training text encoder."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        tokenizer: Any,
+        device: torch.device,
+    ) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        embed_dim = getattr(model, "embed_dim", None)
+        if embed_dim is None:
+            projection = getattr(model, "text_projection", None)
+            if projection is None:
+                raise AttributeError(
+                    "OpenCLIP model does not expose embed_dim or text_projection"
+                )
+            embed_dim = projection.shape[-1]
+        self.embedding_dim = int(embed_dim)
+
+    @torch.no_grad()
+    def encode(self, texts: list[str]) -> torch.Tensor:
+        tokens = self.tokenizer(texts).to(self.device)
+        encoded = self.model.encode_text(tokens)
+        if encoded.ndim != 2:
+            raise ValueError(
+                "OpenCLIP must return [N, D] embeddings, "
+                f"received {tuple(encoded.shape)}"
+            )
+        return F.normalize(encoded.float(), dim=-1)
+
+
+def load_openclip(
     *,
     model_name: str,
-    peft_model_name: str | None,
+    pretrained: str,
     cache_dir: str | Path | None,
     device: torch.device,
-) -> LLM2Vec:
-    """Load and freeze the LLM2Vec text encoder."""
-    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
-    kwargs: dict[str, Any] = {
-        "cache_dir": str(cache_dir) if cache_dir is not None else None,
-        "device_map": str(device),
-        "torch_dtype": dtype,
-    }
-    if peft_model_name:
-        kwargs["peft_model_name_or_path"] = peft_model_name
+) -> OpenCLIPTextEncoder:
+    """Load and freeze an OpenCLIP text encoder."""
+    kwargs: dict[str, Any] = {"device": device}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
 
-    encoder = LLM2Vec.from_pretrained(model_name, **kwargs)
+    model, _, _ = open_clip.create_model_and_transforms(
+        model_name,
+        pretrained=pretrained,
+        **kwargs,
+    )
+    tokenizer = open_clip.get_tokenizer(model_name)
 
-    if hasattr(encoder, "model"):
-        encoder.model.eval()
-        for parameter in encoder.model.parameters():
-            parameter.requires_grad_(False)
+    model.eval()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
 
-    return encoder
+    return OpenCLIPTextEncoder(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+    )
 
 
 def _encode_texts(
     *,
-    llm2vec: LLM2Vec,
+    text_encoder: TextEncoder,
     texts: list[str],
     encode_batch_size: int,
 ) -> torch.Tensor:
@@ -65,13 +109,14 @@ def _encode_texts(
 
     chunks: list[torch.Tensor] = []
     for start in range(0, len(texts), encode_batch_size):
-        inputs = [["", text] for text in texts[start : start + encode_batch_size]]
-        encoded = llm2vec.encode(inputs)
+        encoded = text_encoder.encode(
+            texts[start : start + encode_batch_size]
+        )
         if not torch.is_tensor(encoded):
             encoded = torch.as_tensor(encoded)
         if encoded.ndim != 2:
             raise ValueError(
-                "LLM2Vec must return [N, D] embeddings, "
+                "OpenCLIP must return [N, D] embeddings, "
                 f"received {tuple(encoded.shape)}"
             )
         chunks.append(encoded)
@@ -81,7 +126,7 @@ def _encode_texts(
 
 def encode_pair_strings(
     *,
-    llm2vec: LLM2Vec,
+    text_encoder: TextEncoder,
     batch: dict[str, Any],
     encode_batch_size: int,
 ) -> dict[str, torch.Tensor]:
@@ -101,7 +146,7 @@ def encode_pair_strings(
                 f"Available keys: {sorted(batch)}"
             )
         result[output_key] = _encode_texts(
-            llm2vec=llm2vec,
+            text_encoder=text_encoder,
             texts=[str(value) for value in batch[batch_key]],
             encode_batch_size=encode_batch_size,
         )
@@ -132,9 +177,9 @@ def prepare_embeddings(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     """
-    Move frozen LLM2Vec embeddings to the PNP device.
+    Move frozen OpenCLIP embeddings to the PNP device.
 
-    Embeddings remain detached because LLM2Vec is used only as the
+    Embeddings remain detached because OpenCLIP is used only as the
     fixed text-embedding generator.
     """
     if not torch.is_tensor(embeddings):
@@ -430,7 +475,7 @@ def get_triple_image_id(triple: Any) -> int:
 def train(
     *,
     model: PNP,
-    llm2vec: LLM2Vec,
+    text_encoder: TextEncoder,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: PNPContrastiveCriterion,
@@ -504,10 +549,10 @@ def train(
                 num_negative_pairs // num_positive_pairs
             )
 
-            # LLM2Vec is frozen and only generates text embeddings.
+            # OpenCLIP is frozen and only generates text embeddings.
             with torch.no_grad():
                 pair_embeddings = encode_pair_strings(
-                    llm2vec=llm2vec,
+                    text_encoder=text_encoder,
                     batch=batch,
                     encode_batch_size=encode_batch_size,
                 )
@@ -804,7 +849,7 @@ def train(
             ):
                 visualize_heatmaps(
                     model=model,
-                    llm2vec=llm2vec,
+                    text_encoder=text_encoder,
                     dataloader=dataloader,
                     device=device,
                     encode_batch_size=encode_batch_size,
@@ -868,15 +913,15 @@ def train(
             )
 
 
-class MockLLM2Vec:
-    def __init__(self, embedding_dim: int = 4096) -> None:
+class MockOpenCLIP:
+    def __init__(self, embedding_dim: int = 512) -> None:
         self.embedding_dim = embedding_dim
 
-    def encode(self, inputs: list[list[str]]) -> torch.Tensor:
+    def encode(self, texts: list[str]) -> torch.Tensor:
         embeddings = []
 
-        for instruction, text in inputs:
-            seed = hash((instruction, text)) & 0x7FFFFFFF
+        for text in texts:
+            seed = hash(text) & 0x7FFFFFFF
             generator = torch.Generator(device="cpu")
             generator.manual_seed(seed)
 
@@ -908,18 +953,17 @@ def parse_args() -> argparse.Namespace:
         help="Visual Genome dataset root.",
     )
     parser.add_argument(
-        "--llm-model",
-        default="McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
+        "--openclip-model",
+        default="ViT-B-32",
+        help="OpenCLIP architecture name, e.g. ViT-B-32 or ViT-L-14.",
     )
     parser.add_argument(
-        "--llm-peft-model",
-        default=(
-            "McGill-NLP/"
-            "LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-unsup-simcse"
-        ),
+        "--openclip-pretrained",
+        default="openai",
+        help="OpenCLIP pretrained tag, e.g. openai or laion2b_s34b_b79k.",
     )
     parser.add_argument(
-        "--llm-cache-dir",
+        "--openclip-cache-dir",
         type=Path,
         default=Path(
             "/net/tscratch/people/plgpiotrwojcik/model_cache"
@@ -931,12 +975,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--negatives-per-positive", type=int, default=4)
     parser.add_argument("--encode-batch-size", type=int, default=32)
-    parser.add_argument("--text-dim", type=int, default=4096)
+    parser.add_argument(
+        "--text-dim",
+        type=int,
+        default=512,
+        help="Used with --mock-text-embeddings. Otherwise taken from OpenCLIP.",
+    )
     parser.add_argument("--log-dir", default="wandb")
     parser.add_argument(
         "--mock-text-embeddings",
         action="store_true",
-        help="Use deterministic random text embeddings instead of loading LLM2Vec.",
+        help="Use deterministic random text embeddings instead of loading OpenCLIP.",
     )
     parser.add_argument(
         "--max-steps",
@@ -1047,25 +1096,30 @@ def main() -> None:
 
     if args.mock_text_embeddings:
         print(
-            "Using mock text embeddings; LLM2Vec will not be loaded.",
+            "Using mock text embeddings; OpenCLIP will not be loaded.",
             flush=True,
         )
-        llm2vec = MockLLM2Vec(embedding_dim=args.text_dim)
-    else:
-        llm2vec = load_llm2vec(
-            cache_dir=args.llm_cache_dir,
-            device=device,
-            model_name=args.llm_model,
-            peft_model_name=args.llm_peft_model,
+        text_encoder: TextEncoder = MockOpenCLIP(
+            embedding_dim=args.text_dim
         )
+    else:
+        text_encoder = load_openclip(
+            cache_dir=args.openclip_cache_dir,
+            device=device,
+            model_name=args.openclip_model,
+            pretrained=args.openclip_pretrained,
+        )
+        if args.text_dim != text_encoder.embedding_dim:
+            print(
+                "Overriding --text-dim "
+                f"{args.text_dim} with OpenCLIP embed dim "
+                f"{text_encoder.embedding_dim}.",
+                flush=True,
+            )
+            args.text_dim = text_encoder.embedding_dim
 
-    # The LLM2Vec encoder supplies fixed target embeddings. Only PNP is
+    # The OpenCLIP encoder supplies fixed target embeddings. Only PNP is
     # optimised by this training loop.
-    if hasattr(llm2vec, "model"):
-        llm2vec.model.eval()
-
-        for parameter in llm2vec.model.parameters():
-            parameter.requires_grad = False
 
 
     backbone, _ = build_backbone(args)
@@ -1107,7 +1161,7 @@ def main() -> None:
 
     train(
         model=model,
-        llm2vec=llm2vec,
+        text_encoder=text_encoder,
         dataloader=dataloader,
         optimizer=optimizer,
         criterion=criterion,
@@ -1147,31 +1201,21 @@ def _description_to_text(value: Any) -> str:
 
 def _encode_descriptions(
     *,
-    llm2vec: LLM2Vec,
+    text_encoder: TextEncoder,
     descriptions: list[str],
     encode_batch_size: int,
 ) -> torch.Tensor:
-    inputs = [["", description] for description in descriptions]
-    chunks: list[torch.Tensor] = []
-
-    for start in range(0, len(inputs), encode_batch_size):
-        encoded = llm2vec.encode(
-            inputs[start : start + encode_batch_size]
-        )
-        if not torch.is_tensor(encoded):
-            encoded = torch.as_tensor(encoded)
-        chunks.append(encoded)
-
-    if not chunks:
-        raise ValueError("No descriptions were available to encode.")
-
-    return torch.cat(chunks, dim=0)
+    return _encode_texts(
+        text_encoder=text_encoder,
+        texts=descriptions,
+        encode_batch_size=encode_batch_size,
+    )
 
 
 def visualize_heatmaps(
     *,
     model: PNP,
-    llm2vec: LLM2Vec,
+    text_encoder: TextEncoder,
     dataloader: DataLoader,
     device: torch.device,
     encode_batch_size: int = 32,
@@ -1222,7 +1266,7 @@ def visualize_heatmaps(
                     )
 
                 text_embeddings = _encode_descriptions(
-                    llm2vec=llm2vec,
+                    text_encoder=text_encoder,
                     descriptions=descriptions,
                     encode_batch_size=encode_batch_size,
                 )
