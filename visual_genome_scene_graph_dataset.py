@@ -495,7 +495,7 @@ def build_zip_image_index(
 
 @dataclass(frozen=True)
 class PositiveTriple:
-    """An image, an object anchor, and its matching relationship text."""
+    """An image, an object anchor, and its matching relationship or attribute text."""
 
     image: Any
     image_id: int
@@ -590,6 +590,85 @@ def build_relationship_positives(
                 "positive_text": positive_text,
             }
         )
+
+    return positives
+
+
+def _positive_key(record: dict[str, Any]) -> tuple[int, str, str]:
+    return (
+        int(record["object_id"]),
+        normalize_name(record["anchor_text"]),
+        record["positive_text"].casefold(),
+    )
+
+
+def build_attribute_positives(
+    objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Build per-image positives of the form:
+
+        object -> adjective object
+
+    Example:
+        car -> red car
+
+    Phrasal attributes that already mention the object are kept as-is.
+    """
+
+    positives: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, str]] = set()
+
+    for obj in objects:
+        object_id = as_int(obj.get("object_id"))
+        object_name = clean_text(obj.get("name"))
+        if object_id is None or not object_name:
+            continue
+
+        for attribute in clean_list(obj.get("attributes")):
+            normalized_attribute = attribute.casefold()
+            normalized_name = object_name.casefold()
+            if not attribute or normalized_attribute == normalized_name:
+                continue
+
+            if normalized_name in normalized_attribute.split():
+                positive_text = attribute
+            else:
+                positive_text = clean_text(f"{attribute} {object_name}")
+
+            if not positive_text or positive_text.casefold() == normalized_name:
+                continue
+
+            record = {
+                "relationship_id": None,
+                "object_id": object_id,
+                "anchor_text": object_name,
+                "positive_text": positive_text,
+            }
+            key = _positive_key(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            positives.append(record)
+
+    return positives
+
+
+def build_positive_records(
+    objects: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge relationship and attribute positives, dropping duplicate pairs."""
+
+    positives = build_relationship_positives(relationships)
+    seen = {_positive_key(record) for record in positives}
+
+    for record in build_attribute_positives(objects):
+        key = _positive_key(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        positives.append(record)
 
     return positives
 
@@ -783,7 +862,7 @@ class VisualGenomeSceneGraphDataset(Dataset):
 
         objects, relationships = self._load_scene_graph(image_id)
         descriptions = self._load_descriptions(image_id)
-        positive_records = build_relationship_positives(relationships)
+        positive_records = build_positive_records(objects, relationships)
 
         return {
             "image_id": image_id,
@@ -824,7 +903,7 @@ def scene_graph_collate_fn(
     Construct image/object/text training triples for a DataLoader batch.
 
     Positive triple:
-        (anchor image, object name, matching relationship text)
+        (anchor image, object name, matching relationship or attribute text)
 
     Negative triple:
         (anchor image, object name, different object name)
