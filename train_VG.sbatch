@@ -12,8 +12,8 @@
 #SBATCH --mem=128G
 #SBATCH --time=02:00:00
 
-#SBATCH --output=/net/people/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.out
-#SBATCH --error=/net/people/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.err
+#SBATCH --output=/net/home/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.out
+#SBATCH --error=/net/home/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.err
 
 set -euo pipefail
 
@@ -21,10 +21,10 @@ set -euo pipefail
 # Paths
 ###############################################################################
 
-PROJECT_DIR="/net/people/plgrid/plgpiotrwojcik/proto-non-param"
+PROJECT_DIR="${HOME}/proto-non-param"
 TRAIN_SCRIPT="${PROJECT_DIR}/train.py"
 
-SCRATCH_ROOT="/net/tscratch/people/plgpiotrwojcik"
+SCRATCH_ROOT="${SCRATCH}"
 
 VG_ROOT="${SCRATCH_ROOT}/vg"
 
@@ -35,7 +35,7 @@ CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 
 mkdir -p "${WANDB_DIR}" "${CHECKPOINT_DIR}"
 
-TORCH_CACHE="/net/people/plgrid/plgpiotrwojcik/.cache/torch"
+TORCH_CACHE="${HOME}/.cache/torch"
 HF_CACHE="${SCRATCH_ROOT}/model_cache"
 
 mkdir -p \
@@ -151,14 +151,16 @@ python -u "${TRAIN_SCRIPT}" \
     --backbone dinov2_vitb14 \
     --backbone-module modeling.backbone \
     --dataset-root "${VG_ROOT}" \
-    --llm-cache-dir "${HF_CACHE}" \
+    --openclip-model ViT-B-32 \
+    --openclip-pretrained openai \
+    --openclip-cache-dir "${HF_CACHE}" \
     --num-splits 0 \
     --batch-size 1 \
     --epochs 20 \
     --num-workers 4 \
     --negatives-per-positive 4 \
     --encode-batch-size 4 \
-    --text-dim 4096 \
+    --text-dim 512 \
     --checkpoint-dir "${CHECKPOINT_DIR}" \
     --log-dir "${WANDB_DIR}" \
     --visualize-every-steps 100 \
