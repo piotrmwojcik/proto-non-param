@@ -12,8 +12,10 @@
 #SBATCH --mem=128G
 #SBATCH --time=02:00:00
 
-#SBATCH --output=/net/home/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.out
-#SBATCH --error=/net/home/plgrid/plgpiotrwojcik/proto-non-param/logs/%x_%j.err
+# Slurm does not expand shell variables in #SBATCH directives. These paths are
+# relative to the directory from which sbatch is invoked.
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
 
 set -euo pipefail
 
@@ -58,7 +60,7 @@ else
     exit 1
 fi
 
-conda activate open_clip
+conda activate "${SCRATCH}/conda-envs/open_clip"
 
 ###############################################################################
 # Environment
