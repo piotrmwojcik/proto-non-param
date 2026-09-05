@@ -25,12 +25,10 @@ from torchvision import transforms
 try:
     import ijson
 except ImportError as exc:
-    raise ImportError(
-        "Install ijson first: python -m pip install ijson"
-    ) from exc
+    raise ImportError("Install ijson first: python -m pip install ijson") from exc
 
 
-DEFAULT_VG_ROOT = Path("/net/tscratch/people/plgpiotrwojcik/vg")
+DEFAULT_VG_ROOT = Path("/net/scratch/hscra/plgrid/plgpiotrwojcik/vg")
 
 
 def build_default_image_transform(
@@ -112,13 +110,16 @@ def create_annotation_database(
     if database_path.is_file() and not rebuild:
         connection = sqlite3.connect(database_path)
         try:
-            has_descriptions = connection.execute(
-                """
+            has_descriptions = (
+                connection.execute(
+                    """
                 SELECT 1
                 FROM sqlite_master
                 WHERE type = 'table' AND name = 'descriptions'
                 """
-            ).fetchone() is not None
+                ).fetchone()
+                is not None
+            )
         finally:
             connection.close()
 
@@ -126,8 +127,7 @@ def create_annotation_database(
             return
 
         print(
-            "Existing annotation database has no descriptions table; "
-            "rebuilding it."
+            "Existing annotation database has no descriptions table; " "rebuilding it."
         )
 
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,7 +261,9 @@ def create_annotation_database(
                         as_int(record.get("y"), 0) or 0,
                         as_int(record.get("w"), 0) or 0,
                         as_int(record.get("h"), 0) or 0,
-                        json.dumps(clean_list(record.get("attributes")), ensure_ascii=False),
+                        json.dumps(
+                            clean_list(record.get("attributes")), ensure_ascii=False
+                        ),
                     )
                 )
                 attribute_rows.append(
@@ -410,9 +412,7 @@ def create_annotation_database(
             for number, image_record in enumerate(
                 stream_json_array(descriptions_path), start=1
             ):
-                image_id = as_int(
-                    image_record.get("image_id", image_record.get("id"))
-                )
+                image_id = as_int(image_record.get("image_id", image_record.get("id")))
                 if image_id is None:
                     continue
 
@@ -542,30 +542,15 @@ def build_relationship_positives(
     seen: set[tuple[int, str, str]] = set()
 
     for relationship in relationships:
-        subject_name = clean_text(
-            relationship.get("subject_name")
-        )
-        predicate = clean_text(
-            relationship.get("predicate")
-        )
-        object_name = clean_text(
-            relationship.get("object_name")
-        )
-        subject_id = as_int(
-            relationship.get("subject_id")
-        )
+        subject_name = clean_text(relationship.get("subject_name"))
+        predicate = clean_text(relationship.get("predicate"))
+        object_name = clean_text(relationship.get("object_name"))
+        subject_id = as_int(relationship.get("subject_id"))
 
-        if (
-            subject_id is None
-            or not subject_name
-            or not predicate
-            or not object_name
-        ):
+        if subject_id is None or not subject_name or not predicate or not object_name:
             continue
 
-        positive_text = clean_text(
-            f"{subject_name} {predicate} {object_name}"
-        )
+        positive_text = clean_text(f"{subject_name} {predicate} {object_name}")
 
         anchor_text = subject_name
 
@@ -582,9 +567,7 @@ def build_relationship_positives(
 
         positives.append(
             {
-                "relationship_id": as_int(
-                    relationship.get("relationship_id")
-                ),
+                "relationship_id": as_int(relationship.get("relationship_id")),
                 "object_id": subject_id,
                 "anchor_text": anchor_text,
                 "positive_text": positive_text,
@@ -711,9 +694,7 @@ class VisualGenomeSceneGraphDataset(Dataset):
         try:
             annotated_ids = {
                 row[0]
-                for row in connection.execute(
-                    "SELECT DISTINCT image_id FROM objects"
-                )
+                for row in connection.execute("SELECT DISTINCT image_id FROM objects")
             }
         finally:
             connection.close()
@@ -820,7 +801,7 @@ class VisualGenomeSceneGraphDataset(Dataset):
                         "object_name": object_name,
                     }
                 )
-            #if obj is not None:
+            # if obj is not None:
             #    obj["incoming_relationships"].append(
             #       {
             #            "relationship_id": relationship_id,
@@ -833,23 +814,25 @@ class VisualGenomeSceneGraphDataset(Dataset):
         return list(objects_by_id.values()), relationships
 
     def _load_descriptions(self, image_id: int) -> list[dict[str, Any]]:
-        rows = self._db().execute(
-            """
+        rows = (
+            self._db()
+            .execute(
+                """
             SELECT region_id, phrase, x, y, w, h
             FROM descriptions
             WHERE image_id = ?
             ORDER BY region_id
             """,
-            (image_id,),
-        ).fetchall()
+                (image_id,),
+            )
+            .fetchall()
+        )
 
         return [
             {
                 "region_id": region_id,
                 "phrase": phrase,
-                "bbox_xywh": [x, y, w, h]
-                if None not in (x, y, w, h)
-                else None,
+                "bbox_xywh": [x, y, w, h] if None not in (x, y, w, h) else None,
             }
             for region_id, phrase, x, y, w, h in rows
         ]
@@ -927,11 +910,7 @@ def scene_graph_collate_fn(
             f"Received element types: {image_types}."
         )
 
-    invalid_shapes = [
-        tuple(image.shape)
-        for image in raw_images
-        if image.ndim != 3
-    ]
+    invalid_shapes = [tuple(image.shape) for image in raw_images if image.ndim != 3]
     if invalid_shapes:
         raise ValueError(
             "Each image must have shape [C, H, W]. "
@@ -1023,19 +1002,11 @@ def scene_graph_collate_fn(
         "positive_triples": positive_triples,
         "negative_triples": negative_triples,
         "positive_images": [triple.image for triple in positive_triples],
-        "positive_anchor_texts": [
-            triple.anchor_text for triple in positive_triples
-        ],
-        "positive_texts": [
-            triple.positive_text for triple in positive_triples
-        ],
+        "positive_anchor_texts": [triple.anchor_text for triple in positive_triples],
+        "positive_texts": [triple.positive_text for triple in positive_triples],
         "negative_images": [triple.image for triple in negative_triples],
-        "negative_anchor_texts": [
-            triple.anchor_text for triple in negative_triples
-        ],
-        "negative_texts": [
-            triple.negative_text for triple in negative_triples
-        ],
+        "negative_anchor_texts": [triple.anchor_text for triple in negative_triples],
+        "negative_texts": [triple.negative_text for triple in negative_triples],
     }
 
 
