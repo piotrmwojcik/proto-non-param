@@ -3,7 +3,9 @@ from math import sqrt
 
 import open_clip
 import torch
-from dinov2.layers.block import Block, MemEffAttention
+import torch.nn.functional as F
+from dinov2.layers.attention import Attention
+from dinov2.layers.block import Block
 from dinov2.models.vision_transformer import (
     DinoVisionTransformer as Dinov2VisionTransformer,
 )
@@ -11,6 +13,48 @@ from einops import rearrange
 from torch import nn
 
 from .utils import append_blocks, block_expansion_dino
+
+
+class TorchSDPAttention(Attention):
+    """DINOv2 attention backed by PyTorch's memory-efficient SDPA kernels."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if attn_bias is not None:
+            raise ValueError(
+                "TorchSDPAttention does not support DINOv2 nested-tensor "
+                "attention biases"
+            )
+
+        batch_size, token_count, channels = x.shape
+        head_dim = channels // self.num_heads
+        qkv = self.qkv(x).reshape(
+            batch_size,
+            token_count,
+            3,
+            self.num_heads,
+            head_dim,
+        ).permute(2, 0, 3, 1, 4)
+        query, key, value = qkv.unbind(0)
+
+        dropout_p = self.attn_drop.p if self.training else 0.0
+        x = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            dropout_p=dropout_p,
+            scale=self.scale,
+        )
+        x = x.transpose(1, 2).reshape(
+            batch_size,
+            token_count,
+            channels,
+        )
+        x = self.proj(x)
+        return self.proj_drop(x)
 
 
 DINOV2_COMMON_KWARGS = {
@@ -23,7 +67,7 @@ DINOV2_COMMON_KWARGS = {
     "num_register_tokens": 4,
     "interpolate_antialias": True,
     "interpolate_offset": 0.0,
-    "block_fn": partial(Block, attn_class=MemEffAttention),
+    "block_fn": partial(Block, attn_class=TorchSDPAttention),
 }
 
 DINO_COMMON_KWARGS = {
