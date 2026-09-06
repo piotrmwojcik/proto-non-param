@@ -966,6 +966,7 @@ def scene_graph_collate_fn(
             )
 
     negative_triples: list[NegativeTriple] = []
+    retained_positive_triples: list[PositiveTriple] = []
     for positive in positive_triples:
         anchor_name = normalize_name(positive.anchor_text)
         candidates = [
@@ -974,10 +975,19 @@ def scene_graph_collate_fn(
             if candidate["normalized_text"] != anchor_name
         ]
 
-        # Deterministic truncation keeps DataLoader behavior reproducible.
-        # Shuffle the DataLoader to vary which objects share a batch.
+        # Keep a fixed number of negatives for every retained positive because
+        # the contrastive criterion reshapes them to [positives, negatives].
+        # Deterministically cycle a short candidate list rather than producing
+        # a ragged group. Shuffle the DataLoader to vary the batch object pool.
         if negatives_per_positive is not None:
-            candidates = candidates[:negatives_per_positive]
+            if negatives_per_positive > 0 and not candidates:
+                continue
+            candidates = [
+                candidates[index % len(candidates)]
+                for index in range(negatives_per_positive)
+            ]
+
+        retained_positive_triples.append(positive)
 
         for candidate in candidates:
             negative_triples.append(
@@ -991,6 +1001,8 @@ def scene_graph_collate_fn(
                     negative_object_id=candidate["object_id"],
                 )
             )
+
+    positive_triples = retained_positive_triples
 
     return {
         "image_id": [sample["image_id"] for sample in batch],
