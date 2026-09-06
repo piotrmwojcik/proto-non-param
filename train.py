@@ -684,6 +684,8 @@ def train(
                 ) from error
 
             optimizer.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
 
             autocast_context = (
                 torch.autocast(
@@ -696,34 +698,42 @@ def train(
 
             # This block must remain inside the DataLoader loop.
             with autocast_context:
-                positive_images = images.index_select(
-                    dim=0,
-                    index=positive_image_indices,
+                # Extract visual features once per unique loader image. A scene
+                # may produce many text triples; repeating the full image before
+                # DINOv2 would make self-attention memory scale with the number
+                # of triples rather than the number of unique images.
+                image_patch_tokens = model.encode_images(images)
+
+                positive_anchor_maps = (
+                    model.similarity_from_indexed_patch_tokens(
+                        image_patch_tokens,
+                        positive_image_indices,
+                        positive_anchor_embeddings,
+                    )
                 )
 
-                negative_images = images.index_select(
-                    dim=0,
-                    index=negative_image_indices,
+                positive_text_maps = (
+                    model.similarity_from_indexed_patch_tokens(
+                        image_patch_tokens,
+                        positive_image_indices,
+                        positive_text_embeddings,
+                    )
                 )
 
-                positive_anchor_maps = model(
-                    positive_images,
-                    positive_anchor_embeddings,
+                negative_anchor_maps = (
+                    model.similarity_from_indexed_patch_tokens(
+                        image_patch_tokens,
+                        negative_image_indices,
+                        negative_anchor_embeddings,
+                    )
                 )
 
-                positive_text_maps = model(
-                    positive_images,
-                    positive_text_embeddings,
-                )
-
-                negative_anchor_maps = model(
-                    negative_images,
-                    negative_anchor_embeddings,
-                )
-
-                negative_text_maps = model(
-                    negative_images,
-                    negative_text_embeddings,
+                negative_text_maps = (
+                    model.similarity_from_indexed_patch_tokens(
+                        image_patch_tokens,
+                        negative_image_indices,
+                        negative_text_embeddings,
+                    )
                 )
 
                 validate_similarity_map(
@@ -822,6 +832,19 @@ def train(
 
             progress.set_postfix(**postfix)
 
+            if device.type == "cuda":
+                print(
+                    f"step={global_step}, images={tuple(images.shape)}, "
+                    f"positives={num_positive_pairs}, "
+                    f"negatives={num_negative_pairs}, "
+                    "allocated="
+                    f"{torch.cuda.memory_allocated(device) / 1024**3:.2f} "
+                    "GiB, peak="
+                    f"{torch.cuda.max_memory_allocated(device) / 1024**3:.2f} "
+                    "GiB",
+                    flush=True,
+                )
+
             wandb_metrics = {
                 "train/loss": loss_value,
                 "train/loss_avg": average_loss,
@@ -888,6 +911,18 @@ def train(
                     flush=True,
                 )
                 return
+
+            # Do not retain large pair maps or their autograd graph until the
+            # next iteration begins evaluating the backbone.
+            del (
+                image_patch_tokens,
+                positive_anchor_maps,
+                positive_text_maps,
+                negative_anchor_maps,
+                negative_text_maps,
+                total_loss,
+                loss_dict,
+            )
 
         # Save one checkpoint after each completed epoch.
         if checkpoint_path is not None:
