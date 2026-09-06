@@ -14,8 +14,8 @@
 
 # Slurm does not expand shell variables in #SBATCH directives. These paths are
 # relative to the directory from which sbatch is invoked.
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
 set -euo pipefail
 
@@ -27,6 +27,8 @@ PROJECT_DIR="${HOME}/proto-non-param"
 TRAIN_SCRIPT="${PROJECT_DIR}/train.py"
 
 SCRATCH_ROOT="${SCRATCH}"
+CONDA_ROOT="${SCRATCH_ROOT}/miniforge3-aarch64"
+CONDA_ENV="${SCRATCH_ROOT}/conda-envs/open_clip-gh200"
 
 VG_ROOT="${SCRATCH_ROOT}/vg"
 
@@ -51,8 +53,8 @@ mkdir -p \
 # Conda
 ###############################################################################
 
-eval "$("${HOME}/miniconda3/bin/python" -m conda shell.bash hook)"
-conda activate "${SCRATCH}/conda-envs/open_clip"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
 
 ###############################################################################
 # Environment
@@ -61,6 +63,7 @@ conda activate "${SCRATCH}/conda-envs/open_clip"
 cd "${PROJECT_DIR}"
 
 export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
