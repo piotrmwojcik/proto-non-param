@@ -143,7 +143,6 @@ nvidia-smi
 # Training
 ###############################################################################
 
-srun --unbuffered \
 python -u "${TRAIN_SCRIPT}" \
     --backbone dinov2_vitb14 \
     --backbone-module modeling.backbone \
