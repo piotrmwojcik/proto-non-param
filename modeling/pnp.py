@@ -386,6 +386,118 @@ class PNP(nn.Module):
 
         return similarity_map
 
+    def similarity_from_indexed_patch_tokens(
+        self,
+        patch_tokens: torch.Tensor,
+        image_indices: torch.Tensor,
+        word_embedding: torch.Tensor,
+        *,
+        spatial_size: Optional[tuple[int, int]] = None,
+        output_size: Optional[tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        """Compute pair maps without copying patch tokens for every text."""
+        if patch_tokens.ndim != 3:
+            raise ValueError(
+                "patch_tokens must have shape [B, N, D], "
+                f"but received {tuple(patch_tokens.shape)}"
+            )
+        if patch_tokens.shape[-1] != self.visual_dim:
+            raise ValueError(
+                f"Expected patch-token dimension {self.visual_dim}, "
+                f"but received {patch_tokens.shape[-1]}"
+            )
+        if image_indices.ndim != 1:
+            raise ValueError(
+                "image_indices must have shape [P], "
+                f"but received {tuple(image_indices.shape)}"
+            )
+
+        pair_count = image_indices.numel()
+        word_embedding = self._prepare_word_embedding(
+            word_embedding,
+            batch_size=pair_count,
+        )
+        if word_embedding.shape[-1] != self.text_dim:
+            raise ValueError(
+                f"Expected word embedding dimension {self.text_dim}, "
+                f"but received {word_embedding.shape[-1]}"
+            )
+
+        image_indices = image_indices.to(
+            device=patch_tokens.device,
+            dtype=torch.long,
+        )
+        if pair_count == 0:
+            raise ValueError("At least one image-text pair is required")
+        if (
+            image_indices.min().item() < 0
+            or image_indices.max().item() >= patch_tokens.shape[0]
+        ):
+            raise IndexError(
+                "image_indices contains an index outside the patch-token batch"
+            )
+
+        normalized_patches = F.normalize(patch_tokens, p=2, dim=-1)
+        word_embedding = word_embedding.to(
+            device=patch_tokens.device,
+            dtype=patch_tokens.dtype,
+        )
+        projected_word = F.normalize(
+            self.text_projection_head(word_embedding),
+            p=2,
+            dim=-1,
+        )
+
+        # Group prompts by source image. Each matrix multiplication produces
+        # [prompts_for_image, patches], avoiding a [P, N, D] feature copy.
+        order = image_indices.argsort(stable=True)
+        sorted_indices = image_indices.index_select(0, order)
+        sorted_words = projected_word.index_select(0, order)
+        unique_indices, counts = torch.unique_consecutive(
+            sorted_indices,
+            return_counts=True,
+        )
+        chunks: list[torch.Tensor] = []
+        start = 0
+        for image_index, count in zip(
+            unique_indices.tolist(),
+            counts.tolist(),
+        ):
+            end = start + count
+            chunks.append(
+                sorted_words[start:end]
+                @ normalized_patches[image_index].transpose(0, 1)
+            )
+            start = end
+
+        sorted_similarity = torch.cat(chunks, dim=0)
+        inverse_order = torch.empty_like(order)
+        inverse_order[order] = torch.arange(
+            pair_count,
+            device=order.device,
+        )
+        patch_similarity = sorted_similarity.index_select(0, inverse_order)
+        patch_similarity = patch_similarity / self.temperature
+
+        patch_height, patch_width = self._resolve_spatial_size(
+            patch_tokens.shape[1],
+            spatial_size,
+        )
+        similarity_map = patch_similarity.reshape(
+            pair_count,
+            1,
+            patch_height,
+            patch_width,
+        )
+        if output_size is not None:
+            similarity_map = F.interpolate(
+                similarity_map,
+                size=output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return similarity_map
+
 
 class PCPCriterion(nn.Module):
     """
