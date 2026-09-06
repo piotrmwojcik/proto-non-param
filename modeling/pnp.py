@@ -281,13 +281,43 @@ class PNP(nn.Module):
             Similarity map with shape [B, 1, patch_height, patch_width], or
             [B, 1, output_height, output_width] when output_size is given.
         """
+        patch_tokens = self.encode_images(images)
+        return self.similarity_from_patch_tokens(
+            patch_tokens,
+            word_embedding,
+            spatial_size=spatial_size,
+            output_size=output_size,
+        )
+
+    def encode_images(self, images: torch.Tensor) -> torch.Tensor:
+        """Extract patch tokens once for reuse with multiple text prompts."""
         if images.ndim != 4:
             raise ValueError(
                 "images must have shape [B, 3, H, W], "
                 f"but received {tuple(images.shape)}"
             )
+        return self._extract_patch_tokens(images)
 
-        patch_tokens = self._extract_patch_tokens(images)
+    def similarity_from_patch_tokens(
+        self,
+        patch_tokens: torch.Tensor,
+        word_embedding: torch.Tensor,
+        *,
+        spatial_size: Optional[tuple[int, int]] = None,
+        output_size: Optional[tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        """Compute image-text similarity maps from precomputed patch tokens."""
+        if patch_tokens.ndim != 3:
+            raise ValueError(
+                "patch_tokens must have shape [B, N, D], "
+                f"but received {tuple(patch_tokens.shape)}"
+            )
+        if patch_tokens.shape[-1] != self.visual_dim:
+            raise ValueError(
+                f"Expected patch-token dimension {self.visual_dim}, "
+                f"but received {patch_tokens.shape[-1]}"
+            )
+
         batch_size, number_of_patches, _ = patch_tokens.shape
 
         word_embedding = self._prepare_word_embedding(
