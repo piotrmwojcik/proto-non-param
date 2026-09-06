@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pnp_vg
 ##SBATCH --account=plgunhype-gpu-a100
-#SBATCH --account=plgtabcfs-gpu-a100
+#SBATCH --account=plgtabcfs-gpu-gh200
 #SBATCH --partition=plgrid-gpu-gh200
 
 
