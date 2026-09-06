@@ -76,7 +76,9 @@ export HF_HOME="${HF_CACHE}"
 export HUGGINGFACE_HUB_CACHE="${HF_CACHE}/hub"
 export TRANSFORMERS_CACHE="${HF_CACHE}/transformers"
 
-export WANDB_ENTITY="piotrmwojcik"
+# Use the account and default entity stored by `wandb login` in ~/.netrc.
+unset WANDB_API_KEY
+unset WANDB_ENTITY
 export WANDB_PROJECT="proto-non-param"
 export WANDB_DIR="${WANDB_DIR}"
 
