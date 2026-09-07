@@ -1,10 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=pnp_vg
-##SBATCH --account=plgunhype-gpu-a100
-##SBATCH --account=plgtabcfs-gpu-gh200
-#SBATCH --partition=plgrid-gpu-gh200
-
-
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -23,12 +18,27 @@ set -euo pipefail
 # Paths
 ###############################################################################
 
+TRAIN_CLUSTER="${TRAIN_CLUSTER:?Submit this job with submit_train_VG.sh}"
+
+case "${TRAIN_CLUSTER}" in
+    helios)
+        SCRATCH_ROOT="${SCRATCH:?SCRATCH is not set on Helios}"
+        CONDA_ROOT="${SCRATCH_ROOT}/miniforge3-aarch64"
+        CONDA_ENV="${SCRATCH_ROOT}/conda-envs/open_clip-gh200"
+        ;;
+    athena)
+        SCRATCH_ROOT="/net/tscratch/people/${USER}"
+        CONDA_ROOT="${HOME}/miniconda3"
+        CONDA_ENV="${SCRATCH_ROOT}/conda-envs/open_clip"
+        ;;
+    *)
+        echo "Unsupported TRAIN_CLUSTER=${TRAIN_CLUSTER@Q}" >&2
+        exit 2
+        ;;
+esac
+
 PROJECT_DIR="${HOME}/proto-non-param"
 TRAIN_SCRIPT="${PROJECT_DIR}/train.py"
-
-SCRATCH_ROOT="${SCRATCH}"
-CONDA_ROOT="${SCRATCH_ROOT}/miniforge3-aarch64"
-CONDA_ENV="${SCRATCH_ROOT}/conda-envs/open_clip-gh200"
 
 VG_ROOT="${SCRATCH_ROOT}/vg"
 
@@ -53,6 +63,8 @@ mkdir -p \
 # Conda
 ###############################################################################
 
+[[ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]
+[[ -d "${CONDA_ENV}" ]]
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 
@@ -88,6 +100,7 @@ export WANDB_DIR="${WANDB_DIR}"
 
 echo "============================================================"
 echo "Job ID        : ${SLURM_JOB_ID}"
+echo "Cluster       : ${TRAIN_CLUSTER}"
 echo "Node          : $(hostname)"
 echo "Date          : $(date)"
 echo "Python        : $(command -v python)"
