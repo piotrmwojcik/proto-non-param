@@ -491,6 +491,7 @@ def train(
     max_steps: int = 0,
 ) -> None:
     model.train()
+    model.backbone.eval()
 
     amp_enabled = use_amp and device.type == "cuda"
     scaler = torch.amp.GradScaler(
@@ -882,6 +883,7 @@ def train(
                 )
 
                 model.train()
+                model.backbone.eval()
 
             if max_steps > 0 and global_step >= max_steps:
                 if checkpoint_path is not None:
@@ -1153,11 +1155,10 @@ def main() -> None:
             )
             args.text_dim = text_encoder.embedding_dim
 
-    # The OpenCLIP encoder supplies fixed target embeddings. Only PNP is
-    # optimised by this training loop.
-
-
+    # Both pretrained encoders stay frozen; only the text projection head trains.
     backbone, _ = build_backbone(args)
+    backbone.requires_grad_(False)
+    backbone.eval()
 
     # Replace these values with the actual model construction used by
     # your project.
@@ -1181,14 +1182,6 @@ def main() -> None:
             {
                 "params": model.text_projection_head.parameters(),
                 "lr": 1e-4,
-            },
-            {
-                "params": [
-                    parameter
-                    for parameter in model.backbone.parameters()
-                    if parameter.requires_grad
-                ],
-                "lr": 1e-5,
             },
         ],
         weight_decay=1e-4,
