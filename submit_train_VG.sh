@@ -4,14 +4,14 @@ set -euo pipefail
 
 CLUSTER="${1:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ACCOUNT_ARGS=()
 
 case "${CLUSTER}" in
     helios)
-        ACCOUNT="plgtabcfs-gpu-gh200"
         PARTITION="plgrid-gpu-gh200"
         ;;
     athena)
-        ACCOUNT="plgtabcfs-gpu-a100"
+        ACCOUNT_ARGS=(--account=plgtabcfs-gpu-a100)
         PARTITION="plgrid-gpu-a100"
         ;;
     *)
@@ -24,7 +24,7 @@ mkdir -p "${SCRIPT_DIR}/logs"
 cd "${SCRIPT_DIR}"
 
 exec sbatch \
-    --account="${ACCOUNT}" \
+    "${ACCOUNT_ARGS[@]}" \
     --partition="${PARTITION}" \
     --export="ALL,TRAIN_CLUSTER=${CLUSTER}" \
     "${SCRIPT_DIR}/train_VG.sbatch"
