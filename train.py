@@ -552,10 +552,12 @@ def train(
                 num_negative_pairs // num_positive_pairs
             )
 
-            if visualize_every_steps > 0 and len(visualization_batches) < visualize_samples:
+            if visualize_every_steps > 0 and visualize_samples > 0:
                 examples = select_visualization_examples(batch, visualize_images_per_batch)
                 if examples:
                     visualization_batches.append(examples)
+                    # Show the most recent training batches at each logging step.
+                    visualization_batches = visualization_batches[-visualize_samples:]
 
             # OpenCLIP is frozen and only generates text embeddings.
             with torch.no_grad():
@@ -1302,7 +1304,7 @@ def visualize_heatmaps(
     images_per_batch: int = 4,
     global_step: int | None = None,
 ) -> None:
-    """Compare fixed training prompts on their anchor image and target box."""
+    """Compare recent training prompts on their anchor image and target box."""
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
@@ -1338,12 +1340,15 @@ def visualize_heatmaps(
                     heatmaps = F.interpolate(
                         maps, size=img.shape[-2:], mode="bilinear", align_corners=False,
                     )[:, 0].cpu()
-                    # Shared absolute scale: map values are patch cosine / temperature.
+                    # Preserve raw ranges, then stretch each map for spatial visibility.
                     heatmaps = heatmaps * model.temperature
+                    minima = heatmaps.amin(dim=(-2, -1), keepdim=True)
+                    maxima = heatmaps.amax(dim=(-2, -1), keepdim=True)
+                    heatmaps = (heatmaps - minima) / (maxima - minima).clamp_min(1e-8)
                     columns = 3
                     rows = (len(prompts) + 1 + columns - 1) // columns
                     fig, axes = plt.subplots(rows, columns, figsize=(15, 4 * rows), squeeze=False)
-                    labels = ["Anchor", "Positive"] + [
+                    labels = ["Anchor object", "Full positive phrase"] + [
                         f"Negative {i + 1}" for i in range(len(prompts) - 2)
                     ]
                     for index, ax in enumerate(axes.flat):
@@ -1355,11 +1360,13 @@ def visualize_heatmaps(
                             ax.set_title("Original — target box")
                         else:
                             prompt_index = index - 1
-                            overlay = ax.imshow(heatmaps[prompt_index], cmap="coolwarm",
-                                                vmin=-1, vmax=1, alpha=0.5)
+                            overlay = ax.imshow(heatmaps[prompt_index], cmap="jet",
+                                                vmin=0, vmax=1, alpha=0.65)
                             ax.set_title(
                                 f"{labels[prompt_index]}: {prompts[prompt_index]}\n"
-                                f"Map cosine to anchor: {similarity[prompt_index]:.3f}",
+                                f"Map cosine to anchor: {similarity[prompt_index]:.3f}\n"
+                                f"Raw patch cosine: {minima[prompt_index].item():.4f}"
+                                f" to {maxima[prompt_index].item():.4f}",
                                 wrap=True,
                             )
                         x, y, w, h = example["box"]
@@ -1372,7 +1379,7 @@ def visualize_heatmaps(
                     fig.tight_layout(rect=(0, 0.06, 1, 0.95))
                     color_axis = fig.add_axes((0.3, 0.025, 0.4, 0.015))
                     fig.colorbar(overlay, cax=color_axis, orientation="horizontal",
-                                 label="Patch–text cosine (shared scale)")
+                                 label="Relative response per panel (0 = minimum, 1 = maximum)")
                     logged_images.append(wandb.Image(fig, caption=caption))
                     plt.close(fig)
                 kwargs = {}
