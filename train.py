@@ -513,6 +513,7 @@ def train(
         )
 
     global_step = 0
+    visualization_batches = []
 
     for epoch in range(epochs):
         progress = tqdm(
@@ -550,6 +551,11 @@ def train(
             negatives_per_positive = (
                 num_negative_pairs // num_positive_pairs
             )
+
+            if visualize_every_steps > 0 and len(visualization_batches) < visualize_samples:
+                examples = select_visualization_examples(batch, visualize_images_per_batch)
+                if examples:
+                    visualization_batches.append(examples)
 
             # OpenCLIP is frozen and only generates text embeddings.
             with torch.no_grad():
@@ -875,7 +881,7 @@ def train(
                 visualize_heatmaps(
                     model=model,
                     text_encoder=text_encoder,
-                    dataloader=dataloader,
+                    example_batches=visualization_batches,
                     device=device,
                     encode_batch_size=encode_batch_size,
                     num_samples=visualize_samples,
@@ -1247,159 +1253,137 @@ def _encode_descriptions(
     )
 
 
+def select_visualization_examples(batch: dict[str, Any], count: int) -> list[dict[str, Any]]:
+    """Keep one actual loss pair per image, including its exact explicit negatives."""
+    positives = batch["positive_triples"]
+    if not positives:
+        return []
+    negatives_per_positive = len(batch["negative_triples"]) // len(positives)
+    examples = []
+    seen = set()
+    for pair_index, triple in enumerate(positives):
+        if len(examples) >= count:
+            break
+        if triple.image_id in seen:
+            continue
+        image_index = batch["image_id"].index(triple.image_id)
+        obj = next(obj for obj in batch["objects"][image_index]
+                   if obj["object_id"] == triple.object_id)
+        original_size = batch["original_size"][image_index]
+        if original_size is None:
+            raise ValueError("Heatmap boxes require the original image size.")
+        width, height = original_size
+        output_height, output_width = batch["image"][image_index].shape[-2:]
+        x, y, w, h = obj["bbox_xywh"]
+        # The default dataset transform resizes the whole image without cropping.
+        box = (x * output_width / width, y * output_height / height,
+               w * output_width / width, h * output_height / height)
+        start = pair_index * negatives_per_positive
+        prompts = [batch["positive_anchor_texts"][pair_index],
+                   batch["positive_texts"][pair_index]]
+        prompts.extend(batch["negative_texts"][start:start + negatives_per_positive])
+        examples.append({
+            "image": batch["image"][image_index].detach().cpu().clone(),
+            "image_id": triple.image_id, "object_id": triple.object_id,
+            "box": box, "prompts": prompts,
+        })
+        seen.add(triple.image_id)
+    return examples
+
+
 def visualize_heatmaps(
     *,
     model: PNP,
     text_encoder: TextEncoder,
-    dataloader: DataLoader,
+    example_batches: list[list[dict[str, Any]]],
     device: torch.device,
     encode_batch_size: int = 32,
     num_samples: int = 1,
     images_per_batch: int = 4,
     global_step: int | None = None,
 ) -> None:
-    """Encode descriptions, generate PNP heatmaps, and log them to W&B."""
+    """Compare fixed training prompts on their anchor image and target box."""
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
 
     if wandb.run is None:
-        raise RuntimeError(
-            "visualize_heatmaps requires an active wandb run."
-        )
+        raise RuntimeError("visualize_heatmaps requires an active wandb run.")
 
-    was_training = model.training
+    training_modes = [(module, module.training) for module in model.modules()]
     model.eval()
-    iterator = iter(dataloader)
-
     try:
         with torch.no_grad():
-            for sample_idx in range(num_samples):
-                try:
-                    batch = next(iterator)
-                except StopIteration:
-                    iterator = iter(dataloader)
-                    batch = next(iterator)
-
-                if not isinstance(batch, dict) or "descriptions" not in batch:
-                    raise KeyError(
-                        "scene_graph_collate_fn must return a dictionary "
-                        "containing a 'descriptions' entry."
-                    )
-
-                images = get_images(batch).to(
-                    device=device,
-                    non_blocking=True,
-                )
-                descriptions = [
-                    _description_to_text(value)
-                    for value in batch["descriptions"]
-                ]
-
-                if len(descriptions) != images.shape[0]:
-                    raise ValueError(
-                        "Description count does not match image batch size: "
-                        f"{len(descriptions)} versus {images.shape[0]}."
-                    )
-
-                text_embeddings = _encode_descriptions(
-                    text_encoder=text_encoder,
-                    descriptions=descriptions,
-                    encode_batch_size=encode_batch_size,
-                )
-                text_embeddings = F.normalize(
-                    text_embeddings.float(),
-                    dim=-1,
-                )
-                text_embeddings = prepare_embeddings(
-                    text_embeddings,
-                    device=device,
-                    dtype=images.dtype,
-                )
-
-                autocast_context = (
-                    torch.autocast(
-                        device_type="cuda",
-                        dtype=torch.float16,
-                    )
-                    if device.type == "cuda"
-                    else nullcontext()
-                )
-                with autocast_context:
-                    feature_maps = model(images, text_embeddings)
-
+            for sample_idx, examples in enumerate(example_batches[:num_samples]):
                 logged_images = []
-                count = min(images.shape[0], images_per_batch)
-
-                for img_idx in range(count):
-                    img = images[img_idx].detach().float().cpu()
-                    heatmap = feature_maps[
-                        img_idx, 0
-                    ].detach().float().cpu()
-
-                    img = (img - img.min()) / (
-                        img.max() - img.min() + 1e-8
-                    )
-                    heatmap = F.interpolate(
-                        heatmap[None, None],
-                        size=img.shape[-2:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )[0, 0]
-                    heatmap = (heatmap - heatmap.min()) / (
-                        heatmap.max() - heatmap.min() + 1e-8
-                    )
-
-                    display_image = (
-                        img.permute(1, 2, 0)
-                        if img.shape[0] == 3
-                        else img.squeeze()
-                    )
-
-                    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-                    axes[0].imshow(
-                        display_image,
-                        cmap=None if img.shape[0] == 3 else "gray",
-                    )
-                    axes[0].set_title("Original image")
-                    axes[0].axis("off")
-
-                    axes[1].imshow(
-                        display_image,
-                        cmap=None if img.shape[0] == 3 else "gray",
-                    )
-                    axes[1].imshow(heatmap, cmap="jet", alpha=0.5)
-                    axes[1].set_title(
-                        descriptions[img_idx],
-                        wrap=True,
-                    )
-                    axes[1].axis("off")
-                    fig.tight_layout()
-
-                    logged_images.append(
-                        wandb.Image(
-                            fig,
-                            caption=descriptions[img_idx],
-                        )
-                    )
+                for example in examples[:images_per_batch]:
+                    images = example["image"].unsqueeze(0).to(device)
+                    prompts = example["prompts"]
+                    embeddings = _encode_texts(
+                        text_encoder=text_encoder, texts=prompts,
+                        encode_batch_size=encode_batch_size,
+                    ).to(device=device, dtype=images.dtype)
+                    tokens = model.encode_images(images)
+                    maps = model.similarity_from_indexed_patch_tokens(
+                        tokens, torch.zeros(len(prompts), dtype=torch.long, device=device),
+                        embeddings,
+                    ).float()
+                    # Undo the dataset's ImageNet normalization for display.
+                    img = example["image"].float()
+                    mean = img.new_tensor([0.485, 0.456, 0.406])[:, None, None]
+                    std = img.new_tensor([0.229, 0.224, 0.225])[:, None, None]
+                    display = (img * std + mean).clamp(0, 1).permute(1, 2, 0)
+                    similarity = F.cosine_similarity(
+                        maps[0].flatten()[None], maps.flatten(start_dim=1), dim=1,
+                    ).cpu()
+                    heatmaps = F.interpolate(
+                        maps, size=img.shape[-2:], mode="bilinear", align_corners=False,
+                    )[:, 0].cpu()
+                    # Shared absolute scale: map values are patch cosine / temperature.
+                    heatmaps = heatmaps * model.temperature
+                    columns = 3
+                    rows = (len(prompts) + 1 + columns - 1) // columns
+                    fig, axes = plt.subplots(rows, columns, figsize=(15, 4 * rows), squeeze=False)
+                    labels = ["Anchor", "Positive"] + [
+                        f"Negative {i + 1}" for i in range(len(prompts) - 2)
+                    ]
+                    for index, ax in enumerate(axes.flat):
+                        ax.axis("off")
+                        if index > len(prompts):
+                            continue
+                        ax.imshow(display)
+                        if index == 0:
+                            ax.set_title("Original — target box")
+                        else:
+                            prompt_index = index - 1
+                            overlay = ax.imshow(heatmaps[prompt_index], cmap="coolwarm",
+                                                vmin=-1, vmax=1, alpha=0.5)
+                            ax.set_title(
+                                f"{labels[prompt_index]}: {prompts[prompt_index]}\n"
+                                f"Map cosine to anchor: {similarity[prompt_index]:.3f}",
+                                wrap=True,
+                            )
+                        x, y, w, h = example["box"]
+                        ax.add_patch(Rectangle((x, y), w, h, fill=False,
+                                               edgecolor="lime", linewidth=2))
+                    caption = (f"image={example['image_id']}, object={example['object_id']} | "
+                               + " | ".join(f"{label}: {prompt}" for label, prompt in zip(labels, prompts)))
+                    fig.suptitle(f"Image {example['image_id']} · target object {example['object_id']}"
+                                 " · green box = anchor target")
+                    fig.tight_layout(rect=(0, 0.06, 1, 0.95))
+                    color_axis = fig.add_axes((0.3, 0.025, 0.4, 0.015))
+                    fig.colorbar(overlay, cax=color_axis, orientation="horizontal",
+                                 label="Patch–text cosine (shared scale)")
+                    logged_images.append(wandb.Image(fig, caption=caption))
                     plt.close(fig)
-
-                log_kwargs = {}
+                kwargs = {}
                 if global_step is not None:
-                    log_kwargs["step"] = global_step
-                    log_kwargs["commit"] = sample_idx == num_samples - 1
-
-                wandb.log(
-                    {
-                        f"heatmaps/sample_{sample_idx}": logged_images,
-                        "heatmaps/global_step": (
-                            global_step
-                            if global_step is not None
-                            else sample_idx
-                        ),
-                    },
-                    **log_kwargs,
-                )
+                    kwargs = {"step": global_step,
+                              "commit": sample_idx == min(len(example_batches), num_samples) - 1}
+                wandb.log({f"heatmaps/sample_{sample_idx}": logged_images,
+                           "heatmaps/global_step": global_step}, **kwargs)
     finally:
-        model.train(was_training)
+        for module, training in training_modes:
+            module.training = training
 
 
 if __name__ == "__main__":

@@ -840,6 +840,7 @@ class VisualGenomeSceneGraphDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         image_id = self.image_ids[index]
         image, image_location = self._load_image(image_id)
+        original_size = image.size
         if self.transform is not None:
             image = self.transform(image)
 
@@ -851,6 +852,7 @@ class VisualGenomeSceneGraphDataset(Dataset):
             "image_id": image_id,
             "image": image,
             "image_location": image_location,
+            "original_size": original_size,
             "objects": objects,
             "relationships": relationships,
             "descriptions": descriptions,
@@ -1008,6 +1010,7 @@ def scene_graph_collate_fn(
         "image_id": [sample["image_id"] for sample in batch],
         "image": images,
         "image_location": [sample["image_location"] for sample in batch],
+        "original_size": [sample.get("original_size") for sample in batch],
         "objects": [sample["objects"] for sample in batch],
         "relationships": [sample["relationships"] for sample in batch],
         "descriptions": [sample["descriptions"] for sample in batch],
