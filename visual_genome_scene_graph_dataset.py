@@ -1045,18 +1045,19 @@ if __name__ == "__main__":
         print(f"Positive triples: {len(batch['positive_triples'])}")
         print(f"Negative triples: {len(batch['negative_triples'])}")
 
-        print("\nPositive examples:")
-        for triple in batch["positive_triples"][:10]:
-            print(
-                f"  image={triple.image_id}, "
-                f"{triple.anchor_text!r} <-> {triple.positive_text!r}"
-            )
-
-        print("\nNegative examples:")
-        for triple in batch["negative_triples"][:10]:
-            print(
-                f"  image={triple.image_id}, "
-                f"{triple.anchor_text!r} <-> {triple.negative_text!r}"
-            )
+        # These are the exact text lists consumed by train.encode_pair_strings.
+        # Each text produces a heatmap that the loss flattens and normalizes.
+        text_groups = (
+            ("positive_anchor_normalized", "positive_anchor_texts", "positive_triples"),
+            ("positive_text_normalized", "positive_texts", "positive_triples"),
+            ("negative_anchor_normalized", "negative_anchor_texts", "negative_triples"),
+            ("negative_text_normalized", "negative_texts", "negative_triples"),
+        )
+        for loss_name, text_key, triple_key in text_groups:
+            print(f"\n{loss_name} <- {text_key}:")
+            for index, (text, triple) in enumerate(
+                zip(batch[text_key], batch[triple_key])
+            ):
+                print(f"  [{index}] image={triple.image_id}, text={text!r}")
     finally:
         dataset.close()
