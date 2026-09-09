@@ -492,6 +492,7 @@ def train(
 ) -> None:
     model.train()
     model.backbone.eval()
+    model.backbone.dino.blocks[-1].train()
 
     amp_enabled = use_amp and device.type == "cuda"
     scaler = torch.amp.GradScaler(
@@ -884,6 +885,7 @@ def train(
 
                 model.train()
                 model.backbone.eval()
+                model.backbone.dino.blocks[-1].train()
 
             if max_steps > 0 and global_step >= max_steps:
                 if checkpoint_path is not None:
@@ -1155,9 +1157,10 @@ def main() -> None:
             )
             args.text_dim = text_encoder.embedding_dim
 
-    # Both pretrained encoders stay frozen; only the text projection head trains.
+    # Train only the final DINO block and the text projection head.
     backbone, _ = build_backbone(args)
     backbone.requires_grad_(False)
+    backbone.dino.blocks[-1].requires_grad_(True)
     backbone.eval()
 
     # Replace these values with the actual model construction used by
@@ -1182,6 +1185,10 @@ def main() -> None:
             {
                 "params": model.text_projection_head.parameters(),
                 "lr": 1e-4,
+            },
+            {
+                "params": model.backbone.dino.blocks[-1].parameters(),
+                "lr": 1e-5,
             },
         ],
         weight_decay=1e-4,
