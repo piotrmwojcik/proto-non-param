@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pnp_vg
+#SBATCH --partition=plgrid-gpu-gh200
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
