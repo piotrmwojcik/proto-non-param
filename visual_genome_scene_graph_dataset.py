@@ -28,7 +28,7 @@ except ImportError as exc:
     raise ImportError("Install ijson first: python -m pip install ijson") from exc
 
 
-DEFAULT_VG_ROOT = Path("/net/scratch/hscra/plgrid/plgpiotrwojcik/vg")
+DEFAULT_VG_ROOT = Path("/net/tscratch/people/plgpiotrwojcik")
 
 
 def build_default_image_transform(
@@ -1047,6 +1047,17 @@ if __name__ == "__main__":
         print(f"Images: {len(batch['image_id'])}")
         print(f"Positive triples: {len(batch['positive_triples'])}")
         print(f"Negative triples: {len(batch['negative_triples'])}")
+
+        print("\nDescriptions:")
+        for image_id, descriptions in zip(batch["image_id"], batch["descriptions"]):
+            print(f"  image={image_id}:")
+            if not descriptions:
+                print("    (no descriptions)")
+            for description in descriptions:
+                print(
+                    f"    region={description['region_id']}, "
+                    f"text={description['phrase']!r}"
+                )
 
         # These are the exact text lists consumed by train.encode_pair_strings.
         # Each text produces a heatmap that the loss flattens and normalizes.
