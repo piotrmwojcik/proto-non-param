@@ -1043,6 +1043,18 @@ if __name__ == "__main__":
     )
 
     try:
+        print("Collecting anchor words from all dataset images...")
+        anchor_words: set[str] = set()
+        for image_id in dataset.image_ids:
+            objects, relationships = dataset._load_scene_graph(image_id)
+            anchor_words.update(
+                record["anchor_text"]
+                for record in build_positive_records(objects, relationships)
+            )
+        print(f"\nAll anchor words ({len(anchor_words):,} unique):")
+        for anchor_word in sorted(anchor_words, key=str.casefold):
+            print(f"  {anchor_word}")
+
         batch = next(iter(dataloader))
         print(f"Images: {len(batch['image_id'])}")
         print(f"Positive triples: {len(batch['positive_triples'])}")
